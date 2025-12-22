@@ -75,7 +75,25 @@ def quantize_int4(model_path: Path, output_path: Path, block_size: int = 32,
 
     print(f"Saving to {output_path}...")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    quantizer.model.save_model_to_file(str(output_path), use_external_data_format=True)
+
+    # Get the quantized model and save with onnx.save_model for compact external data
+    # The quantizer's save_model_to_file can create bloated external data files
+    quantized_model = quantizer.model.model
+
+    # Remove any existing external data file to avoid appending
+    external_data_path = output_path.parent / (output_path.stem + ".onnx_data")
+    if external_data_path.exists():
+        external_data_path.unlink()
+
+    onnx.save_model(
+        quantized_model,
+        str(output_path),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=output_path.stem + ".onnx_data",
+        size_threshold=1024,  # Keep small tensors inline for ONNX Runtime compatibility
+        convert_attribute=False,
+    )
 
     return output_path
 

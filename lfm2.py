@@ -459,11 +459,12 @@ class LFM2Builder:
                              self.weights["model.embedding_norm.weight"])
         normed = self.make_layernorm(hidden_state, "model.embedding_norm.weight", "final_norm")
 
-        # LM head (tied with embeddings)
-        lm_weight = self.weights.get("lm_head.weight", self.weights["model.embed_tokens.weight"])
-        self.add_initializer("lm_head.weight", lm_weight.T)
+        # LM head with tied embeddings - use Transpose to share weights
+        # This reuses model.embed_tokens.weight instead of storing a separate copy
+        self.make_node("Transpose", ["model.embed_tokens.weight"], ["lm_head.weight_transposed"],
+                       perm=[1, 0])
 
-        return self.make_matmul(normed, "lm_head.weight", "logits")
+        return self.make_matmul(normed, "lm_head.weight_transposed", "logits")
 
     def load_weights(self, model_path: str):
         """Load weights from HuggingFace model."""
@@ -554,6 +555,12 @@ def export_model(model_path: str, output_dir: str):
     os.makedirs(onnx_dir, exist_ok=True)
 
     output_path = os.path.join(onnx_dir, "model.onnx")
+
+    # Remove existing external data file to avoid appending
+    external_data_path = os.path.join(onnx_dir, "model.onnx_data")
+    if os.path.exists(external_data_path):
+        os.remove(external_data_path)
+
     onnx.save_model(model, output_path, save_as_external_data=True,
                     all_tensors_to_one_file=True, location="model.onnx_data")
 
