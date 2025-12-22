@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
-Compare PyTorch models with Builder Q4 and Community Q4 quantized versions.
+Verify all LFM2 ONNX Q4 models against PyTorch.
 
-Identifies which quantization approach produces models closer to the original.
+Compares Builder Q4 and Community Q4 quantized versions to identify which
+produces outputs closer to the original PyTorch model.
 
 Usage:
-    python compare_q4.py
-    python compare_q4.py --models 350M 1.2B
+    python verify_all.py
+    python verify_all.py --models 350M 1.2B
 """
 
 import argparse
 import logging
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -30,10 +33,10 @@ PYTORCH_MODELS = {
 }
 
 BUILDER_Q4_MODELS = {
-    "350M": "LFM2-350M-ONNX-builder-Q4/onnx/model.onnx",
-    "700M": "LFM2-700M-ONNX-builder-Q4/onnx/model.onnx",
-    "1.2B": "LFM2-1.2B-ONNX-builder-Q4/onnx/model.onnx",
-    "2.6B": "LFM2-2.6B-ONNX-builder-Q4/onnx/model.onnx",
+    "350M": "LFM2-350M-ONNX-builder-Q4-fp32head/onnx/model.onnx",
+    "700M": "LFM2-700M-ONNX-builder-Q4-fp32head/onnx/model.onnx",
+    "1.2B": "LFM2-1.2B-ONNX-builder-Q4-fp32head/onnx/model.onnx",
+    "2.6B": "LFM2-2.6B-ONNX-builder-Q4-fp32head/onnx/model.onnx",
 }
 
 COMMUNITY_Q4_MODELS = {
@@ -44,6 +47,26 @@ COMMUNITY_Q4_MODELS = {
 }
 
 # ============================================================================
+
+
+def get_model_size_mb(onnx_path: str) -> float:
+    """Get total model size in MB (including external data)."""
+    path = Path(onnx_path)
+    total = path.stat().st_size if path.exists() else 0
+
+    # Check for external data files (different naming conventions)
+    # model.onnx -> model.onnx.data (onnxruntime style)
+    data_path = Path(str(path) + ".data")
+    if data_path.exists():
+        total += data_path.stat().st_size
+    else:
+        # model.onnx -> model.onnx_data (community style)
+        # model_q4.onnx -> model_q4.onnx_data
+        data_path = path.parent / (path.stem + ".onnx_data")
+        if data_path.exists():
+            total += data_path.stat().st_size
+
+    return total / (1024 * 1024)  # Convert to MB
 
 
 @dataclass
@@ -57,6 +80,7 @@ class ComparisonResult:
     top5_overlap: int
     pytorch_top5: List[int]
     onnx_top5: List[int]
+    file_size_mb: float = 0.0
 
 
 class Q4Comparator:
@@ -166,6 +190,9 @@ class Q4Comparator:
         top1_match = pytorch_top5[0] == onnx_top5[0]
         top5_overlap = len(set(pytorch_top5) & set(onnx_top5))
 
+        # Get file size
+        file_size_mb = get_model_size_mb(onnx_path)
+
         return ComparisonResult(
             model_size=model_size,
             source=source,
@@ -175,14 +202,15 @@ class Q4Comparator:
             top5_overlap=top5_overlap,
             pytorch_top5=pytorch_top5,
             onnx_top5=onnx_top5,
+            file_size_mb=file_size_mb,
         )
 
 
 def print_results(results: List[ComparisonResult]):
     """Print comparison results as a table."""
-    print("\n" + "=" * 90)
+    print("\n" + "=" * 115)
     print("PYTORCH vs Q4 QUANTIZED MODELS COMPARISON")
-    print("=" * 90)
+    print("=" * 115)
 
     # Group by model size
     by_size = {}
@@ -192,9 +220,9 @@ def print_results(results: List[ComparisonResult]):
         by_size[r.model_size][r.source] = r
 
     # Print header
-    print(f"\n{'Model':<12} | {'Builder Q4':<30} | {'Community Q4':<30} | Winner")
-    print(f"{'':<12} | {'MaxDiff':<10} {'MeanDiff':<10} {'Top1':<8} | {'MaxDiff':<10} {'MeanDiff':<10} {'Top1':<8} |")
-    print("-" * 90)
+    print(f"\n{'Model':<12} | {'Builder Q4':<40} | {'Community Q4':<40} | Winner")
+    print(f"{'':<12} | {'Size MB':<10} {'MaxDiff':<10} {'MeanDiff':<10} {'Top1':<8} | {'Size MB':<10} {'MaxDiff':<10} {'MeanDiff':<10} {'Top1':<8} |")
+    print("-" * 115)
 
     # Print each model
     for size in ["350M", "700M", "1.2B", "2.6B"]:
@@ -215,12 +243,12 @@ def print_results(results: List[ComparisonResult]):
 
             print(
                 f"LFM2-{size:<6} | "
-                f"{builder.max_diff:<10.4f} {builder.mean_diff:<10.4f} {'Yes' if builder.top1_match else 'No':<8} | "
-                f"{community.max_diff:<10.4f} {community.mean_diff:<10.4f} {'Yes' if community.top1_match else 'No':<8} | "
+                f"{builder.file_size_mb:<10.1f} {builder.max_diff:<10.4f} {builder.mean_diff:<10.4f} {'Yes' if builder.top1_match else 'No':<8} | "
+                f"{community.file_size_mb:<10.1f} {community.max_diff:<10.4f} {community.mean_diff:<10.4f} {'Yes' if community.top1_match else 'No':<8} | "
                 f"{winner}"
             )
 
-    print("=" * 90)
+    print("=" * 115)
 
     # Summary
     print("\nSUMMARY:")
@@ -274,6 +302,7 @@ def main():
         try:
             result = comparator.compare(size, pytorch_path, builder_path, "builder", args.prompt)
             results.append(result)
+            print(f"  Size: {result.file_size_mb:.1f} MB")
             print(f"  Max diff: {result.max_diff:.4f}")
             print(f"  Mean diff: {result.mean_diff:.4f}")
             print(f"  Top-1 match: {result.top1_match}")
@@ -285,6 +314,7 @@ def main():
         try:
             result = comparator.compare(size, pytorch_path, community_path, "community", args.prompt)
             results.append(result)
+            print(f"  Size: {result.file_size_mb:.1f} MB")
             print(f"  Max diff: {result.max_diff:.4f}")
             print(f"  Mean diff: {result.mean_diff:.4f}")
             print(f"  Top-1 match: {result.top1_match}")

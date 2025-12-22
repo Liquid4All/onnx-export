@@ -11,6 +11,9 @@ Usage:
 
     # INT8 quantization
     python quantize.py --input LFM2-1.2B-ONNX-builder --output out --bits 8
+
+    # Quantize lm_head as well (by default lm_head is kept in FP32)
+    python quantize.py --input LFM2-1.2B-ONNX-builder --output out --quantize-lm-head
 """
 
 import argparse
@@ -22,8 +25,24 @@ from onnxruntime.quantization import quantize_dynamic, QuantType
 from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer
 
 
-def quantize_int4(model_path: Path, output_path: Path, block_size: int = 32):
-    """Quantize model to INT4 using MatMulNBits."""
+def find_lm_head_node(model) -> str | None:
+    """Find the lm_head MatMul node name."""
+    for node in model.graph.node:
+        if node.op_type == "MatMul":
+            # Check if any input contains lm_head weight
+            for inp in node.input:
+                if "lm_head" in inp.lower():
+                    return node.name
+    return None
+
+
+def quantize_int4(model_path: Path, output_path: Path, block_size: int = 32,
+                  quantize_lm_head: bool = False):
+    """Quantize model to INT4 using MatMulNBits.
+
+    By default, lm_head is kept in FP32 (matches community approach).
+    Use quantize_lm_head=True to quantize it as well.
+    """
     print(f"Loading {model_path}...")
     model = onnx.load(str(model_path))
 
@@ -32,12 +51,25 @@ def quantize_int4(model_path: Path, output_path: Path, block_size: int = 32):
     if external_data.exists():
         onnx.load_external_data_for_model(model, str(model_path.parent))
 
+    # Find nodes to exclude (by default exclude lm_head)
+    nodes_to_exclude = None
+    if not quantize_lm_head:
+        lm_head_node = find_lm_head_node(model)
+        if lm_head_node:
+            nodes_to_exclude = [lm_head_node]
+            print(f"Keeping lm_head in FP32 (excluding: {lm_head_node})")
+        else:
+            print("Warning: Could not find lm_head node")
+    else:
+        print("Quantizing all layers including lm_head")
+
     print(f"Quantizing to INT4 (block_size={block_size})...")
     quantizer = MatMulNBitsQuantizer(
         model,
         block_size=block_size,
         is_symmetric=True,
         accuracy_level=4,
+        nodes_to_exclude=nodes_to_exclude,
     )
     quantizer.process()
 
@@ -97,6 +129,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True, help="Output directory")
     parser.add_argument("--bits", type=int, choices=[4, 8], default=4, help="Quantization bits")
     parser.add_argument("--block-size", type=int, default=32, help="Block size for INT4")
+    parser.add_argument("--quantize-lm-head", action="store_true",
+                        help="Quantize lm_head layer (by default kept in FP32)")
     args = parser.parse_args()
 
     # Find model.onnx
@@ -116,7 +150,7 @@ def main():
 
     # Quantize
     if args.bits == 4:
-        quantize_int4(input_model, output_model, args.block_size)
+        quantize_int4(input_model, output_model, args.block_size, args.quantize_lm_head)
     else:
         quantize_int8(input_model, output_model)
 
