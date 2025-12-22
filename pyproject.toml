@@ -1,0 +1,30 @@
+[project]
+name = "lfm2-builder"
+version = "0.1.0"
+description = "LFM2 ONNX export builder"
+requires-python = ">=3.10"
+
+dependencies = [
+    "onnx",           # @latest from git (see [tool.uv.sources])
+    "onnx-ir",        # @latest from git (see [tool.uv.sources])
+    "onnxruntime",
+    "transformers>=5.0.0.dev0",
+    "tqdm>=4.67.1",
+    "numpy>=2.2.0",
+    "torch>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+lfm2-export = "lfm2:main"
+
+[tool.uv]
+# For bleeding-edge packages from git
+[tool.uv.sources]
+onnx = { git = "https://github.com/onnx/onnx.git" }
+onnx-ir = { git = "https://github.com/onnx/ir-py.git" }
