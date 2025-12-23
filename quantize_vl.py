@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import json
 import shutil
 from pathlib import Path
 
@@ -201,6 +202,19 @@ def main():
         src = args.input / cfg
         if src.exists():
             shutil.copy(src, args.output / cfg)
+
+    # Embed chat_template in tokenizer_config.json (required for transformers.js)
+    tokenizer_cfg_path = args.output / "tokenizer_config.json"
+    chat_template_path = args.output / "chat_template.jinja"
+    if tokenizer_cfg_path.exists() and chat_template_path.exists():
+        with open(tokenizer_cfg_path) as f:
+            tok_cfg = json.load(f)
+        if "chat_template" not in tok_cfg:
+            with open(chat_template_path) as f:
+                tok_cfg["chat_template"] = f.read()
+            with open(tokenizer_cfg_path, "w") as f:
+                json.dump(tok_cfg, f, indent=2)
+            print("Embedded chat_template in tokenizer_config.json")
 
     # Print summary
     total_orig = embed_orig_data + decoder_orig_data
