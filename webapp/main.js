@@ -29,6 +29,7 @@ let messages = [];
 let isGenerating = false;
 
 // Model configurations - served via /models/ alias
+// Note: WebGPU only supports 4-bit MatMulNBits, Q8 not supported
 const MODELS = {
   'LFM2-350M-Q4': {
     path: '/models/LFM2-350M-ONNX-builder-Q4-fp32head',
