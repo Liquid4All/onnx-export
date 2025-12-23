@@ -21,7 +21,7 @@ Usage:
     uv run coherence_vl.py --model LiquidAI/LFM2-VL-450M --onnx LFM2-VL-450M-ONNX-B4V8 --image cardinal.jpg
 
     # Test multiple models with all variants
-    uv run coherence_vl.py --models 450M --variants B4V4 B4V8 B8V8 --image cardinal.jpg
+    uv run coherence_vl.py --models 450M --variants FP32 B4V4 B4V8 B8V8 --image cardinal.jpg
 
     # Test with a specific image
     uv run coherence_vl.py --models 450M --image bluejay.jpg
@@ -79,11 +79,13 @@ DEFAULT_PROMPTS = [
 ]
 
 # Prompts for multi-image testing
+# Note: Some prompts like "I'm showing you multiple images..." trigger a refusal
+# response on certain model sizes. Use simpler prompts that work reliably.
 MULTI_IMAGE_PROMPTS = [
-    "I'm showing you multiple images. What do you see in each of them? Describe the main elements in each image.",
+    "Which one most important thing do you see on each image? Be concise and exact.",
     "What are the similarities between these images?",
     "What are the differences between these images?",
-    "If you had to choose one image, which would you prefer and why?",
+    "Which image do you prefer and why?",
 ]
 
 
@@ -391,105 +393,147 @@ class VLMultiTurnTester:
         combined = np.concatenate(result_parts, axis=0)
         return combined[np.newaxis, ...].astype(np.float32)
 
+    def _conversation_has_images(self, messages: List[dict]) -> bool:
+        """Check if any message in conversation has image content."""
+        for msg in messages:
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "image":
+                        return True
+        return False
+
+    def _normalize_messages_for_vl(self, messages: List[dict]) -> List[dict]:
+        """
+        Normalize messages for VL model processing:
+        1. Convert string content to list format
+        2. Inject actual image objects into image placeholders
+        """
+        result = []
+        img_idx = 0
+        for msg in messages:
+            content = msg.get("content", "")
+
+            # Convert string content to list format
+            if isinstance(content, str):
+                new_content = [{"type": "text", "text": content}]
+            else:
+                # Process list content - inject images
+                new_content = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "image":
+                        # Inject actual image object if not already present
+                        if "image" not in item and img_idx < len(self.images):
+                            new_content.append({"type": "image", "image": self.images[img_idx]})
+                            img_idx += 1
+                        else:
+                            new_content.append(item)
+                    else:
+                        new_content.append(item)
+
+            result.append({**msg, "content": new_content})
+
+        return result
+
     def generate_pytorch(
         self, messages: List[dict], max_new_tokens: int, has_image: bool = False, stream: bool = False
     ) -> Tuple[List[int], np.ndarray, str]:
-        """Generate tokens with PyTorch VL model using proper e2e flow."""
+        """Generate tokens with PyTorch VL model using model.generate() for correct image handling."""
         import torch
 
-        # Apply chat template
-        text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        input_ids = self.tokenizer.encode(text, return_tensors="pt", add_special_tokens=False)
-
-        # Build inputs_embeds
-        if has_image:
-            image_embeds = self.get_pytorch_image_embeddings()
-            inputs_embeds = self._build_inputs_embeds_pytorch(input_ids, image_embeds)
+        # Normalize messages for VL processing (inject images, convert string to list format)
+        conv_has_images = self._conversation_has_images(messages)
+        if conv_has_images and self.images:
+            messages_with_images = self._normalize_messages_for_vl(messages)
+            # Use processor.apply_chat_template with images embedded in conversation
+            inputs = self.processor.apply_chat_template(
+                messages_with_images,
+                add_generation_prompt=True,
+                return_tensors="pt",
+                return_dict=True,
+                tokenize=True,
+            )
         else:
-            with torch.no_grad():
-                inputs_embeds = self.torch_model.model.language_model.embed_tokens(input_ids)
-
-        seq_len = inputs_embeds.shape[1]
-        attention_mask = torch.ones((1, seq_len), dtype=torch.long)
-        position_ids = torch.arange(seq_len).unsqueeze(0)
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            inputs = self.processor(text=text, return_tensors="pt")
 
         all_logits = []
         generated_tokens = []
 
         with torch.no_grad():
-            # Initial forward pass with inputs_embeds
-            outputs = self.torch_model.model.language_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                use_cache=True,
+            # Use model.generate for correct image embedding handling
+            output_ids = self.torch_model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                return_dict_in_generate=True,
+                output_logits=True,
             )
-            past_key_values = outputs.past_key_values
-            logits = self.torch_model.lm_head(outputs.last_hidden_state)[0, -1]
-            all_logits.append(logits.numpy())
-            next_token = int(logits.argmax())
-            generated_tokens.append(next_token)
 
-            if stream:
-                print(self.tokenizer.decode([next_token]), end="", flush=True)
+            # Extract generated tokens (skip input tokens)
+            input_len = inputs['input_ids'].shape[1]
+            generated_tokens = output_ids.sequences[0, input_len:].tolist()
 
-            cur_len = seq_len + 1
-
-            # Continue generation with KV cache
-            for _ in range(max_new_tokens - 1):
-                if next_token == self.tokenizer.eos_token_id:
-                    break
-
-                next_input_ids = torch.tensor([[next_token]], dtype=torch.long)
-                next_embeds = self.torch_model.model.language_model.embed_tokens(next_input_ids)
-                attention_mask = torch.ones((1, cur_len), dtype=torch.long)
-                position_ids = torch.tensor([[cur_len - 1]], dtype=torch.long)
-
-                outputs = self.torch_model.model.language_model(
-                    inputs_embeds=next_embeds,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                )
-                past_key_values = outputs.past_key_values
-                logits = self.torch_model.lm_head(outputs.last_hidden_state)[0, -1]
-                all_logits.append(logits.numpy())
-                next_token = int(logits.argmax())
-                generated_tokens.append(next_token)
-                cur_len += 1
-
-                if stream:
-                    print(self.tokenizer.decode([next_token]), end="", flush=True)
+            # Get logits for each generated token
+            # output_ids.logits is a tuple of tensors with shape (batch, vocab_size)
+            if output_ids.logits:
+                for logit in output_ids.logits:
+                    all_logits.append(logit[0].numpy())
 
         if stream:
-            print()
+            print(self.tokenizer.decode(generated_tokens, skip_special_tokens=True))
 
         response_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
-        return generated_tokens, np.stack(all_logits), response_text
+        return generated_tokens, np.stack(all_logits) if all_logits else np.array([]), response_text
 
     def generate_onnx(
         self, messages: List[dict], max_new_tokens: int, has_image: bool = False, stream: bool = False
     ) -> Tuple[List[int], np.ndarray, str]:
-        """Generate tokens with ONNX VL model using proper e2e flow."""
+        """Generate tokens with ONNX VL model using proper e2e flow with processor."""
         sess = self.decoder_sess
 
-        # Apply chat template and tokenize
+        # Apply chat template
         text = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        input_ids = np.array([self.tokenizer.encode(text, add_special_tokens=False)], dtype=np.int64)
 
-        # Build inputs_embeds with image embeddings
-        if has_image:
-            image_embeds = self.get_onnx_image_embeddings()
-            inputs_embeds = self._build_inputs_embeds_onnx(input_ids, image_embeds)
+        # Pass images if conversation contains image content (not just first turn)
+        conv_has_images = self._conversation_has_images(messages)
+        if conv_has_images and self.images:
+            inputs = self.processor(text=text, images=self.images, return_tensors="pt")
+            input_ids = inputs['input_ids'].numpy().astype(np.int64)
+
+            # Get image embeddings from ONNX
+            image_embeds_list = self.get_onnx_image_embeddings()
+            # Concatenate all image embeddings
+            all_image_embeds = np.concatenate(image_embeds_list, axis=0)
+
+            # Get text embeddings
+            text_embeds = self.embed_tokens_sess.run(None, {"input_ids": input_ids})[0][0]
+
+            # Find and replace image tokens with image embeddings
+            image_token_id = self._get_image_token_id()
+            image_mask = (input_ids[0] == image_token_id)
+            num_image_tokens = image_mask.sum()
+
+            if num_image_tokens > 0 and len(all_image_embeds) > 0:
+                # Build combined embeddings
+                result_embeds = []
+                img_idx = 0
+                for i, is_image in enumerate(image_mask):
+                    if is_image and img_idx < len(all_image_embeds):
+                        result_embeds.append(all_image_embeds[img_idx])
+                        img_idx += 1
+                    else:
+                        result_embeds.append(text_embeds[i])
+                inputs_embeds = np.stack(result_embeds, axis=0)[np.newaxis, ...].astype(np.float32)
+            else:
+                inputs_embeds = text_embeds[np.newaxis, ...].astype(np.float32)
         else:
-            inputs_embeds = self.embed_tokens_sess.run(None, {
-                "input_ids": input_ids,
-            })[0]
+            input_ids = np.array([self.tokenizer.encode(text, add_special_tokens=False)], dtype=np.int64)
+            inputs_embeds = self.embed_tokens_sess.run(None, {"input_ids": input_ids})[0]
 
         seq_len = inputs_embeds.shape[1]
         attention_mask = np.ones((1, seq_len), dtype=np.int64)
@@ -741,8 +785,8 @@ def main():
         "--variants",
         nargs="+",
         choices=list(VARIANTS.keys()),
-        default=["B4V8"],
-        help="Variants to test (default: B4V8)",
+        default=["FP32", "B4V8"],
+        help="Variants to test (default: FP32 B4V8)",
     )
     parser.add_argument(
         "--image",
