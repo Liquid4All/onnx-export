@@ -277,10 +277,8 @@ class VLVerifier:
         # Convert to numpy and normalize
         pixels = np.array(image).astype(np.float32) / 255.0
 
-        # Normalize with ImageNet stats (same as SigLIP2)
-        mean = np.array([0.485, 0.456, 0.406])
-        std = np.array([0.229, 0.224, 0.225])
-        pixels = (pixels - mean) / std
+        # SigLIP2 normalization: mean=0.5, std=0.5 -> range [-1, 1]
+        pixels = (pixels - 0.5) / 0.5
 
         # Convert to [1, 3, H, W]
         pixels = pixels.transpose(2, 0, 1)[np.newaxis, ...]

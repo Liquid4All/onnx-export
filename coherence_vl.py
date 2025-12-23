@@ -229,15 +229,23 @@ class VLMultiTurnTester:
         return "tiled"
 
     def _preprocess_conv2d(self, image) -> np.ndarray:
-        """Preprocess image for conv2d format: resize + normalize to [1, 3, H, W]."""
+        """Preprocess image for conv2d format: resize to square + normalize to [1, 3, H, W].
+
+        NOTE: Current ONNX export assumes square input (uses sqrt(N) for reshape in projector).
+        For non-square support, the ONNX model needs to accept W,H as inputs.
+
+        llama.cpp uses dynamic aspect-preserving resize, but that requires model changes.
+        """
         from PIL import Image
 
+        # Use square resize for now (ONNX model limitation)
+        # Must be multiple of 32 (patch_size * n_merge)
         target_size = 512
+
         image = image.resize((target_size, target_size), Image.BILINEAR)
         pixels = np.array(image).astype(np.float32) / 255.0
-        mean = np.array([0.485, 0.456, 0.406])
-        std = np.array([0.229, 0.224, 0.225])
-        pixels = (pixels - mean) / std
+        # SigLIP2 normalization: mean=0.5, std=0.5 -> range [-1, 1]
+        pixels = (pixels - 0.5) / 0.5
         pixels = pixels.transpose(2, 0, 1)[np.newaxis, ...]
         return pixels.astype(np.float32)
 

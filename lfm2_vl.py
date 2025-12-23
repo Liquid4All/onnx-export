@@ -238,10 +238,10 @@ class VisionEmbedBuilder:
             # Conv2d mode: reshape Linear weights to Conv2d format
             # Linear: [hidden_size, C*P*P] -> Conv2d: [hidden_size, C, P, P]
             # =====================================================================
-            # Reshape weight from [H, C*P*P] to [H, C, P, P]
-            # Note: Linear weight is [out_features, in_features] = [768, 768]
+            # Linear weight is [out_features, in_features] = [768, 768]
+            # Input is flattened as CHW (C=3, H=W=16), so 768 = 3*16*16 in CHW order
             # Conv2d weight should be [out_channels, in_channels, kH, kW] = [768, 3, 16, 16]
-            conv_weight = linear_weight.reshape(H, P, P, C).transpose(0, 3, 1, 2)  # [H, C, P, P]
+            conv_weight = linear_weight.reshape(H, C, P, P)  # [H, C, P, P]
             self.add_initializer(f"{prefix}.conv_weight", conv_weight)
             self.add_initializer(f"{prefix}.bias", linear_bias)
 

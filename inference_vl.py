@@ -39,6 +39,7 @@ class VLModelInference:
         self.embed_images_sess = None
         self.decoder_sess = None
         self.image_token_id = None
+        self.vision_format = "tiled"  # "tiled" or "conv2d"
 
     def load(self):
         """Load processor and ONNX models."""
@@ -82,30 +83,77 @@ class VLModelInference:
             str(onnx_dir / "decoder.onnx"), providers=["CPUExecutionProvider"]
         )
 
+        # Detect vision format from embed_images input shape
+        self.vision_format = self._detect_vision_format()
+        print(f"Vision format: {self.vision_format}")
         print("Model loaded successfully!")
+
+    def _detect_vision_format(self) -> str:
+        """Detect vision input format from ONNX model inputs."""
+        for inp in self.embed_images_sess.get_inputs():
+            if inp.name == "pixel_values":
+                # conv2d: [B, 3, H, W] = 4D
+                # tiled: [B, N, 768] = 3D
+                if len(inp.shape) == 4:
+                    return "conv2d"
+                elif len(inp.shape) == 3:
+                    return "tiled"
+        return "tiled"
+
+    def _preprocess_conv2d(self, image: Image.Image) -> np.ndarray:
+        """Preprocess image for conv2d format.
+
+        Note: ONNX model requires square 512x512 input due to sqrt(N) reshape in projector.
+        llama.cpp handles this differently with dynamic position embeddings.
+        """
+        target_size = 512
+
+        # Direct square resize (ONNX limitation)
+        # Use LANCZOS for best quality when resizing
+        image_resized = image.resize((target_size, target_size), Image.LANCZOS)
+
+        # Convert to float and normalize
+        pixels = np.array(image_resized).astype(np.float32) / 255.0
+        # SigLIP2 normalization: mean=0.5, std=0.5 -> range [-1, 1]
+        pixels = (pixels - 0.5) / 0.5
+        pixels = pixels.transpose(2, 0, 1)[np.newaxis, ...]
+        return pixels.astype(np.float32)
 
     def _get_image_embeddings(self, images: List[Image.Image]) -> List[np.ndarray]:
         """Get embeddings for a list of images."""
         embeddings = []
 
         for image in images:
-            inputs = self.processor.image_processor(images=image, return_tensors="pt")
-            pixel_values = inputs["pixel_values"].numpy().astype(np.float32)
-            patch_attention_mask = inputs["pixel_attention_mask"].numpy().astype(np.int64)
+            if self.vision_format == "conv2d":
+                # Conv2d format: [B, 3, H, W] raw image input
+                pixel_values = self._preprocess_conv2d(image)
+                outputs = self.embed_images_sess.run(
+                    None,
+                    {"pixel_values": pixel_values},
+                )
+                # Output: [1, num_tokens, hidden_dim]
+                img_embeds = outputs[0][0]  # [num_tokens, hidden_dim]
+            else:
+                # Tiled format: [B, N, 768] with pre-extracted patches
+                inputs = self.processor.image_processor(images=image, return_tensors="pt")
+                pixel_values = inputs["pixel_values"].numpy().astype(np.float32)
+                patch_attention_mask = inputs["pixel_attention_mask"].numpy().astype(np.int64)
 
-            outputs = self.embed_images_sess.run(
-                None,
-                {
-                    "pixel_values": pixel_values,
-                    "patch_attention_mask": patch_attention_mask,
-                },
-            )
+                outputs = self.embed_images_sess.run(
+                    None,
+                    {
+                        "pixel_values": pixel_values,
+                        "patch_attention_mask": patch_attention_mask,
+                    },
+                )
 
-            # Output: [num_tiles, tokens_per_tile, hidden_dim]
-            # Flatten to [total_tokens, hidden_dim]
-            img_embeds = outputs[0]
-            num_tiles, tokens_per_tile, hidden = img_embeds.shape
-            embeddings.append(img_embeds.reshape(-1, hidden))
+                # Output: [num_tiles, tokens_per_tile, hidden_dim]
+                # Flatten to [total_tokens, hidden_dim]
+                img_embeds = outputs[0]
+                num_tiles, tokens_per_tile, hidden = img_embeds.shape
+                img_embeds = img_embeds.reshape(-1, hidden)
+
+            embeddings.append(img_embeds)
 
         return embeddings
 
