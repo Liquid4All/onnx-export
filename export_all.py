@@ -45,7 +45,7 @@ def get_output_name(size: str, quantize: str | None) -> str:
     if quantize == "q4":
         return f"{base}-Q4-fp32head"
     elif quantize == "q8":
-        return f"{base}-Q8"
+        return f"{base}-Q8-fp32head"
     return base
 
 
@@ -83,7 +83,7 @@ def quantize_model(size: str, output_dir: Path, bits: int) -> bool:
     if bits == 4:
         output_path = output_dir / f"LFM2-{size}-ONNX-builder-Q4-fp32head"
     else:
-        output_path = output_dir / f"LFM2-{size}-ONNX-builder-Q8"
+        output_path = output_dir / f"LFM2-{size}-ONNX-builder-Q8-fp32head"
 
     if not input_path.exists():
         logger.error(f"Input model not found: {input_path}")
