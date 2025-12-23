@@ -9,7 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@huggingface/transformers": "^3.7.1"
+    "@huggingface/transformers": "^3.7.1",
+    "onnxruntime-web": "^1.20.1"
   },
   "devDependencies": {
     "vite": "^5.4.0"

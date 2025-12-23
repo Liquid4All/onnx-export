@@ -120,10 +120,58 @@
       opacity: 0.8;
     }
 
+    .message img {
+      max-width: 300px;
+      max-height: 200px;
+      border-radius: 8px;
+      margin-bottom: 0.5rem;
+      display: block;
+    }
+
     .input-area {
       padding: 1rem;
       background: #16213e;
       border-top: 1px solid #0f3460;
+    }
+
+    .image-preview {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .image-preview-item {
+      position: relative;
+      display: inline-block;
+    }
+
+    .image-preview-item img {
+      max-width: 100px;
+      max-height: 80px;
+      border-radius: 6px;
+      border: 2px solid #0f3460;
+    }
+
+    .image-preview-item .remove-btn {
+      position: absolute;
+      top: -8px;
+      right: -8px;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #e94560;
+      color: white;
+      border: none;
+      cursor: pointer;
+      font-size: 12px;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .input-row {
       display: flex;
       gap: 0.5rem;
     }
@@ -142,6 +190,31 @@
     #userInput:focus {
       outline: none;
       border-color: #e94560;
+    }
+
+    .input-buttons {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    #imageBtn {
+      padding: 0.5rem;
+      border-radius: 8px;
+      border: 1px solid #0f3460;
+      background: #1a1a2e;
+      color: #eee;
+      cursor: pointer;
+      font-size: 1.2rem;
+    }
+
+    #imageBtn:hover:not(:disabled) {
+      background: #0f3460;
+    }
+
+    #imageBtn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
     }
 
     #sendBtn {
@@ -189,6 +262,45 @@
       color: white;
       text-shadow: 0 1px 2px rgba(0,0,0,0.5);
     }
+
+    .model-type-badge {
+      font-size: 0.7rem;
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      margin-left: 0.5rem;
+      font-weight: 600;
+    }
+
+    .model-type-badge.vl {
+      background: #7c3aed;
+      color: white;
+    }
+
+    .model-type-badge.text {
+      background: #0f3460;
+      color: #94a3b8;
+    }
+
+    #imageInput {
+      display: none;
+    }
+
+    .drop-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(233, 69, 96, 0.2);
+      border: 4px dashed #e94560;
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      font-size: 2rem;
+      color: #e94560;
+    }
+
+    .drop-overlay.active {
+      display: flex;
+    }
   </style>
 </head>
 <body>
@@ -200,14 +312,22 @@
     <label>
       Model:
       <select id="modelSelect">
-        <option value="LFM2-350M-Q4">LFM2-350M Q4 (459 MB)</option>
-        <option value="LFM2-700M-Q4">LFM2-700M Q4 (803 MB)</option>
-        <option value="LFM2-1.2B-Q4" selected>LFM2-1.2B Q4 (1.1 GB)</option>
-        <option value="LFM2-2.6B-Q4">LFM2-2.6B Q4 (2.0 GB)</option>
+        <optgroup label="Text Models">
+          <option value="LFM2-350M-Q4">LFM2-350M Q4 (459 MB)</option>
+          <option value="LFM2-700M-Q4">LFM2-700M Q4 (803 MB)</option>
+          <option value="LFM2-1.2B-Q4" selected>LFM2-1.2B Q4 (1.1 GB)</option>
+          <option value="LFM2-2.6B-Q4">LFM2-2.6B Q4 (2.0 GB)</option>
+        </optgroup>
+        <optgroup label="Vision-Language Models">
+          <option value="LFM2-VL-450M-B4V4">LFM2-VL-450M B4V4 (470 MB)</option>
+          <option value="LFM2-VL-1.6B-B4V4">LFM2-VL-1.6B B4V4 (1.2 GB)</option>
+          <option value="LFM2-VL-3B-B4V4">LFM2-VL-3B B4V4 (2.2 GB)</option>
+        </optgroup>
       </select>
     </label>
     <button id="loadBtn">Load Model</button>
     <button id="clearBtn">Clear Chat</button>
+    <span id="modelTypeBadge"></span>
   </div>
 
   <div id="progressBar" class="progress-bar" style="display: none;">
@@ -220,9 +340,18 @@
   <div class="chat-container" id="chatContainer"></div>
 
   <div class="input-area">
-    <textarea id="userInput" rows="2" placeholder="Type your message..." disabled></textarea>
-    <button id="sendBtn" disabled>Send</button>
+    <div class="image-preview" id="imagePreview"></div>
+    <div class="input-row">
+      <textarea id="userInput" rows="2" placeholder="Type your message..." disabled></textarea>
+      <div class="input-buttons">
+        <button id="imageBtn" title="Add image (or paste/drop)" disabled>📷</button>
+        <button id="sendBtn" disabled>Send</button>
+      </div>
+    </div>
+    <input type="file" id="imageInput" accept="image/*" multiple>
   </div>
+
+  <div class="drop-overlay" id="dropOverlay">Drop images here</div>
 
   <script type="module" src="./main.js"></script>
 </body>
