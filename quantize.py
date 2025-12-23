@@ -229,10 +229,40 @@ def main():
 
     # Copy config files
     for cfg in ["config.json", "tokenizer.json", "tokenizer_config.json",
-                "special_tokens_map.json", "genai_config.json"]:
+                "special_tokens_map.json", "genai_config.json", "generation_config.json",
+                "chat_template.jinja"]:
         src = args.input / cfg
         if src.exists():
             shutil.copy(src, args.output / cfg)
+
+    import json
+
+    # Create generation_config.json if not present (required by Transformers.js)
+    gen_config_path = args.output / "generation_config.json"
+    if not gen_config_path.exists():
+        gen_config = {
+            "_from_model_config": True,
+            "bos_token_id": 1,
+            "eos_token_id": 7,
+            "pad_token_id": 0,
+            "transformers_version": "4.54.0"
+        }
+        gen_config_path.write_text(json.dumps(gen_config, indent=2))
+        print(f"Created {gen_config_path}")
+
+    # Add transformers.js_config to config.json (required for external data format)
+    config_path = args.output / "config.json"
+    if config_path.exists():
+        with open(config_path, "r") as f:
+            cfg = json.load(f)
+        if "transformers.js_config" not in cfg:
+            cfg["transformers.js_config"] = {
+                "kv_cache_dtype": {"q4": "float32", "fp32": "float32"},
+                "use_external_data_format": True
+            }
+            with open(config_path, "w") as f:
+                json.dump(cfg, f, indent=2)
+            print(f"Added transformers.js_config to {config_path}")
 
     # Compression ratio
     orig_total = orig_model_mb / 1000 + orig_data_gb

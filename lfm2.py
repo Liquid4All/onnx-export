@@ -583,6 +583,49 @@ def export_model(model_path: str, output_dir: str):
     tokenizer.save_pretrained(output_dir)
     config.save_pretrained(output_dir)
 
+    # Create generation_config.json (required by Transformers.js)
+    import json
+    gen_config = {
+        "_from_model_config": True,
+        "bos_token_id": config.bos_token_id,
+        "eos_token_id": config.eos_token_id,
+        "pad_token_id": getattr(config, 'pad_token_id', 0),
+        "transformers_version": "4.54.0"
+    }
+    gen_config_path = os.path.join(output_dir, "generation_config.json")
+    with open(gen_config_path, "w") as f:
+        json.dump(gen_config, f, indent=2)
+
+    # Add transformers.js_config to config.json (for external data support)
+    config_path = os.path.join(output_dir, "config.json")
+    with open(config_path, "r") as f:
+        cfg = json.load(f)
+    cfg["transformers.js_config"] = {
+        "kv_cache_dtype": {"fp32": "float32"},
+        "use_external_data_format": True
+    }
+    with open(config_path, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+    # Copy chat_template from tokenizer if available, and save to both
+    # tokenizer_config.json and chat_template.jinja
+    tokenizer_config_path = os.path.join(output_dir, "tokenizer_config.json")
+    chat_template_path = os.path.join(output_dir, "chat_template.jinja")
+
+    if tokenizer.chat_template:
+        # Save chat_template.jinja
+        with open(chat_template_path, "w") as f:
+            f.write(tokenizer.chat_template)
+
+        # Ensure it's also in tokenizer_config.json
+        if os.path.exists(tokenizer_config_path):
+            with open(tokenizer_config_path, "r") as f:
+                tok_cfg = json.load(f)
+            if "chat_template" not in tok_cfg:
+                tok_cfg["chat_template"] = tokenizer.chat_template
+                with open(tokenizer_config_path, "w") as f:
+                    json.dump(tok_cfg, f, indent=2)
+
     # Print summary
     size_mb = os.path.getsize(output_path) / 1e6
     data_path = os.path.join(onnx_dir, "model.onnx_data")
