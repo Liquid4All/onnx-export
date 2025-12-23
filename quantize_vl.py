@@ -142,12 +142,12 @@ def main():
     if not decoder_path.exists():
         raise FileNotFoundError(f"decoder.onnx not found in {onnx_dir}")
 
-    # Auto-generate output name (always -fp32head since we keep lm_head in FP32)
+    # Auto-generate output name
     if args.output is None:
         input_name = args.input.name
-        # Remove -ONNX-builder suffix if present
-        base_name = input_name.replace("-ONNX-builder", "")
-        output_name = f"{base_name}-ONNX-builder-Q{args.bits}-fp32head"
+        # Remove -ONNX suffix if present
+        base_name = input_name.replace("-ONNX", "")
+        output_name = f"{base_name}-ONNX-B{args.bits}V{args.vision_bits}"
         args.output = args.input.parent / output_name
 
     output_onnx_dir = args.output / "onnx"
@@ -186,6 +186,14 @@ def main():
         print(f"Compression: {ratio:.1f}x")
     print()
 
+    # Copy embed_tokens.onnx (no quantization needed - it's just embedding lookup)
+    embed_tokens_src = onnx_dir / "embed_tokens.onnx"
+    if embed_tokens_src.exists():
+        embed_tokens_dst = output_onnx_dir / "embed_tokens.onnx"
+        shutil.copy(embed_tokens_src, embed_tokens_dst)
+        print(f"Copied embed_tokens.onnx ({embed_tokens_src.stat().st_size / 1e6:.1f} MB)")
+    print()
+
     # Copy config files
     for cfg in ["config.json", "tokenizer.json", "tokenizer_config.json",
                 "special_tokens_map.json", "generation_config.json",
@@ -198,8 +206,8 @@ def main():
     total_orig = embed_orig_data + decoder_orig_data
     total_quant = embed_quant_data + decoder_quant_data
     print("=== Summary ===")
-    print(f"embed_images: {embed_orig_data:.1f} MB -> {embed_quant_data:.1f} MB (Q{args.vision_bits})")
-    print(f"decoder: {decoder_orig_data:.1f} MB -> {decoder_quant_data:.1f} MB (Q{args.bits}, lm_head FP32)")
+    print(f"Vision (V{args.vision_bits}): {embed_orig_data:.1f} MB -> {embed_quant_data:.1f} MB")
+    print(f"Backbone (B{args.bits}): {decoder_orig_data:.1f} MB -> {decoder_quant_data:.1f} MB (lm_head FP32)")
     print(f"Total: {total_orig:.1f} MB -> {total_quant:.1f} MB ({total_orig/total_quant:.1f}x)")
     print(f"\nOutput: {args.output}")
 
