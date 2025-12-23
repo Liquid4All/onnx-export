@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """
-INT4 Quantization for LFM2 ONNX models.
+INT4/INT8 Quantization for LFM2 ONNX models.
 
 Usage:
-    # Quantize a single model
-    python quantize.py --input LFM2-1.2B-ONNX-builder --output LFM2-1.2B-ONNX-builder-Q4
-
-    # Quantize with custom block size
-    python quantize.py --input LFM2-1.2B-ONNX-builder --output out --block-size 64
+    # Quantize a single model (auto-generates output name)
+    uv run quantize.py --input LFM2-1.2B-ONNX-builder
+    # -> LFM2-1.2B-ONNX-builder-Q4-fp32head
 
     # INT8 quantization
-    python quantize.py --input LFM2-1.2B-ONNX-builder --output out --bits 8
+    uv run quantize.py --input LFM2-1.2B-ONNX-builder --bits 8
+    # -> LFM2-1.2B-ONNX-builder-Q8-fp32head
+
+    # Custom output path
+    uv run quantize.py --input LFM2-1.2B-ONNX-builder --output my-output
 
     # Quantize lm_head as well (by default lm_head is kept in FP32)
-    python quantize.py --input LFM2-1.2B-ONNX-builder --output out --quantize-lm-head
+    uv run quantize.py --input LFM2-1.2B-ONNX-builder --quantize-lm-head
+    # -> LFM2-1.2B-ONNX-builder-Q4
 """
 
 import argparse
@@ -21,8 +24,10 @@ import shutil
 from pathlib import Path
 
 import onnx
-from onnxruntime.quantization import quantize_dynamic, QuantType
-from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer
+from onnxruntime.quantization.matmul_nbits_quantizer import (
+    MatMulNBitsQuantizer,
+    DefaultWeightOnlyQuantConfig,
+)
 
 
 def find_lm_head_node(model) -> str | None:
@@ -98,37 +103,70 @@ def quantize_int4(model_path: Path, output_path: Path, block_size: int = 32,
     return output_path
 
 
-def quantize_int8(model_path: Path, output_path: Path):
-    """Quantize model to INT8 using dynamic quantization."""
-    print(f"Loading {model_path}...")
+def quantize_int8(model_path: Path, output_path: Path, block_size: int = 32,
+                  quantize_lm_head: bool = False):
+    """Quantize model to INT8 using MatMulNBits (same approach as INT4).
 
+    By default, lm_head is kept in FP32 (matches INT4 approach).
+    Use quantize_lm_head=True to quantize it as well.
+    """
+    print(f"Loading {model_path}...")
+    model = onnx.load(str(model_path))
+
+    # Load external data if present
     external_data = model_path.with_suffix(".onnx_data")
     if external_data.exists():
-        model = onnx.load(str(model_path))
         onnx.load_external_data_for_model(model, str(model_path.parent))
-        temp_path = model_path.parent / "temp_for_quant.onnx"
-        onnx.save_model(model, str(temp_path), save_as_external_data=False)
-        model_to_quant = str(temp_path)
-    else:
-        model_to_quant = str(model_path)
 
-    print("Quantizing to INT8 (dynamic)...")
+    # Find nodes to exclude (by default exclude lm_head)
+    nodes_to_exclude = None
+    if not quantize_lm_head:
+        lm_head_node = find_lm_head_node(model)
+        if lm_head_node:
+            nodes_to_exclude = [lm_head_node]
+            print(f"Keeping lm_head in FP32 (excluding: {lm_head_node})")
+        else:
+            print("Warning: Could not find lm_head node")
+    else:
+        print("Quantizing all layers including lm_head")
+
+    print(f"Quantizing to INT8 (block_size={block_size})...")
+    algo_config = DefaultWeightOnlyQuantConfig(
+        block_size=block_size,
+        is_symmetric=True,
+        accuracy_level=4,
+        bits=8,  # INT8 instead of INT4
+    )
+    quantizer = MatMulNBitsQuantizer(
+        model,
+        block_size=block_size,
+        is_symmetric=True,
+        accuracy_level=4,
+        nodes_to_exclude=nodes_to_exclude,
+        algo_config=algo_config,
+    )
+    quantizer.process()
+
+    print(f"Saving to {output_path}...")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    quantize_dynamic(
-        model_input=model_to_quant,
-        model_output=str(output_path),
-        weight_type=QuantType.QInt8,
-        extra_options={
-            "MatMulConstBOnly": True,
-            "DefaultTensorType": onnx.TensorProto.FLOAT,
-        }
-    )
+    # Get the quantized model and save with onnx.save_model for compact external data
+    quantized_model = quantizer.model.model
 
-    if external_data.exists():
-        temp_path = model_path.parent / "temp_for_quant.onnx"
-        if temp_path.exists():
-            temp_path.unlink()
+    # Remove any existing external data file to avoid appending
+    external_data_path = output_path.parent / (output_path.stem + ".onnx_data")
+    if external_data_path.exists():
+        external_data_path.unlink()
+
+    onnx.save_model(
+        quantized_model,
+        str(output_path),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=output_path.stem + ".onnx_data",
+        size_threshold=1024,  # Keep small tensors inline for ONNX Runtime compatibility
+        convert_attribute=False,
+    )
 
     return output_path
 
@@ -144,7 +182,7 @@ def get_model_size(path: Path) -> tuple[float, float]:
 def main():
     parser = argparse.ArgumentParser(description="Quantize LFM2 ONNX models")
     parser.add_argument("--input", type=Path, required=True, help="Input ONNX model directory")
-    parser.add_argument("--output", type=Path, required=True, help="Output directory")
+    parser.add_argument("--output", type=Path, help="Output directory (auto-generated if not specified)")
     parser.add_argument("--bits", type=int, choices=[4, 8], default=4, help="Quantization bits")
     parser.add_argument("--block-size", type=int, default=32, help="Block size for INT4")
     parser.add_argument("--quantize-lm-head", action="store_true",
@@ -158,6 +196,19 @@ def main():
     if not input_model.exists():
         raise FileNotFoundError(f"No model.onnx found in {args.input}")
 
+    # Auto-generate output name if not specified
+    if args.output is None:
+        quant_suffix = f"Q{args.bits}"
+        if not args.quantize_lm_head:
+            quant_suffix += "-fp32head"
+        # Replace -ONNX-builder with -ONNX-builder-Q4-fp32head style
+        input_name = args.input.name
+        if input_name.endswith("-ONNX-builder"):
+            output_name = input_name + f"-{quant_suffix}"
+        else:
+            output_name = f"{input_name}-{quant_suffix}"
+        args.output = args.input.parent / output_name
+
     output_dir = args.output / "onnx"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_model = output_dir / "model.onnx"
@@ -170,7 +221,7 @@ def main():
     if args.bits == 4:
         quantize_int4(input_model, output_model, args.block_size, args.quantize_lm_head)
     else:
-        quantize_int8(input_model, output_model)
+        quantize_int8(input_model, output_model, args.block_size, args.quantize_lm_head)
 
     # Get quantized size
     quant_model_mb, quant_data_gb = get_model_size(output_model)

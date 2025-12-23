@@ -3,9 +3,9 @@
 Performance benchmark for a single LFM2 ONNX model.
 
 Usage:
-    python benchmark.py --model LiquidAI/LFM2-1.2B --onnx LFM2-1.2B-ONNX-builder
-    python benchmark.py --model LiquidAI/LFM2-1.2B --onnx LFM2-1.2B-ONNX-builder/onnx/model.onnx
-    python benchmark.py --model LiquidAI/LFM2-1.2B --onnx model.onnx --max-tokens 50
+    uv run benchmark.py --model LiquidAI/LFM2-1.2B --onnx LFM2-1.2B-ONNX-builder
+    uv run benchmark.py --model LiquidAI/LFM2-1.2B --onnx LFM2-1.2B-ONNX-builder/onnx/model.onnx
+    uv run benchmark.py --model LiquidAI/LFM2-1.2B --onnx model.onnx --max-tokens 50
 """
 
 import argparse
