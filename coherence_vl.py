@@ -16,21 +16,27 @@ Metrics:
 - Semantic: cosine similarity of logits per turn
 - Accumulated error across turns
 
+Available formats: -T (tiled), -C (conv2d)
+
 Usage:
     # Test single model with specific variant
-    uv run coherence_vl.py --model LiquidAI/LFM2-VL-450M --onnx LFM2-VL-450M-ONNX-B4V8 --image cardinal.jpg
+    uv run coherence_vl.py --model LiquidAI/LFM2-VL-450M --onnx LFM2-VL-450M-ONNX-B4V8-T --image cardinal.jpg
 
-    # Test multiple models with all variants
-    uv run coherence_vl.py --models 450M --variants FP32 B4V4 B4V8 B8V8 --image cardinal.jpg
+    # Test tiled format models
+    uv run coherence_vl.py -T --models 450M --variants FP32 B4V4 B4V8 B8V8 --image cardinal.jpg
 
-    # Test with a specific image
-    uv run coherence_vl.py --models 450M --image bluejay.jpg
+    # Test conv2d format models
+    uv run coherence_vl.py -C --models 450M --variants B4V8 --image cardinal.jpg
+
+    # Test both formats
+    uv run coherence_vl.py -T -C --models 450M --variants B4V8 --image cardinal.jpg
 
     # More tokens per turn
-    uv run coherence_vl.py --models 450M --variants B4V8 --image cardinal.jpg --max-tokens 50
+    uv run coherence_vl.py -T --models 450M --variants B4V8 --image cardinal.jpg --max-tokens 50
 """
 
 import argparse
+import gc
 import logging
 import os
 from dataclasses import dataclass, field
@@ -59,14 +65,21 @@ VARIANTS = {
     "B8V8": (8, 8),
 }
 
+# Vision input formats
+FORMATS = {
+    "T": "tiled",   # [B, N, 768] pre-extracted patches
+    "C": "conv2d",  # [B, 3, H, W] raw image
+}
 
-def get_onnx_dir(size: str, variant: str) -> str:
-    """Get ONNX directory name for a model/variant combination."""
+
+def get_onnx_dir(size: str, variant: str, format_key: str = "T") -> str:
+    """Get ONNX directory name for a model/variant/format combination."""
+    suffix = f"-{format_key}"
     if VARIANTS[variant] is None:
-        return f"LFM2-VL-{size}-ONNX"
+        return f"LFM2-VL-{size}-ONNX{suffix}"
     else:
         backbone_bits, vision_bits = VARIANTS[variant]
-        return f"LFM2-VL-{size}-ONNX-B{backbone_bits}V{vision_bits}"
+        return f"LFM2-VL-{size}-ONNX-B{backbone_bits}V{vision_bits}{suffix}"
 
 
 # Default conversation for VL coherence testing - tests context retention with image
@@ -167,6 +180,12 @@ class VLMultiTurnTester:
         """Load all ONNX VL models (embed_tokens, embed_images, decoder)."""
         import onnxruntime as ort
 
+        # Clean up previous sessions to avoid resource leaks
+        self.embed_tokens_sess = None
+        self.embed_images_sess = None
+        self.decoder_sess = None
+        gc.collect()
+
         onnx_dir = os.path.join(onnx_path, "onnx")
 
         embed_tokens_file = os.path.join(onnx_dir, "embed_tokens.onnx")
@@ -197,6 +216,30 @@ class VLMultiTurnTester:
 
         # Clear cached embeddings when loading new ONNX model
         self.onnx_image_embeds = None
+
+    def _detect_vision_format(self) -> str:
+        """Detect vision input format from ONNX model inputs."""
+        for inp in self.embed_images_sess.get_inputs():
+            if inp.name == "pixel_values":
+                shape = inp.shape
+                if len(shape) == 4:
+                    return "conv2d"
+                elif len(shape) == 3:
+                    return "tiled"
+        return "tiled"
+
+    def _preprocess_conv2d(self, image) -> np.ndarray:
+        """Preprocess image for conv2d format: resize + normalize to [1, 3, H, W]."""
+        from PIL import Image
+
+        target_size = 512
+        image = image.resize((target_size, target_size), Image.BILINEAR)
+        pixels = np.array(image).astype(np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+        pixels = (pixels - mean) / std
+        pixels = pixels.transpose(2, 0, 1)[np.newaxis, ...]
+        return pixels.astype(np.float32)
 
     def load_images(self, image_paths: List[str]) -> List:
         """Load images from paths or create test image."""
@@ -286,22 +329,35 @@ class VLMultiTurnTester:
             return self.onnx_image_embeds
 
         self.onnx_image_embeds = []
+        vision_format = self._detect_vision_format()
 
         for image in self.images:
-            inputs = self.processor.image_processor(images=image, return_tensors="pt")
-            pixel_values = inputs["pixel_values"].numpy().astype(np.float32)
-            patch_attention_mask = inputs["pixel_attention_mask"].numpy().astype(np.int64)
+            if vision_format == "conv2d":
+                # Conv2d format: [1, 3, H, W] raw image input
+                pixel_values = self._preprocess_conv2d(image)
+                outputs = self.embed_images_sess.run(None, {
+                    "pixel_values": pixel_values,
+                })
+                # Output shape: (1, num_tokens, hidden_dim)
+                onnx_embeds = outputs[0][0]  # (num_tokens, hidden_dim)
+            else:
+                # Tiled format: [num_tiles, num_patches, 768]
+                inputs = self.processor.image_processor(images=image, return_tensors="pt")
+                pixel_values = inputs["pixel_values"].numpy().astype(np.float32)
+                patch_attention_mask = inputs["pixel_attention_mask"].numpy().astype(np.int64)
 
-            outputs = self.embed_images_sess.run(None, {
-                "pixel_values": pixel_values,
-                "patch_attention_mask": patch_attention_mask,
-            })
+                outputs = self.embed_images_sess.run(None, {
+                    "pixel_values": pixel_values,
+                    "patch_attention_mask": patch_attention_mask,
+                })
 
-            # Output shape: (num_tiles, num_tokens_per_tile, hidden_dim)
-            # Flatten to (total_tokens, hidden_dim)
-            onnx_embeds = outputs[0]
-            num_tiles, tokens_per_tile, hidden = onnx_embeds.shape
-            self.onnx_image_embeds.append(onnx_embeds.reshape(-1, hidden))
+                # Output shape: (num_tiles, num_tokens_per_tile, hidden_dim)
+                # Flatten to (total_tokens, hidden_dim)
+                onnx_embeds = outputs[0]
+                num_tiles, tokens_per_tile, hidden = onnx_embeds.shape
+                onnx_embeds = onnx_embeds.reshape(-1, hidden)
+
+            self.onnx_image_embeds.append(onnx_embeds)
 
         return self.onnx_image_embeds
 
@@ -764,6 +820,17 @@ def main():
     parser = argparse.ArgumentParser(
         description="Multi-turn coherence testing for LFM2-VL models (e2e flow)"
     )
+    # Vision input format
+    parser.add_argument(
+        "-T", "--tiled",
+        action="store_true",
+        help="Test tiled format models [B, N, 768]",
+    )
+    parser.add_argument(
+        "-C", "--conv2d",
+        action="store_true",
+        help="Test conv2d format models [B, 3, H, W]",
+    )
     parser.add_argument(
         "--model",
         type=str,
@@ -824,6 +891,15 @@ def main():
     )
     args = parser.parse_args()
 
+    # Determine which formats to test
+    format_keys = []
+    if args.tiled:
+        format_keys.append("T")
+    if args.conv2d:
+        format_keys.append("C")
+    if not format_keys:
+        format_keys = ["T"]  # Default to tiled
+
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
     results = []
@@ -881,42 +957,46 @@ def main():
         tester = VLMultiTurnTester(pytorch_path, max_new_tokens=args.max_tokens)
         tester.load_pytorch()
 
-        for variant in args.variants:
-            onnx_path = get_onnx_dir(size, variant)
+        for format_key in format_keys:
+            format_name = FORMATS[format_key]
+            print(f"\n=== Format: {format_key} ({format_name}) ===")
 
-            # Single image test
-            if run_single:
-                print(f"\n--- {variant} / 1 image ({onnx_path}) ---")
-                try:
-                    tester.load_images([args.image[0]])
-                    prompts = DEFAULT_PROMPTS[: args.turns]
-                    result = tester.test_coherence(size, onnx_path, variant, f"{variant}_1img", prompts)
-                    results.append(result)
-                    if args.verbose:
-                        print_turn_results(result)
-                    else:
-                        print(f"  Avg Token Match: {result.avg_token_match*100:.1f}%")
-                        print(f"  Avg Semantic Sim: {result.avg_semantic_sim:.4f}")
-                        print(f"  Accumulated Error: {result.accumulated_error:.4f}")
-                except Exception as e:
-                    print(f"  ERROR: {e}")
+            for variant in args.variants:
+                onnx_path = get_onnx_dir(size, variant, format_key)
 
-            # Multi-image test
-            if run_multi:
-                print(f"\n--- {variant} / {len(args.image)} images ({onnx_path}) ---")
-                try:
-                    tester.load_images(args.image)
-                    prompts = MULTI_IMAGE_PROMPTS[: args.turns]
-                    result = tester.test_coherence(size, onnx_path, variant, f"{variant}_{len(args.image)}img", prompts)
-                    results.append(result)
-                    if args.verbose:
-                        print_turn_results(result)
-                    else:
-                        print(f"  Avg Token Match: {result.avg_token_match*100:.1f}%")
-                        print(f"  Avg Semantic Sim: {result.avg_semantic_sim:.4f}")
-                        print(f"  Accumulated Error: {result.accumulated_error:.4f}")
-                except Exception as e:
-                    print(f"  ERROR: {e}")
+                # Single image test
+                if run_single:
+                    print(f"\n--- {variant} / 1 image ({onnx_path}) ---")
+                    try:
+                        tester.load_images([args.image[0]])
+                        prompts = DEFAULT_PROMPTS[: args.turns]
+                        result = tester.test_coherence(size, onnx_path, variant, f"{variant}_{format_key}_1img", prompts)
+                        results.append(result)
+                        if args.verbose:
+                            print_turn_results(result)
+                        else:
+                            print(f"  Avg Token Match: {result.avg_token_match*100:.1f}%")
+                            print(f"  Avg Semantic Sim: {result.avg_semantic_sim:.4f}")
+                            print(f"  Accumulated Error: {result.accumulated_error:.4f}")
+                    except Exception as e:
+                        print(f"  ERROR: {e}")
+
+                # Multi-image test
+                if run_multi:
+                    print(f"\n--- {variant} / {len(args.image)} images ({onnx_path}) ---")
+                    try:
+                        tester.load_images(args.image)
+                        prompts = MULTI_IMAGE_PROMPTS[: args.turns]
+                        result = tester.test_coherence(size, onnx_path, variant, f"{variant}_{format_key}_{len(args.image)}img", prompts)
+                        results.append(result)
+                        if args.verbose:
+                            print_turn_results(result)
+                        else:
+                            print(f"  Avg Token Match: {result.avg_token_match*100:.1f}%")
+                            print(f"  Avg Semantic Sim: {result.avg_semantic_sim:.4f}")
+                            print(f"  Accumulated Error: {result.accumulated_error:.4f}")
+                    except Exception as e:
+                        print(f"  ERROR: {e}")
 
     # Print summary
     if results:
