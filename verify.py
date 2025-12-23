@@ -80,7 +80,7 @@ class NumericalVerifier:
         logger.info(f"Loading ONNX model from {model_file}...")
         return ort.InferenceSession(model_file, providers=["CPUExecutionProvider"])
 
-    def prepare_inputs(self, prompt: str = "The capital of France is") -> Dict[str, np.ndarray]:
+    def prepare_inputs(self, prompt: str = "Hello, how are") -> Dict[str, np.ndarray]:
         """Prepare input tensors."""
         input_ids = self.tokenizer.encode(prompt, return_tensors="np")
         seq_len = input_ids.shape[1]
@@ -183,8 +183,8 @@ class NumericalVerifier:
         """Verify ONNX model against PyTorch."""
         if prompts is None:
             prompts = [
-                "The capital of France is",
-                "Hello, my name is",
+                "Hello, how are",
+                "The sky is",
                 "1 + 1 =",
             ]
 
@@ -215,7 +215,7 @@ class NumericalVerifier:
                                   prompts: List[str] = None) -> List[VerificationResult]:
         """Verify ONNX model against community version."""
         if prompts is None:
-            prompts = ["The capital of France is"]
+            prompts = ["Hello, how are"]
 
         self.load_pytorch_model()  # For tokenizer
         onnx_sess = self.load_onnx_model(onnx_path)
@@ -241,7 +241,7 @@ class NumericalVerifier:
         self.results.extend(results)
         return results
 
-    def test_generation(self, onnx_path: str, prompt: str = "The capital of France is",
+    def test_generation(self, onnx_path: str, prompt: str = "Hello, how are",
                         max_tokens: int = 10) -> VerificationResult:
         """Test multi-step generation with cache updates."""
         self.load_pytorch_model()

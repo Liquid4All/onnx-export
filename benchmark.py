@@ -180,7 +180,7 @@ class ONNXBenchmark:
     def benchmark(
         self,
         onnx_path: str,
-        prompt: str = "The capital of France is",
+        prompt: str = "Hello, how are",
         max_tokens: int = 20,
     ) -> BenchmarkResult:
         """Benchmark the model."""
@@ -235,7 +235,7 @@ def main():
     parser = argparse.ArgumentParser(description="Benchmark ONNX model performance")
     parser.add_argument("--model", type=str, required=True, help="HuggingFace model path (for tokenizer)")
     parser.add_argument("--onnx", type=str, required=True, help="ONNX model path or directory")
-    parser.add_argument("--prompt", type=str, default="The capital of France is", help="Input prompt")
+    parser.add_argument("--prompt", type=str, default="Hello, how are", help="Input prompt")
     parser.add_argument("--max-tokens", type=int, default=20, help="Max tokens to generate")
     args = parser.parse_args()
 

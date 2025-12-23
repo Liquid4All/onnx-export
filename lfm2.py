@@ -116,6 +116,16 @@ class LFM2Builder:
             epsilon=self.config.norm_eps,
         )
 
+    def make_skip_layernorm(self, input_name: str, skip_name: str, weight_name: str, output_name: str) -> str:
+        """Create SkipSimplifiedLayerNormalization node (fused skip + layernorm)."""
+        return self.make_node(
+            "SkipSimplifiedLayerNormalization",
+            inputs=[input_name, skip_name, weight_name],
+            outputs=[output_name],
+            domain="com.microsoft",
+            epsilon=self.config.norm_eps,
+        )
+
     def make_matmul(self, input_name: str, weight_name: str, output_name: str) -> str:
         """Create MatMul node."""
         return self.make_node("MatMul", [input_name, weight_name], [output_name])
@@ -454,10 +464,12 @@ class LFM2Builder:
 
     def build_lm_head(self, hidden_state: str) -> str:
         """Build LM head."""
-        # Final LayerNorm (embedding_norm serves as final norm in this model)
+        # Final LayerNorm using SkipSimplifiedLayerNormalization (fused op)
+        # Pass hidden_state as both input and skip for better numerical stability
         self.add_initializer("model.embedding_norm.weight",
                              self.weights["model.embedding_norm.weight"])
-        normed = self.make_layernorm(hidden_state, "model.embedding_norm.weight", "final_norm")
+        normed = self.make_skip_layernorm(hidden_state, hidden_state,
+                                          "model.embedding_norm.weight", "final_norm")
 
         # LM head with tied embeddings - use Transpose to share weights
         # This reuses model.embed_tokens.weight instead of storing a separate copy

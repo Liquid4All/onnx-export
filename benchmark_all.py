@@ -212,7 +212,7 @@ class ONNXBenchmark:
         onnx_path: str,
         tokenizer_path: str,
         source: str,
-        prompt: str = "The capital of France is",
+        prompt: str = "Hello, how are",
         max_tokens: int = 20,
     ) -> BenchmarkResult:
         """Benchmark a single model."""
@@ -308,7 +308,7 @@ def main():
     parser.add_argument(
         "--prompt",
         type=str,
-        default="The capital of France is",
+        default="Hello, how are",
         help="Prompt for generation",
     )
     parser.add_argument(

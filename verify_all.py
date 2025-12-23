@@ -163,7 +163,7 @@ class Q4Comparator:
         pytorch_path: str,
         onnx_path: str,
         source: str,
-        prompt: str = "The capital of France is",
+        prompt: str = "Hello, how are",
     ) -> ComparisonResult:
         """Compare a single Q4 model against PyTorch."""
         self.load_pytorch_model(pytorch_path)
@@ -278,7 +278,7 @@ def main():
     parser.add_argument(
         "--prompt",
         type=str,
-        default="The capital of France is",
+        default="Hello, how are",
         help="Prompt for comparison",
     )
     args = parser.parse_args()
