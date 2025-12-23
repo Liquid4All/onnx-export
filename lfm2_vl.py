@@ -12,9 +12,18 @@ The separation of embed_tokens allows clean fusion of text and image embeddings:
 3. Concatenate at <image> positions
 4. decoder(inputs_embeds) -> logits
 
+Vision Input Formats:
+- Tiled (-T): Input [batch, num_patches, 768] with pre-extracted patches
+              Requires complex preprocessing (tiling, patch extraction)
+- Conv2d (-C): Input [batch, 3, H, W] with raw normalized image
+              Simple preprocessing (resize + normalize), like llama.cpp
+
 Usage:
-    # Export single model
-    uv run lfm2_vl.py --model LiquidAI/LFM2-VL-1.6B --output LFM2-VL-1.6B-ONNX-builder
+    # Export with tiled input (default, HuggingFace compatible)
+    uv run lfm2_vl.py --model LiquidAI/LFM2-VL-1.6B --output LFM2-VL-1.6B-ONNX -T
+
+    # Export with conv2d input (simpler preprocessing, llama.cpp style)
+    uv run lfm2_vl.py --model LiquidAI/LFM2-VL-1.6B --output LFM2-VL-1.6B-ONNX -C
 
     # Available models:
     # - LiquidAI/LFM2-VL-450M  (350M backbone + 86M SigLIP2)
@@ -98,12 +107,22 @@ class VisionEmbedBuilder:
     - MLP projector with pixel unshuffle
 
     Output: image embeddings in text embedding space
+
+    Supports two input formats:
+    - "tiled": [batch, num_patches, 768] pre-extracted patches (HuggingFace style)
+    - "conv2d": [batch, 3, H, W] raw image pixels (llama.cpp style)
     """
 
-    def __init__(self, config: LFM2VLConfig):
+    def __init__(self, config: LFM2VLConfig, vision_input_format: str = "tiled"):
+        """
+        Args:
+            config: Model configuration
+            vision_input_format: "tiled" for [B, N, 768] or "conv2d" for [B, 3, H, W]
+        """
         self.config = config
         self.vision_config = config.vision_config
         self.head_dim = config.vision_config.hidden_size // config.vision_config.num_attention_heads
+        self.vision_input_format = vision_input_format
 
         # Projector dimensions
         self.vision_hidden = config.vision_config.hidden_size
@@ -163,21 +182,28 @@ class VisionEmbedBuilder:
                               approximate="tanh")
 
     def build_inputs(self):
-        """Create model inputs."""
-        # pixel_values: [batch, num_patches, hidden_dim]
-        # SigLIP2 uses pre-flattened patches: hidden_dim = channels * patch_h * patch_w = 768
-        # For flexibility, we use dynamic shapes
-        patch_dim = self.vision_config.num_channels * self.vision_config.patch_size * self.vision_config.patch_size
-        self.inputs.append(helper.make_tensor_value_info(
-            "pixel_values", TensorProto.FLOAT,
-            ["batch_size", "num_patches", patch_dim]
-        ))
+        """Create model inputs based on vision_input_format."""
+        if self.vision_input_format == "conv2d":
+            # Conv2d mode: raw image input [batch, channels, height, width]
+            # Simpler preprocessing (just resize + normalize), like llama.cpp
+            self.inputs.append(helper.make_tensor_value_info(
+                "pixel_values", TensorProto.FLOAT,
+                ["batch_size", self.vision_config.num_channels, "height", "width"]
+            ))
+        else:
+            # Tiled mode: pre-extracted patches [batch, num_patches, patch_dim]
+            # Requires complex preprocessing (tiling, patch extraction)
+            patch_dim = self.vision_config.num_channels * self.vision_config.patch_size * self.vision_config.patch_size
+            self.inputs.append(helper.make_tensor_value_info(
+                "pixel_values", TensorProto.FLOAT,
+                ["batch_size", "num_patches", patch_dim]
+            ))
 
-        # patch_attention_mask: [batch, num_patches]
-        self.inputs.append(helper.make_tensor_value_info(
-            "patch_attention_mask", TensorProto.INT64,
-            ["batch_size", "num_patches"]
-        ))
+            # patch_attention_mask only needed for tiled mode
+            self.inputs.append(helper.make_tensor_value_info(
+                "patch_attention_mask", TensorProto.INT64,
+                ["batch_size", "num_patches"]
+            ))
 
     def build_outputs(self):
         """Create model outputs."""
@@ -190,27 +216,65 @@ class VisionEmbedBuilder:
     def build_patch_embedding(self) -> str:
         """Build patch embedding layer with position embeddings.
 
-        SigLIP2 uses pre-flattened patches, so patch_embedding is a Linear layer.
+        Supports two modes:
+        - Tiled: Input [B, N, 768], uses Linear projection
+        - Conv2d: Input [B, 3, H, W], uses Conv2d(kernel=16, stride=16)
+
         Position embeddings are bilinearly interpolated from 16x16 to match input spatial size.
 
-        Input: [batch, num_patches, patch_dim] where patch_dim = C * P * P
         Output: [batch, num_patches, hidden_size]
         """
         prefix = "vision_model.embeddings.patch_embedding"
         H = self.vision_config.hidden_size
+        P = self.vision_config.patch_size  # 16
+        C = self.vision_config.num_channels  # 3
 
-        # =====================================================================
-        # Patch embedding (Linear)
-        # =====================================================================
-        weight = self.weights[f"{prefix}.weight"]
-        self.add_initializer(f"{prefix}.weight", weight.T)  # Transpose for MatMul
-        self.add_initializer(f"{prefix}.bias", self.weights[f"{prefix}.bias"])
+        # Load patch embedding weights
+        linear_weight = self.weights[f"{prefix}.weight"]  # [hidden_size, patch_dim] = [768, 768]
+        linear_bias = self.weights[f"{prefix}.bias"]  # [hidden_size]
 
-        # MatMul: [B, N, patch_dim] x [patch_dim, H] -> [B, N, H]
-        matmul_out = self.make_node("MatMul", ["pixel_values", f"{prefix}.weight"],
-                                    ["patch_embed/matmul"])
-        patch_embeds = self.make_node("Add", [matmul_out, f"{prefix}.bias"],
-                                      ["patch_embed/out"])
+        if self.vision_input_format == "conv2d":
+            # =====================================================================
+            # Conv2d mode: reshape Linear weights to Conv2d format
+            # Linear: [hidden_size, C*P*P] -> Conv2d: [hidden_size, C, P, P]
+            # =====================================================================
+            # Reshape weight from [H, C*P*P] to [H, C, P, P]
+            # Note: Linear weight is [out_features, in_features] = [768, 768]
+            # Conv2d weight should be [out_channels, in_channels, kH, kW] = [768, 3, 16, 16]
+            conv_weight = linear_weight.reshape(H, P, P, C).transpose(0, 3, 1, 2)  # [H, C, P, P]
+            self.add_initializer(f"{prefix}.conv_weight", conv_weight)
+            self.add_initializer(f"{prefix}.bias", linear_bias)
+
+            # Conv2d: [B, C, H, W] -> [B, hidden, H/P, W/P]
+            conv_out = self.make_node(
+                "Conv",
+                ["pixel_values", f"{prefix}.conv_weight", f"{prefix}.bias"],
+                ["patch_embed/conv_out"],
+                kernel_shape=[P, P],
+                strides=[P, P],
+                pads=[0, 0, 0, 0],
+            )
+
+            # Reshape from [B, H, h, w] to [B, h*w, H]
+            # First transpose to [B, h, w, H]
+            transposed = self.make_node("Transpose", [conv_out], ["patch_embed/transposed"],
+                                        perm=[0, 2, 3, 1])
+            # Then reshape to [B, N, H]
+            self.add_initializer("patch_embed/reshape_3d", np.array([0, -1, H], dtype=np.int64))
+            patch_embeds = self.make_node("Reshape", [transposed, "patch_embed/reshape_3d"],
+                                          ["patch_embed/out"])
+        else:
+            # =====================================================================
+            # Tiled mode: Linear projection (original)
+            # =====================================================================
+            self.add_initializer(f"{prefix}.weight", linear_weight.T)  # Transpose for MatMul
+            self.add_initializer(f"{prefix}.bias", linear_bias)
+
+            # MatMul: [B, N, patch_dim] x [patch_dim, H] -> [B, N, H]
+            matmul_out = self.make_node("MatMul", ["pixel_values", f"{prefix}.weight"],
+                                        ["patch_embed/matmul"])
+            patch_embeds = self.make_node("Add", [matmul_out, f"{prefix}.bias"],
+                                          ["patch_embed/out"])
 
         # =====================================================================
         # Position embeddings with bilinear interpolation
@@ -224,29 +288,55 @@ class VisionEmbedBuilder:
         pos_emb_4d = pos_emb_4d[np.newaxis, ...]  # (1, 768, 16, 16)
         self.add_initializer("pos_emb/4d", pos_emb_4d)
 
-        # Get target spatial size from input shape: sqrt(num_patches)
-        # Use scalar indices to get scalar outputs from Gather
-        self.add_initializer("pos_emb/idx_1", np.array(1, dtype=np.int64))  # scalar
+        # Get target spatial size based on input format
         input_shape = self.make_node("Shape", ["pixel_values"], ["pos_emb/input_shape"])
-        num_patches = self.make_node("Gather", [input_shape, "pos_emb/idx_1"],
-                                     ["pos_emb/num_patches"], axis=0)
-
-        # sqrt(num_patches) to get spatial size
-        num_patches_float = self.make_node("Cast", [num_patches], ["pos_emb/np_float"],
-                                           to=TensorProto.FLOAT)
-        spatial_float = self.make_node("Sqrt", [num_patches_float], ["pos_emb/spatial_float"])
-        spatial_int = self.make_node("Cast", [spatial_float], ["pos_emb/spatial_int"],
-                                     to=TensorProto.INT64)
-
-        # Build target size tensor: [1, 768, target_h, target_w]
-        self.add_initializer("pos_emb/one", np.array([1], dtype=np.int64))
-        self.add_initializer("pos_emb/hidden", np.array([H], dtype=np.int64))
         self.add_initializer("pos_emb/axes_0", np.array([0], dtype=np.int64))
-        spatial_unsq = self.make_node("Unsqueeze", [spatial_int, "pos_emb/axes_0"], ["pos_emb/spatial_unsq"])
 
-        target_size = self.make_node("Concat", [
-            "pos_emb/one", "pos_emb/hidden", spatial_unsq, spatial_unsq
-        ], ["pos_emb/target_size"], axis=0)
+        if self.vision_input_format == "conv2d":
+            # Conv2d mode: input is [B, C, H, W], target size is [H/P, W/P]
+            self.add_initializer("pos_emb/idx_2", np.array(2, dtype=np.int64))  # height index
+            self.add_initializer("pos_emb/idx_3", np.array(3, dtype=np.int64))  # width index
+            self.add_initializer("pos_emb/patch_size", np.array(P, dtype=np.int64))
+
+            img_h = self.make_node("Gather", [input_shape, "pos_emb/idx_2"],
+                                   ["pos_emb/img_h"], axis=0)
+            img_w = self.make_node("Gather", [input_shape, "pos_emb/idx_3"],
+                                   ["pos_emb/img_w"], axis=0)
+
+            # spatial_h = img_h / patch_size, spatial_w = img_w / patch_size
+            spatial_h = self.make_node("Div", [img_h, "pos_emb/patch_size"], ["pos_emb/spatial_h"])
+            spatial_w = self.make_node("Div", [img_w, "pos_emb/patch_size"], ["pos_emb/spatial_w"])
+
+            # Build target size tensor: [1, 768, spatial_h, spatial_w]
+            self.add_initializer("pos_emb/one", np.array([1], dtype=np.int64))
+            self.add_initializer("pos_emb/hidden", np.array([H], dtype=np.int64))
+            spatial_h_unsq = self.make_node("Unsqueeze", [spatial_h, "pos_emb/axes_0"], ["pos_emb/spatial_h_unsq"])
+            spatial_w_unsq = self.make_node("Unsqueeze", [spatial_w, "pos_emb/axes_0"], ["pos_emb/spatial_w_unsq"])
+
+            target_size = self.make_node("Concat", [
+                "pos_emb/one", "pos_emb/hidden", spatial_h_unsq, spatial_w_unsq
+            ], ["pos_emb/target_size"], axis=0)
+        else:
+            # Tiled mode: input is [B, N, patch_dim], target size is sqrt(N) x sqrt(N)
+            self.add_initializer("pos_emb/idx_1", np.array(1, dtype=np.int64))  # scalar
+            num_patches = self.make_node("Gather", [input_shape, "pos_emb/idx_1"],
+                                         ["pos_emb/num_patches"], axis=0)
+
+            # sqrt(num_patches) to get spatial size
+            num_patches_float = self.make_node("Cast", [num_patches], ["pos_emb/np_float"],
+                                               to=TensorProto.FLOAT)
+            spatial_float = self.make_node("Sqrt", [num_patches_float], ["pos_emb/spatial_float"])
+            spatial_int = self.make_node("Cast", [spatial_float], ["pos_emb/spatial_int"],
+                                         to=TensorProto.INT64)
+
+            # Build target size tensor: [1, 768, target_h, target_w]
+            self.add_initializer("pos_emb/one", np.array([1], dtype=np.int64))
+            self.add_initializer("pos_emb/hidden", np.array([H], dtype=np.int64))
+            spatial_unsq = self.make_node("Unsqueeze", [spatial_int, "pos_emb/axes_0"], ["pos_emb/spatial_unsq"])
+
+            target_size = self.make_node("Concat", [
+                "pos_emb/one", "pos_emb/hidden", spatial_unsq, spatial_unsq
+            ], ["pos_emb/target_size"], axis=0)
 
         # Use Resize with bilinear interpolation
         # Resize needs: X, roi, scales, sizes
@@ -836,12 +926,20 @@ class DecoderBuilder:
             ))
 
 
-def export_vl_model(model_path: str, output_dir: str):
-    """Export LFM2-VL model to ONNX (embed_tokens + embed_images + decoder)."""
+def export_vl_model(model_path: str, output_dir: str, vision_input_format: str = "tiled"):
+    """Export LFM2-VL model to ONNX (embed_tokens + embed_images + decoder).
+
+    Args:
+        model_path: HuggingFace model path
+        output_dir: Output directory for ONNX files
+        vision_input_format: "tiled" for [B, N, 768] or "conv2d" for [B, 3, H, W]
+    """
     import os
     import json
     from transformers import AutoConfig, AutoTokenizer, AutoProcessor
     import torch
+
+    logger.info(f"Vision input format: {vision_input_format}")
 
     # Load config
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
@@ -882,12 +980,14 @@ def export_vl_model(model_path: str, output_dir: str):
     # embed_tokens is small enough to not need external data
     onnx.save_model(embed_tokens_model, embed_tokens_path)
     logger.info(f"embed_tokens saved to {embed_tokens_path}")
+    del embed_tokens_model
+    del embed_tokens_builder
 
     # =========================================================================
     # 2. Export embed_images (vision encoder + projector)
     # =========================================================================
-    logger.info("Exporting embed_images (vision encoder + projector)...")
-    vision_builder = VisionEmbedBuilder(vl_config)
+    logger.info(f"Exporting embed_images (vision encoder + projector) [{vision_input_format} mode]...")
+    vision_builder = VisionEmbedBuilder(vl_config, vision_input_format=vision_input_format)
     vision_builder.load_weights(weights)
     vision_model = vision_builder.build()
 
@@ -896,8 +996,14 @@ def export_vl_model(model_path: str, output_dir: str):
     if os.path.exists(vision_data_path):
         os.remove(vision_data_path)
     onnx.save_model(vision_model, vision_path, save_as_external_data=True,
-                    all_tensors_to_one_file=True, location="embed_images.onnx_data")
+                    all_tensors_to_one_file=True, location="embed_images.onnx_data",
+                    size_threshold=1024)
     logger.info(f"embed_images saved to {vision_path}")
+
+    # Free memory before decoder export
+    del vision_model
+    del vision_builder
+    gc.collect()
 
     # =========================================================================
     # 3. Export decoder (takes inputs_embeds, not input_ids)
@@ -915,6 +1021,10 @@ def export_vl_model(model_path: str, output_dir: str):
         elif name.startswith("language_model."):
             new_name = name.replace("language_model.", "model.")
             text_builder.weights[new_name] = weight
+
+    # Clear original weights to free memory
+    weights.clear()
+    gc.collect()
 
     # Build custom inputs: inputs_embeds instead of input_ids
     H = vl_config.text_config.hidden_size
@@ -982,6 +1092,11 @@ def export_vl_model(model_path: str, output_dir: str):
 
     text_builder.build_lm_head(hidden_state)
 
+    # Clear weights dict to free memory before graph creation
+    text_builder.weights.clear()
+    gc.collect()
+
+    logger.info("Building decoder graph...")
     text_graph = helper.make_graph(
         text_builder.nodes,
         "decoder",
@@ -1000,13 +1115,24 @@ def export_vl_model(model_path: str, output_dir: str):
     )
     text_model.producer_name = "lfm2-vl-builder"
 
+    # Clear references to free memory
+    text_builder.nodes.clear()
+    text_builder.initializers.clear()
+    gc.collect()
+
     decoder_path = os.path.join(onnx_dir, "decoder.onnx")
     decoder_data_path = os.path.join(onnx_dir, "decoder.onnx_data")
     if os.path.exists(decoder_data_path):
         os.remove(decoder_data_path)
+
+    logger.info("Saving decoder (this may take a while for large models)...")
     onnx.save_model(text_model, decoder_path, save_as_external_data=True,
-                    all_tensors_to_one_file=True, location="decoder.onnx_data")
+                    all_tensors_to_one_file=True, location="decoder.onnx_data",
+                    size_threshold=1024)  # Move tensors > 1KB to external file
     logger.info(f"decoder saved to {decoder_path}")
+
+    del text_model
+    gc.collect()
 
     # Copy tokenizer and config
     try:
@@ -1054,7 +1180,21 @@ if __name__ == "__main__":
                         help="Model path (e.g., LiquidAI/LFM2-VL-1.6B)")
     parser.add_argument("--output", type=str, required=True,
                         help="Output directory")
+
+    # Vision input format: mutually exclusive -T (tiled) or -C (conv2d)
+    format_group = parser.add_mutually_exclusive_group()
+    format_group.add_argument("-T", "--tiled", action="store_true",
+                              help="Tiled input format [B, N, 768] (default, HuggingFace style)")
+    format_group.add_argument("-C", "--conv2d", action="store_true",
+                              help="Conv2d input format [B, 3, H, W] (simpler, llama.cpp style)")
+
     args = parser.parse_args()
 
+    # Determine vision input format
+    if args.conv2d:
+        vision_input_format = "conv2d"
+    else:
+        vision_input_format = "tiled"  # default
+
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
-    export_vl_model(args.model, args.output)
+    export_vl_model(args.model, args.output, vision_input_format=vision_input_format)

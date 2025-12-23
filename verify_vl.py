@@ -254,12 +254,48 @@ class VLVerifier:
     # Vision Encoder Verification
     # =========================================================================
 
+    def _detect_vision_format(self) -> str:
+        """Detect vision input format from ONNX model inputs."""
+        for inp in self.embed_images_sess.get_inputs():
+            if inp.name == "pixel_values":
+                # Check shape: tiled has [B, N, 768], conv2d has [B, 3, H, W]
+                shape = inp.shape
+                if len(shape) == 4:
+                    return "conv2d"
+                elif len(shape) == 3:
+                    return "tiled"
+        return "tiled"  # default
+
+    def _preprocess_conv2d(self, image) -> np.ndarray:
+        """Preprocess image for conv2d format: resize + normalize to [1, 3, H, W]."""
+        from PIL import Image
+
+        # Resize to 512x512 (or model's expected size)
+        target_size = 512
+        image = image.resize((target_size, target_size), Image.BILINEAR)
+
+        # Convert to numpy and normalize
+        pixels = np.array(image).astype(np.float32) / 255.0
+
+        # Normalize with ImageNet stats (same as SigLIP2)
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+        pixels = (pixels - mean) / std
+
+        # Convert to [1, 3, H, W]
+        pixels = pixels.transpose(2, 0, 1)[np.newaxis, ...]
+        return pixels.astype(np.float32)
+
     def verify_vision_encoder(self, image) -> List[VerificationResult]:
         """Verify vision encoder + projector outputs."""
         import torch
 
         logger.info("Verifying vision encoder + projector...")
         results = []
+
+        # Detect vision input format
+        vision_format = self._detect_vision_format()
+        logger.info(f"Detected vision format: {vision_format}")
 
         # Process image using image_processor directly
         # The main processor requires text, but for vision-only we just need pixel values
@@ -301,33 +337,60 @@ class VLVerifier:
             # Stack only tiles with matching shapes (first N-1 usually have same shape)
             pytorch_embeddings = pytorch_embeddings_list
 
-        # ONNX - processor returns (batch, num_patches, hidden_dim)
-        # ONNX model now also expects 3D input (after fix to use Linear instead of Conv2D)
-        onnx_pixel_values = pixel_values.numpy().astype(np.float32)
-        patch_attention_mask = pixel_attention_mask.numpy().astype(np.int64)
+        # ONNX - handle different input formats
+        if vision_format == "conv2d":
+            # Conv2d format: [B, 3, H, W] raw image input
+            onnx_pixel_values = self._preprocess_conv2d(image)
+            logger.info(f"Conv2d input shape: {onnx_pixel_values.shape}")
 
-        onnx_outputs = self.embed_images_sess.run(None, {
-            "pixel_values": onnx_pixel_values,
-            "patch_attention_mask": patch_attention_mask,
-        })
-        onnx_embeddings = onnx_outputs[0]  # (num_tiles, num_tokens, hidden)
+            onnx_outputs = self.embed_images_sess.run(None, {
+                "pixel_values": onnx_pixel_values,
+            })
+            onnx_embeddings = onnx_outputs[0]  # (1, num_tokens, hidden)
 
-        logger.info(f"PyTorch embeddings: {len(pytorch_embeddings)} tiles, shapes: {[e.shape for e in pytorch_embeddings]}")
-        logger.info(f"ONNX embeddings shape: {onnx_embeddings.shape}")
+            # For conv2d, we only have one "tile" (the whole image)
+            # Compare with first pytorch tile (or concatenated if multiple)
+            pytorch_concat = torch.cat(pytorch_embeddings_list, dim=0).numpy()
+            onnx_flat = onnx_embeddings[0]
 
-        # Compare per tile (only matching spatial shapes)
-        for tile_idx, pytorch_tile in enumerate(pytorch_embeddings):
-            pytorch_np = pytorch_tile.numpy()
-            onnx_tile = onnx_embeddings[tile_idx]
+            # Compare what we can (sizes may differ due to different spatial handling)
+            min_tokens = min(pytorch_concat.shape[0], onnx_flat.shape[0])
+            logger.info(f"PyTorch tokens: {pytorch_concat.shape[0]}, ONNX tokens: {onnx_flat.shape[0]}, comparing first {min_tokens}")
 
-            # ONNX uses fixed 256 tokens (32x32 / 4 = 256), PyTorch uses actual spatial shape
-            # Compare the overlap region
-            min_tokens = min(pytorch_np.shape[0], onnx_tile.shape[0])
-            pytorch_np = pytorch_np[:min_tokens]
-            onnx_tile = onnx_tile[:min_tokens]
-
-            result = self.compare_arrays(f"vision_tile_{tile_idx}", pytorch_np, onnx_tile)
+            result = self.compare_arrays(
+                "vision_conv2d",
+                pytorch_concat[:min_tokens],
+                onnx_flat[:min_tokens]
+            )
             results.append(result)
+
+        else:
+            # Tiled format: [B, N, 768] pre-extracted patches
+            onnx_pixel_values = pixel_values.numpy().astype(np.float32)
+            patch_attention_mask = pixel_attention_mask.numpy().astype(np.int64)
+
+            onnx_outputs = self.embed_images_sess.run(None, {
+                "pixel_values": onnx_pixel_values,
+                "patch_attention_mask": patch_attention_mask,
+            })
+            onnx_embeddings = onnx_outputs[0]  # (num_tiles, num_tokens, hidden)
+
+            logger.info(f"PyTorch embeddings: {len(pytorch_embeddings)} tiles, shapes: {[e.shape for e in pytorch_embeddings]}")
+            logger.info(f"ONNX embeddings shape: {onnx_embeddings.shape}")
+
+            # Compare per tile (only matching spatial shapes)
+            for tile_idx, pytorch_tile in enumerate(pytorch_embeddings):
+                pytorch_np = pytorch_tile.numpy()
+                onnx_tile = onnx_embeddings[tile_idx]
+
+                # ONNX uses fixed 256 tokens (32x32 / 4 = 256), PyTorch uses actual spatial shape
+                # Compare the overlap region
+                min_tokens = min(pytorch_np.shape[0], onnx_tile.shape[0])
+                pytorch_np = pytorch_np[:min_tokens]
+                onnx_tile = onnx_tile[:min_tokens]
+
+                result = self.compare_arrays(f"vision_tile_{tile_idx}", pytorch_np, onnx_tile)
+                results.append(result)
 
         self.results.extend(results)
         return results

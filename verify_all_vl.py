@@ -6,32 +6,40 @@ Verifies numerical correctness across all model sizes and quantization variants.
 
 Available models: 450M, 1.6B, 3B
 Available variants: FP32, B4V4, B4V8, B8V8
+Available formats: -T (tiled), -C (conv2d)
 
 Usage:
-    # Verify all models and variants
-    uv run verify_all_vl.py
+    # Verify all models with tiled format (default)
+    uv run verify_all_vl.py -T
+
+    # Verify all models with conv2d format
+    uv run verify_all_vl.py -C
+
+    # Verify both formats
+    uv run verify_all_vl.py -T -C
 
     # Verify specific models
-    uv run verify_all_vl.py --models 450M 1.6B
+    uv run verify_all_vl.py -T --models 450M 1.6B
 
     # Verify specific variants
-    uv run verify_all_vl.py --variants FP32 B4V8
+    uv run verify_all_vl.py -T --variants FP32 B4V8
 
     # Verify single combination
-    uv run verify_all_vl.py --models 450M --variants B4V8
+    uv run verify_all_vl.py -T --models 450M --variants B4V8
 
     # Custom tolerances for quantized models
-    uv run verify_all_vl.py --quant-atol 0.1 --quant-rtol 0.1
+    uv run verify_all_vl.py -T --quant-atol 0.1 --quant-rtol 0.1
 
     # Use specific image for vision tests
-    uv run verify_all_vl.py --image cardinal.jpg
+    uv run verify_all_vl.py -T --image cardinal.jpg
 """
 
 import argparse
+import gc
 import logging
-import subprocess
-import sys
 from pathlib import Path
+
+from verify_vl import VLVerifier
 
 logger = logging.getLogger(__name__)
 
@@ -49,57 +57,67 @@ VARIANTS = {
     "B8V8": (8, 8),
 }
 
+# Vision input formats
+FORMATS = {
+    "T": "tiled",   # [B, N, 768] pre-extracted patches
+    "C": "conv2d",  # [B, 3, H, W] raw image
+}
 
-def get_onnx_dir(size: str, variant: str) -> str:
-    """Get ONNX directory name for a model/variant combination."""
+
+def get_onnx_dir(size: str, variant: str, format_key: str) -> str:
+    """Get ONNX directory name for a model/variant/format combination."""
+    suffix = f"-{format_key}"
     if VARIANTS[variant] is None:
-        return f"LFM2-VL-{size}-ONNX"
+        return f"LFM2-VL-{size}-ONNX{suffix}"
     else:
         backbone_bits, vision_bits = VARIANTS[variant]
-        return f"LFM2-VL-{size}-ONNX-B{backbone_bits}V{vision_bits}"
+        return f"LFM2-VL-{size}-ONNX-B{backbone_bits}V{vision_bits}{suffix}"
 
 
 def verify_model(
-    size: str,
-    variant: str,
-    output_dir: Path,
-    model_path: str,
-    image: str | None,
-    atol: float,
-    rtol: float,
+    verifier: VLVerifier,
+    onnx_dir: Path,
+    image_path: str | None,
 ) -> tuple[bool, str]:
-    """Verify a single model/variant combination."""
-    onnx_dir = output_dir / get_onnx_dir(size, variant)
-
+    """Verify a single model/variant/format combination."""
     if not onnx_dir.exists():
         return False, f"Not found: {onnx_dir}"
 
-    cmd = [
-        sys.executable, "verify_vl.py",
-        "--model", model_path,
-        "--onnx", str(onnx_dir),
-        "--atol", str(atol),
-        "--rtol", str(rtol),
-    ]
+    # Clear previous results
+    verifier.results.clear()
 
-    if image:
-        cmd.extend(["--image", image])
+    # Load ONNX models
+    verifier.load_onnx_embed_tokens(str(onnx_dir))
+    verifier.load_onnx_vision(str(onnx_dir))
+    verifier.load_onnx_decoder(str(onnx_dir))
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Run verifications
+    verifier.verify_embed_tokens()
+    image = verifier.load_image(image_path)
+    verifier.verify_vision_encoder(image)
+    verifier.verify_decoder()
 
-    # Extract summary from output
-    summary = ""
-    for line in result.stdout.split('\n'):
-        if 'SUMMARY:' in line:
-            summary = line.strip()
-            break
+    # Print report and get result
+    success = verifier.print_report()
 
-    if result.returncode == 0:
-        return True, summary
+    passed = sum(1 for r in verifier.results if r.passed)
+    total = len(verifier.results)
+
+    # Build summary with failed checks
+    failed = [r for r in verifier.results if not r.passed]
+    if failed:
+        failed_names = ", ".join(r.name for r in failed)
+        summary = f"{passed}/{total} passed, FAILED: {failed_names}"
     else:
-        # Try to get error info
-        error = result.stderr.strip().split('\n')[-1] if result.stderr else "Unknown error"
-        return False, error
+        summary = f"{passed}/{total} passed"
+
+    # Clean up ONNX sessions to avoid resource leaks
+    verifier.embed_tokens_sess = None
+    verifier.embed_images_sess = None
+    verifier.decoder_sess = None
+    gc.collect()
+
+    return success, summary
 
 
 def main():
@@ -107,6 +125,17 @@ def main():
         description="Batch verification for LFM2-VL ONNX exports",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__
+    )
+    # Vision input format
+    parser.add_argument(
+        "-T", "--tiled",
+        action="store_true",
+        help="Verify tiled format models [B, N, 768]",
+    )
+    parser.add_argument(
+        "-C", "--conv2d",
+        action="store_true",
+        help="Verify conv2d format models [B, 3, H, W]",
     )
     parser.add_argument(
         "--models",
@@ -160,6 +189,15 @@ def main():
     )
     args = parser.parse_args()
 
+    # Determine which formats to verify
+    format_keys = []
+    if args.tiled:
+        format_keys.append("T")
+    if args.conv2d:
+        format_keys.append("C")
+    if not format_keys:
+        format_keys = ["T"]  # Default to tiled
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(levelname)s - %(message)s"
@@ -170,33 +208,51 @@ def main():
     logger.info("=" * 70)
     logger.info("LFM2-VL BATCH VERIFICATION")
     logger.info("=" * 70)
+    logger.info(f"Formats: {format_keys}")
     logger.info(f"Models: {args.models}")
     logger.info(f"Variants: {args.variants}")
     logger.info(f"Output dir: {args.output_dir}")
     logger.info("")
 
-    for size in args.models:
-        model_path = MODELS[size]
-        logger.info(f"--- Model: {size} ({model_path}) ---")
+    # Cache verifiers per model to avoid reloading PyTorch model
+    verifiers: dict[str, VLVerifier] = {}
 
-        for variant in args.variants:
-            # Use different tolerances for FP32 vs quantized
-            if variant == "FP32":
-                atol, rtol = args.fp32_atol, args.fp32_rtol
-            else:
-                atol, rtol = args.quant_atol, args.quant_rtol
+    for format_key in format_keys:
+        format_name = FORMATS[format_key]
+        logger.info(f"=== Format: {format_key} ({format_name}) ===")
 
-            key = f"{size}_{variant}"
-            onnx_name = get_onnx_dir(size, variant)
+        for size in args.models:
+            model_path = MODELS[size]
+            logger.info(f"\n--- Model: {size} ({model_path}) ---")
 
-            logger.info(f"  Verifying {variant} ({onnx_name})...")
-            success, message = verify_model(
-                size, variant, args.output_dir, model_path, args.image, atol, rtol
-            )
-            results[key] = (success, message)
+            for variant in args.variants:
+                # Use different tolerances for FP32 vs quantized
+                if variant == "FP32":
+                    atol, rtol = args.fp32_atol, args.fp32_rtol
+                else:
+                    atol, rtol = args.quant_atol, args.quant_rtol
 
-            status = "OK" if success else "FAIL"
-            logger.info(f"    {status}: {message}")
+                key = f"{size}_{variant}_{format_key}"
+                onnx_dir = args.output_dir / get_onnx_dir(size, variant, format_key)
+
+                logger.info(f"  Verifying {variant} ({onnx_dir.name})...")
+
+                # Get or create verifier for this model size
+                verifier_key = f"{size}_{atol}_{rtol}"
+                if verifier_key not in verifiers:
+                    verifiers[verifier_key] = VLVerifier(model_path, atol=atol, rtol=rtol)
+                    verifiers[verifier_key].load_pytorch_model()
+
+                verifier = verifiers[verifier_key]
+                # Update tolerances if different
+                verifier.atol = atol
+                verifier.rtol = rtol
+
+                success, message = verify_model(verifier, onnx_dir, args.image)
+                results[key] = (success, message)
+
+                status = "OK" if success else "FAIL"
+                logger.info(f"    {status}: {message}")
 
         logger.info("")
 
