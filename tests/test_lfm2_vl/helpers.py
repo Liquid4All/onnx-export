@@ -12,7 +12,7 @@ from transformers import AutoModelForImageTextToText, AutoProcessor
 
 logger = logging.getLogger(__name__)
 
-VISION_BITS = [None, 8]
+VISION_BITS = [None, 4, 8]
 
 # (bits, verification_checks)
 DECODER_CONFIGS = [
@@ -21,7 +21,13 @@ DECODER_CONFIGS = [
     pytest.param(8, ["arrays", "top_k"], id="q8"),
 ]
 
-QUANT_CONFIGS = [(None, None), (4, 8), (8, 8)]
+# (decoder_bits, vision_bits)
+QUANT_CONFIGS = [
+    (None, None),  # fp32/fp32 - reference
+    (4, 4),        # q4/q4 - WebGPU optimized
+    (4, 8),        # q4/q8
+    (8, 8),        # q8/q8
+]
 
 ATOL = 1e-3
 RTOL = 1e-2
