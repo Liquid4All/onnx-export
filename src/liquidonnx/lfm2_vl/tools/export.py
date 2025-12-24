@@ -14,31 +14,27 @@ Output Structure (Transformers.js compatible):
         └── onnx/
             ├── embed_tokens.onnx
             ├── embed_images_fp32.onnx
-            ├── embed_images_q{4,8}.onnx
+            ├── embed_images_q8.onnx
             ├── decoder_fp32.onnx
-            └── decoder_q{4,8}.onnx
+            ├── decoder_q4.onnx
+            └── decoder_q8.onnx
 
 Usage:
-    # Export all predefined models (both formats by default)
+    # Export FP32 only (all sizes, both formats)
     lfm2-vl-export --sizes all
 
-    # Export specific sizes
-    lfm2-vl-export --sizes 450M 1.6B
+    # Export with all quantizations (q4, q8)
+    lfm2-vl-export --sizes all --quantize
+
+    # Export with specific quantization
+    lfm2-vl-export --sizes 450M --quantize q4
+    lfm2-vl-export --sizes 450M --quantize q4 q8
+
+    # Quantize existing exports (skip FP32 export)
+    lfm2-vl-export --sizes all --quantize --skip-export
 
     # Export only tiled format
-    lfm2-vl-export --sizes 450M --tiled
-
-    # Export only conv2d format
-    lfm2-vl-export --sizes 450M --conv2d
-
-    # Export with quantization
-    lfm2-vl-export --sizes 450M --decoder-bits 4 --vision-bits 8
-
-    # Skip FP32 export, only quantize existing models
-    lfm2-vl-export --sizes 450M --skip-export --decoder-bits 4 --vision-bits 8
-
-    # Custom output directory
-    lfm2-vl-export --sizes all --output-dir ./my_models
+    lfm2-vl-export --sizes 450M --tiled --quantize
 """
 
 import argparse
@@ -63,25 +59,24 @@ def do_export(model_path: str, output_path: pathlib.Path, fmt: str):
     export_vl_model(model_path, str(output_path), vision_input_format=fmt)
 
 
-def do_quantize(onnx_dir: pathlib.Path, decoder_bits: int, vision_bits: int,
-                block_size: int = 32):
-    """Quantize a VL model (in-place)."""
+def do_quantize(onnx_dir: pathlib.Path, decoder_bits: int, block_size: int = 32):
+    """Quantize a VL model. Vision encoder is always Q8."""
     if not onnx_dir.exists():
         raise FileNotFoundError(f"ONNX directory not found: {onnx_dir}")
 
-    logger.info(f"Quantizing -> decoder_q{decoder_bits}, embed_images_q{vision_bits}...")
+    logger.info(f"Quantizing {onnx_dir.parent.name} -> q{decoder_bits}...")
 
-    # Quantize embed_images
+    # Quantize embed_images to Q8 (only if not already done)
     embed_fp32 = onnx_dir / "embed_images_fp32.onnx"
     if not embed_fp32.exists():
         embed_fp32 = onnx_dir / "embed_images.onnx"
 
-    if embed_fp32.exists():
+    embed_q8 = onnx_dir / "embed_images_q8.onnx"
+    if embed_fp32.exists() and not embed_q8.exists():
         _, embed_orig_mb = get_model_size(embed_fp32)
-        embed_output = onnx_dir / f"embed_images_q{vision_bits}.onnx"
-        quantize_model(embed_fp32, embed_output, bits=vision_bits,
+        quantize_model(embed_fp32, embed_q8, bits=8,
                        block_size=block_size, exclude_lm_head=False)
-        _, embed_quant_mb = get_model_size(embed_output)
+        _, embed_quant_mb = get_model_size(embed_q8)
         logger.info(f"  embed_images: {embed_orig_mb:.1f} -> {embed_quant_mb:.1f} MB "
                     f"({embed_orig_mb/embed_quant_mb:.1f}x)")
 
@@ -137,16 +132,10 @@ def main():
 
     # Quantization
     parser.add_argument(
-        "--decoder-bits",
-        type=int,
-        choices=[4, 8],
-        help="Quantize decoder to INT4 or INT8 (requires --vision-bits)",
-    )
-    parser.add_argument(
-        "--vision-bits",
-        type=int,
-        choices=[4, 8],
-        help="Quantize vision encoder to INT4 or INT8 (requires --decoder-bits)",
+        "--quantize",
+        nargs="*",
+        metavar="BITS",
+        help="Quantize models: q4, q8, or both (default if no args)",
     )
     parser.add_argument(
         "--skip-export",
@@ -164,9 +153,17 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
-    # Validate arguments
-    if (args.decoder_bits is None) != (args.vision_bits is None):
-        parser.error("Both --decoder-bits and --vision-bits must be specified together")
+    # Parse quantization options
+    quant_bits = []
+    if args.quantize is not None:
+        if len(args.quantize) == 0:
+            quant_bits = [4, 8]
+        else:
+            for q in args.quantize:
+                q = q.lower().replace("q", "")
+                if q not in ("4", "8"):
+                    parser.error(f"Invalid quantization: {q}. Use q4 or q8.")
+                quant_bits.append(int(q))
 
     formats = [m for m in VISION_MODES if getattr(args, m)] or VISION_MODES
     sizes = list(MODELS.keys()) if "all" in args.sizes else args.sizes
@@ -182,12 +179,11 @@ def main():
                 do_export(MODELS[size], get_output_dir(size, fmt, args.output_dir), fmt)
 
     # Quantize
-    if args.decoder_bits:
+    for bits in quant_bits:
         for fmt in formats:
             for size in sizes:
                 onnx_dir = get_output_dir(size, fmt, args.output_dir) / "onnx"
-                do_quantize(onnx_dir, args.decoder_bits, args.vision_bits,
-                            args.block_size)
+                do_quantize(onnx_dir, bits, args.block_size)
 
 
 if __name__ == "__main__":
