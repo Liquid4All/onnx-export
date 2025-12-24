@@ -12,27 +12,14 @@ from transformers import AutoModelForImageTextToText, AutoProcessor
 
 logger = logging.getLogger(__name__)
 
-VISION_BITS = [None, 4, 8]
-
-# (bits, verification_checks)
-DECODER_CONFIGS = [
-    pytest.param(None, ["arrays", "top_k"], id="fp32"),
-    pytest.param(4, ["top_k"], id="q4"),
-    pytest.param(8, ["arrays", "top_k"], id="q8"),
-]
-
-# (decoder_bits, vision_bits)
-QUANT_CONFIGS = [
-    (None, None),  # fp32/fp32 - reference
-    (4, 4),        # q4/q4 - WebGPU optimized
-    (4, 8),        # q4/q8
-    (8, 8),        # q8/q8
-]
-
 ATOL = 1e-3
 RTOL = 1e-2
 ATOL_QUANT = 0.5
 RTOL_QUANT = 0.5
+
+
+def bits_to_str(bits: int | None) -> str:
+    return f"q{bits}" if bits else "fp32"
 
 
 @dataclass
@@ -104,4 +91,27 @@ def compare_arrays(name: str, expected: np.ndarray, actual: np.ndarray,
     return VerificationResult(
         name=name, passed=passed,
         max_diff=max_diff, mean_diff=mean_diff, correlation=correlation,
+    )
+
+
+def compare_correlation(name: str, expected: np.ndarray, actual: np.ndarray,
+                        threshold: float) -> VerificationResult:
+    """Check correlation between arrays (for quantized models where exact match isn't expected)."""
+    if expected.shape != actual.shape:
+        return VerificationResult(
+            name=name, passed=False,
+            max_diff=float('inf'), mean_diff=float('inf'), correlation=0.0,
+            details=f"Shape mismatch: {expected.shape} vs {actual.shape}"
+        )
+
+    diff = np.abs(expected - actual)
+    max_diff = float(diff.max())
+    mean_diff = float(diff.mean())
+    correlation = float(np.corrcoef(expected.flatten(), actual.flatten())[0, 1])
+    passed = correlation >= threshold
+
+    return VerificationResult(
+        name=name, passed=passed,
+        max_diff=max_diff, mean_diff=mean_diff, correlation=correlation,
+        details=f"threshold={threshold}"
     )

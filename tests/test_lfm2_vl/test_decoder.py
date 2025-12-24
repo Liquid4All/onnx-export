@@ -9,8 +9,8 @@ import torch
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODES
 from test_lfm2_vl.helpers import (
-    DECODER_CONFIGS,
     VerificationResult,
+    bits_to_str,
     skip_if_missing,
     get_onnx_file,
     get_vl_onnx_dir,
@@ -22,6 +22,12 @@ from test_lfm2_vl.helpers import (
 logger = logging.getLogger(__name__)
 
 PROMPTS = ["Hello, how are", "The image shows", "I can see"]
+
+DECODER_CONFIGS = [
+    pytest.param(None, ["arrays", "top_k"], id="fp32"),
+    pytest.param(4, ["top_k"], id="q4"),
+    pytest.param(8, ["arrays", "top_k"], id="q8"),
+]
 
 
 def compare_top_k(name: str, expected: np.ndarray, actual: np.ndarray, k: int = 5) -> VerificationResult:
@@ -58,8 +64,7 @@ def test_decoder(
     prompt: str,
 ):
     size, model, processor = pytorch_model
-    bits_str = f"q{decoder_bits}" if decoder_bits else "fp32"
-    logger.info(f"Testing {size}/{vision_mode}/{bits_str}: '{prompt}'")
+    logger.info(f"Testing {size}/{vision_mode}/{bits_to_str(decoder_bits)}: '{prompt}'")
 
     onnx_dir = get_vl_onnx_dir(exports_dir, size, vision_mode)
     skip_if_missing(onnx_dir, "Export not found")

@@ -19,12 +19,18 @@ from PIL import Image
 from liquidonnx.lfm2_vl import MODELS, VISION_MODES, VISION_MODE_CONV2D
 from liquidonnx.lfm2_vl.preprocessing import detect_vision_format, preprocess_conv2d, preprocess_tiled
 from test_lfm2_vl.helpers import (
-    QUANT_CONFIGS,
     skip_if_missing,
     get_onnx_file,
     get_vl_onnx_dir,
     load_onnx_session,
 )
+
+QUANT_CONFIGS = [
+    (None, None),  # fp32/fp32 - reference
+    (4, 4),        # q4/q4 - WebGPU optimized
+    (4, 8),        # q4/q8
+    (8, 8),        # q8/q8
+]
 
 MAX_NEW_TOKENS = 20
 SIMILARITY_THRESHOLD = 0.7
