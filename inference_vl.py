@@ -19,7 +19,6 @@ Usage:
 """
 
 import argparse
-import math
 from pathlib import Path
 from typing import List, Optional
 
@@ -27,6 +26,14 @@ import numpy as np
 import onnxruntime as ort
 from PIL import Image
 from transformers import AutoProcessor
+
+from liquidonnx import (
+    detect_vision_format,
+    preprocess_conv2d,
+    preprocess_tiled,
+    build_inputs_embeds,
+    VLConfig,
+)
 
 
 class VLModelInference:
@@ -85,80 +92,18 @@ class VLModelInference:
         )
 
         # Detect vision format from embed_images input shape
-        self.vision_format = self._detect_vision_format()
+        self.vision_format = detect_vision_format(self.embed_images_sess)
         print(f"Vision format: {self.vision_format}")
         print("Model loaded successfully!")
 
-    def _detect_vision_format(self) -> str:
-        """Detect vision input format from ONNX model inputs."""
-        input_names = {inp.name for inp in self.embed_images_sess.get_inputs()}
-        # conv2d format has spatial_h and spatial_w inputs
-        if "spatial_h" in input_names:
-            return "conv2d"
-        return "tiled"
-
-    def _preprocess_conv2d(self, image: Image.Image) -> tuple[np.ndarray, int, int]:
-        """Preprocess image for conv2d format.
-
-        Matches llama.cpp preprocessing: preserves aspect ratio while keeping
-        total pixels within min/max bounds, aligned to patch_size * n_merge.
-
-        Returns (pixel_values, spatial_h, spatial_w) where spatial dimensions
-        are AFTER n_merge (i.e., the final projector output dimensions).
-        """
-        patch_size, n_merge = 16, 2
-        align_size = patch_size * n_merge  # 32
-
-        # Token limits from model config (after n_merge downsampling)
-        # image_min_tokens: 64, image_max_tokens: 256
-        min_tokens, max_tokens = 64, 256
-        # patch_area = patch_size^2 * n_merge^2 = 16*16*2*2 = 1024 pixels per output token
-        patch_area = patch_size * patch_size * n_merge * n_merge
-        min_pixels = min_tokens * patch_area  # 64 * 1024 = 65536 (256x256)
-        max_pixels = max_tokens * patch_area  # 256 * 1024 = 262144 (512x512)
-
-        w, h = image.size
-        current_pixels = h * w
-
-        # Scale to fit within min/max pixels while preserving aspect ratio
-        if current_pixels > max_pixels:
-            # Scale down
-            beta = math.sqrt(current_pixels / max_pixels)
-            h_new = max(align_size, int(h / beta) // align_size * align_size)
-            w_new = max(align_size, int(w / beta) // align_size * align_size)
-        elif current_pixels < min_pixels:
-            # Scale up
-            beta = math.sqrt(min_pixels / current_pixels)
-            h_new = math.ceil(h * beta / align_size) * align_size
-            w_new = math.ceil(w * beta / align_size) * align_size
-        else:
-            # Within bounds, just align to grid
-            h_new = max(align_size, round(h / align_size) * align_size)
-            w_new = max(align_size, round(w / align_size) * align_size)
-
-        # Resize with bilinear interpolation (matches llama.cpp)
-        image_resized = image.resize((w_new, h_new), Image.BILINEAR)
-
-        # Compute spatial dimensions AFTER n_merge (for projector)
-        spatial_h = h_new // patch_size // n_merge
-        spatial_w = w_new // patch_size // n_merge
-
-        # Convert to float and normalize
-        # SigLIP2 normalization: mean=0.5, std=0.5 -> range [-1, 1]
-        pixels = np.array(image_resized).astype(np.float32) / 255.0
-        pixels = (pixels - 0.5) / 0.5
-        pixels = pixels.transpose(2, 0, 1)[np.newaxis, ...]
-
-        return pixels.astype(np.float32), spatial_h, spatial_w
-
     def _get_image_embeddings(self, images: List[Image.Image]) -> List[np.ndarray]:
-        """Get embeddings for a list of images."""
+        """Get embeddings for a list of images using liquidonnx utilities."""
         embeddings = []
 
         for image in images:
             if self.vision_format == "conv2d":
-                # Conv2d format: [B, 3, H, W] raw image input with spatial dims
-                pixel_values, spatial_h, spatial_w = self._preprocess_conv2d(image)
+                # Conv2d format: use liquidonnx preprocess_conv2d
+                pixel_values, spatial_h, spatial_w = preprocess_conv2d(image)
                 outputs = self.embed_images_sess.run(
                     None,
                     {
@@ -167,40 +112,12 @@ class VLModelInference:
                         "spatial_w": np.array(spatial_w, dtype=np.int64),
                     },
                 )
-                # Output: [1, num_tokens, hidden_dim] where num_tokens = spatial_h * spatial_w
                 img_embeds = outputs[0][0]  # [num_tokens, hidden_dim]
             else:
-                # Tiled format: use HuggingFace processor for patch extraction
-                # The ONNX model's position embedding interpolation assumes square layout
-                # so we need to pad non-square images to square first
-                w, h = image.size
-                if w != h:
-                    # Pad to square by adding black bars
-                    max_dim = max(w, h)
-                    square_img = Image.new('RGB', (max_dim, max_dim), (0, 0, 0))
-                    # Center the original image
-                    paste_x = (max_dim - w) // 2
-                    paste_y = (max_dim - h) // 2
-                    square_img.paste(image, (paste_x, paste_y))
-                    image = square_img
-
-                # Process with image splitting disabled for single square tile
-                processed = self.processor(
-                    images=[image],
-                    text="<image>",  # Minimal text with image token (required by processor)
-                    return_tensors='pt',
-                    do_image_splitting=False  # Single tile for simpler position embeddings
+                # Tiled format: use liquidonnx preprocess_tiled
+                pixel_values, patch_attention_mask, _ = preprocess_tiled(
+                    image, self.processor, do_image_splitting=False, pad_to_square=True
                 )
-
-                # Get pixel values - with square input, all patches should be valid
-                # pixel_values: [1, num_patches, 768] where num_patches should be square
-                pixel_values_pt = processed['pixel_values']
-                attention_mask_pt = processed['pixel_attention_mask']
-
-                # Convert to numpy
-                pixel_values = pixel_values_pt.numpy().astype(np.float32)
-                patch_attention_mask = attention_mask_pt.numpy().astype(np.int64)
-
                 outputs = self.embed_images_sess.run(
                     None,
                     {
@@ -208,8 +125,6 @@ class VLModelInference:
                         "patch_attention_mask": patch_attention_mask,
                     },
                 )
-
-                # Output: [1, num_tokens, hidden_dim]
                 img_embeds = outputs[0][0]  # [num_tokens, hidden_dim]
 
             embeddings.append(img_embeds)
@@ -223,10 +138,19 @@ class VLModelInference:
         )
         return outputs[0]  # [1, seq_len, hidden_dim]
 
+    def _build_inputs_embeds_expanded(
+        self, input_ids: np.ndarray, image_embeds_list: List[np.ndarray]
+    ) -> np.ndarray:
+        """Build inputs_embeds for expanded token sequence using liquidonnx utility."""
+        text_embeds = self._get_text_embeddings(input_ids)[0]  # [seq_len, hidden]
+        return build_inputs_embeds(
+            text_embeds, image_embeds_list, self.image_token_id, input_ids
+        )
+
     def _build_inputs_embeds(
         self, input_ids: np.ndarray, image_embeds_list: List[np.ndarray]
     ) -> np.ndarray:
-        """Build inputs_embeds by replacing image tokens with image embeddings."""
+        """Build inputs_embeds by replacing image tokens with image embeddings (legacy)."""
         text_embeds = self._get_text_embeddings(input_ids)[0]  # [seq_len, hidden]
 
         # Find image token positions
@@ -293,33 +217,51 @@ class VLModelInference:
         """Generate response for chat messages with optional images."""
         images = images or []
 
-        # Build conversation with image placeholders
         if images:
-            # Insert image tokens into first user message
-            for i, msg in enumerate(messages):
+            # Build conversation with proper image content structure
+            # The processor expands each <image> into multiple tokens (one per patch)
+            # plus <|image_start|> and <|image_end|> separators
+            messages_with_images = []
+            for msg in messages:
                 if msg["role"] == "user":
-                    image_tokens = "<image>" * len(images)
-                    messages[i] = {
-                        "role": "user",
-                        "content": image_tokens + msg["content"],
-                    }
-                    break
+                    # Build content list with images first, then text
+                    content = []
+                    for img in images:
+                        content.append({"type": "image", "image": img})
+                    content.append({"type": "text", "text": msg["content"]})
+                    messages_with_images.append({"role": "user", "content": content})
+                else:
+                    messages_with_images.append(msg)
 
-        # Apply chat template
-        prompt = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+            # Apply chat template with images - this expands <image> tokens properly
+            prompt = self.processor.apply_chat_template(
+                messages_with_images, add_generation_prompt=True
+            )
 
-        # Tokenize
-        input_ids = np.array(
-            [self.tokenizer.encode(prompt, add_special_tokens=False)], dtype=np.int64
-        )
+            # Use processor to get properly expanded input_ids
+            # The processor expands each <image> into N tokens (one per patch)
+            # with <|image_start|> before and <|image_end|> after each image
+            inputs = self.processor(
+                images=images,
+                text=prompt,
+                return_tensors='pt',  # Processor requires PyTorch
+                do_image_splitting=False  # Match our ONNX preprocessing
+            )
+            input_ids = inputs['input_ids'].numpy()  # Convert to numpy
 
-        # Get image embeddings if images provided
-        if images:
+            # Get image embeddings
             image_embeds_list = self._get_image_embeddings(images)
-            inputs_embeds = self._build_inputs_embeds(input_ids, image_embeds_list)
+
+            # Build inputs_embeds by replacing expanded <image> tokens with embeddings
+            inputs_embeds = self._build_inputs_embeds_expanded(input_ids, image_embeds_list)
         else:
+            # Text-only: use simple tokenization
+            prompt = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            input_ids = np.array(
+                [self.tokenizer.encode(prompt, add_special_tokens=False)], dtype=np.int64
+            )
             inputs_embeds = self._get_text_embeddings(input_ids)
 
         # Initialize cache

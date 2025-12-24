@@ -525,13 +525,15 @@ class VisionEmbedBuilder:
     def build_projector(self, vision_embeddings: str) -> str:
         """Build the MLP projector with pixel unshuffle.
 
-        PyTorch projector does:
-        1. pixel_unshuffle: (B, W, H, C) -> (B, H/2, W/2, C*4)
+        PyTorch projector (modeling_lfm2_vl.py Lfm2VlMultiModalProjector):
+        1. pixel_unshuffle: (B, H, W, C) -> (B, H/2, W/2, C*4)
+           Note: PyTorch code uses confusing variable names (width=H, height=W)
+           but the actual operations match standard row-major convention.
         2. layer_norm
         3. linear_1 + gelu + linear_2
 
-        Our vision_embeddings is (B, N, C) where N = W*H (e.g., 1024 = 32*32).
-        We need to reshape to 4D, apply pixel_unshuffle ops, then flatten back.
+        Our vision_embeddings is (B, N, C) where N = H*W (row-major order).
+        We reshape to 4D, apply pixel_unshuffle ops, then flatten back.
         """
         ds = self.downsample
         C = self.vision_hidden  # 768
@@ -557,10 +559,9 @@ class VisionEmbedBuilder:
             self.add_initializer("multi_modal_projector.linear_2.bias",
                                  self.weights["multi_modal_projector.linear_2.bias"])
 
-        # Step 1: Reshape from (B, N, C) to (B, W, H, C) where W=H=sqrt(N)
+        # Step 1: Reshape from (B, N, C) to (B, H, W, C)
         # For 1024 patches: (B, 1024, 768) -> (B, 32, 32, 768)
-        # We use dynamic reshape with -1 for the spatial dims
-        # Note: PyTorch uses (B, W, H, C) order, ONNX typically (B, C, H, W) but we follow PyTorch here
+        # Tokens are in row-major order, so we reshape to (B, H, W, C)
 
         # First get batch size dynamically (use scalar indices)
         self.add_initializer("proj/shape_indices_batch", np.array(0, dtype=np.int64))  # scalar
@@ -623,15 +624,14 @@ class VisionEmbedBuilder:
         # Reshape to 4D: (B, N, C) -> (B, H, W, C)
         hidden_4d = self.make_node("Reshape", [vision_embeddings, reshape_4d_shape], ["proj/hidden_4d"])
 
-        # Step 2: Pixel unshuffle - complex reshape + transpose sequence
-        # For (B, H, W, C) input:
-        #   hidden = hidden.reshape(B, H, W // factor, C * factor)  # (B, H, W/2, C*2)
-        #   hidden = hidden.permute(0, 2, 1, 3)  # (B, W/2, H, C*2)
-        #   hidden = hidden.reshape(B, W // factor, H // factor, C * factor * factor)  # (B, W/2, H/2, C*4)
-        #   hidden = hidden.permute(0, 2, 1, 3)  # (B, H/2, W/2, C*4)
-        #
-        # For conv2d mode, we use separate H and W dimensions
-        # For tiled mode, H == W (square)
+        # Step 2: Pixel unshuffle (matches PyTorch Lfm2VlMultiModalProjector.pixel_unshuffle)
+        # Input: (B, H, W, C)
+        # Operations:
+        #   reshape:   (B, H, W, C)     -> (B, H, W/2, C*2)
+        #   transpose: (B, H, W/2, C*2) -> (B, W/2, H, C*2)
+        #   reshape:   (B, W/2, H, C*2) -> (B, W/2, H/2, C*4)
+        #   transpose: (B, W/2, H/2, C*4) -> (B, H/2, W/2, C*4)
+        # Output: (B, H/2, W/2, C*4)
 
         # First reshape: (B, H, W, C) -> (B, H, W/2, C*2)
         self.add_initializer("proj/c_times_2", np.array([C * ds], dtype=np.int64))

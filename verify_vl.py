@@ -38,6 +38,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from liquidonnx import detect_vision_format, preprocess_conv2d, preprocess_tiled
+
 logger = logging.getLogger(__name__)
 
 
@@ -256,33 +258,7 @@ class VLVerifier:
 
     def _detect_vision_format(self) -> str:
         """Detect vision input format from ONNX model inputs."""
-        for inp in self.embed_images_sess.get_inputs():
-            if inp.name == "pixel_values":
-                # Check shape: tiled has [B, N, 768], conv2d has [B, 3, H, W]
-                shape = inp.shape
-                if len(shape) == 4:
-                    return "conv2d"
-                elif len(shape) == 3:
-                    return "tiled"
-        return "tiled"  # default
-
-    def _preprocess_conv2d(self, image) -> np.ndarray:
-        """Preprocess image for conv2d format: resize + normalize to [1, 3, H, W]."""
-        from PIL import Image
-
-        # Resize to 512x512 (or model's expected size)
-        target_size = 512
-        image = image.resize((target_size, target_size), Image.BILINEAR)
-
-        # Convert to numpy and normalize
-        pixels = np.array(image).astype(np.float32) / 255.0
-
-        # SigLIP2 normalization: mean=0.5, std=0.5 -> range [-1, 1]
-        pixels = (pixels - 0.5) / 0.5
-
-        # Convert to [1, 3, H, W]
-        pixels = pixels.transpose(2, 0, 1)[np.newaxis, ...]
-        return pixels.astype(np.float32)
+        return detect_vision_format(self.embed_images_sess)
 
     def verify_vision_encoder(self, image) -> List[VerificationResult]:
         """Verify vision encoder + projector outputs."""
@@ -337,12 +313,14 @@ class VLVerifier:
 
         # ONNX - handle different input formats
         if vision_format == "conv2d":
-            # Conv2d format: [B, 3, H, W] raw image input
-            onnx_pixel_values = self._preprocess_conv2d(image)
-            logger.info(f"Conv2d input shape: {onnx_pixel_values.shape}")
+            # Conv2d format: [B, 3, H, W] raw image input with spatial dims
+            onnx_pixel_values, spatial_h, spatial_w = preprocess_conv2d(image)
+            logger.info(f"Conv2d input shape: {onnx_pixel_values.shape}, spatial: ({spatial_h}, {spatial_w})")
 
             onnx_outputs = self.embed_images_sess.run(None, {
                 "pixel_values": onnx_pixel_values,
+                "spatial_h": np.array(spatial_h, dtype=np.int64),
+                "spatial_w": np.array(spatial_w, dtype=np.int64),
             })
             onnx_embeddings = onnx_outputs[0]  # (1, num_tokens, hidden)
 
