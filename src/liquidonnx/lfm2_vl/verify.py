@@ -38,7 +38,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from liquidonnx import detect_vision_format, preprocess_conv2d, preprocess_tiled
+from liquidonnx.lfm2_vl import detect_vision_format, preprocess_conv2d, preprocess_tiled
 
 logger = logging.getLogger(__name__)
 

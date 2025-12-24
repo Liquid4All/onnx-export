@@ -16,35 +16,37 @@ Quantized variants keep lm_head in FP32 for output quality.
 
 Usage:
     # Export all VL models with tiled format (default)
-    uv run export_all_vl.py -T
+    lfm2-vl-export-all -T
 
     # Export all VL models with conv2d format
-    uv run export_all_vl.py -C
+    lfm2-vl-export-all -C
 
     # Export both formats
-    uv run export_all_vl.py -T -C
+    lfm2-vl-export-all -T -C
 
     # Export specific models
-    uv run export_all_vl.py -T --models 450M 1.6B
+    lfm2-vl-export-all -T --models 450M 1.6B
 
     # Export specific variants only
-    uv run export_all_vl.py -T --variants FP32 B4V8
+    lfm2-vl-export-all -T --variants FP32 B4V8
 
     # Export only quantized variants (no FP32)
-    uv run export_all_vl.py -T --variants B4V4 B4V8 B8V8
+    lfm2-vl-export-all -T --variants B4V4 B4V8 B8V8
 
     # Skip FP32 export, only quantize existing models
-    uv run export_all_vl.py -T --skip-export
+    lfm2-vl-export-all -T --skip-export
 
     # Custom output directory
-    uv run export_all_vl.py -T --output-dir ./my_models
+    lfm2-vl-export-all -T --output-dir ./my_models
 """
 
 import argparse
 import logging
-import subprocess
-import sys
+import shutil
 from pathlib import Path
+
+from liquidonnx.lfm2_vl.export import export_vl_model
+from liquidonnx.lfm2_vl.quantize import quantize_model
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +86,7 @@ def get_quant_name(size: str, backbone_bits: int, vision_bits: int, format_key: 
     return f"LFM2-VL-{size}-ONNX-B{backbone_bits}V{vision_bits}{get_format_suffix(format_key)}"
 
 
-def export_model(size: str, model_path: str, output_dir: Path, format_key: str) -> bool:
+def do_export(size: str, model_path: str, output_dir: Path, format_key: str) -> bool:
     """Export a single VL model to ONNX (FP32).
 
     Args:
@@ -94,32 +96,19 @@ def export_model(size: str, model_path: str, output_dir: Path, format_key: str) 
         format_key: "T" for tiled or "C" for conv2d
     """
     output_path = output_dir / get_fp32_name(size, format_key)
+    vision_input_format = FORMATS[format_key]
 
     logger.info(f"Exporting {size} ({format_key}) to {output_path}...")
 
-    cmd = [
-        sys.executable, "lfm2_vl.py",
-        "--model", model_path,
-        "--output", str(output_path),
-        f"-{format_key}",  # -T or -C
-    ]
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        logger.error(f"Export failed for {size} ({format_key}):")
-        logger.error(result.stderr)
+    try:
+        export_vl_model(model_path, str(output_path), vision_input_format=vision_input_format)
+        return True
+    except Exception as e:
+        logger.error(f"Export failed for {size} ({format_key}): {e}")
         return False
 
-    # Print size info
-    for line in result.stdout.split('\n'):
-        if 'Total ONNX size:' in line or 'embed_' in line or 'decoder' in line:
-            logger.info(f"  {line.strip()}")
 
-    return True
-
-
-def quantize_model(size: str, output_dir: Path, backbone_bits: int, vision_bits: int, format_key: str) -> bool:
+def do_quantize(size: str, output_dir: Path, backbone_bits: int, vision_bits: int, format_key: str) -> bool:
     """Quantize a VL model with specified backbone and vision bits.
 
     Args:
@@ -136,29 +125,50 @@ def quantize_model(size: str, output_dir: Path, backbone_bits: int, vision_bits:
         logger.error(f"Input model not found: {input_path}")
         return False
 
-    logger.info(f"Quantizing {size} ({format_key}) -> B{backbone_bits}V{vision_bits} (backbone=Q{backbone_bits}, vision=Q{vision_bits}, lm_head=FP32)...")
+    logger.info(f"Quantizing {size} ({format_key}) -> B{backbone_bits}V{vision_bits}...")
 
-    cmd = [
-        sys.executable, "quantize_vl.py",
-        "--input", str(input_path),
-        "--output", str(output_path),
-        "--bits", str(backbone_bits),
-        "--vision-bits", str(vision_bits),
-    ]
+    try:
+        onnx_dir = input_path / "onnx"
+        output_onnx_dir = output_path / "onnx"
+        output_onnx_dir.mkdir(parents=True, exist_ok=True)
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+        # Quantize embed_images (vision)
+        embed_images_path = onnx_dir / "embed_images.onnx"
+        if embed_images_path.exists():
+            quantize_model(
+                embed_images_path,
+                output_onnx_dir / "embed_images.onnx",
+                bits=vision_bits,
+                exclude_lm_head=False
+            )
 
-    if result.returncode != 0:
-        logger.error(f"Quantization failed for {size} ({format_key}):")
-        logger.error(result.stderr)
+        # Quantize decoder (backbone)
+        decoder_path = onnx_dir / "decoder.onnx"
+        if decoder_path.exists():
+            quantize_model(
+                decoder_path,
+                output_onnx_dir / "decoder.onnx",
+                bits=backbone_bits,
+                exclude_lm_head=True  # Keep lm_head in FP32
+            )
+
+        # Copy embed_tokens (no quantization needed)
+        embed_tokens_path = onnx_dir / "embed_tokens.onnx"
+        if embed_tokens_path.exists():
+            shutil.copy(embed_tokens_path, output_onnx_dir / "embed_tokens.onnx")
+
+        # Copy config files
+        for cfg in ["config.json", "tokenizer.json", "tokenizer_config.json",
+                    "special_tokens_map.json", "generation_config.json",
+                    "chat_template.jinja", "preprocessor_config.json"]:
+            src = input_path / cfg
+            if src.exists():
+                shutil.copy(src, output_path / cfg)
+
+        return True
+    except Exception as e:
+        logger.error(f"Quantization failed for {size} ({format_key}): {e}")
         return False
-
-    # Print compression info
-    for line in result.stdout.split('\n'):
-        if 'Total:' in line or '->' in line:
-            logger.info(f"  {line.strip()}")
-
-    return True
 
 
 def main():
@@ -244,7 +254,7 @@ def main():
             for size in args.models:
                 model_path = MODELS[size]
                 key = f"{size}_{format_key}"
-                success = export_model(size, model_path, args.output_dir, format_key)
+                success = do_export(size, model_path, args.output_dir, format_key)
                 results["export"][key] = success
                 if success:
                     logger.info(f"  {size}: OK -> {get_fp32_name(size, format_key)}")
@@ -269,7 +279,7 @@ def main():
                 logger.info(f"\n--- {variant_name} (backbone=Q{backbone_bits}, vision=Q{vision_bits}, lm_head=FP32) ---")
                 for size in args.models:
                     key = f"{size}_{variant_name}_{format_key}"
-                    success = quantize_model(size, args.output_dir, backbone_bits, vision_bits, format_key)
+                    success = do_quantize(size, args.output_dir, backbone_bits, vision_bits, format_key)
                     results["quantize"][key] = success
                     if success:
                         logger.info(f"  {size}: OK -> {get_quant_name(size, backbone_bits, vision_bits, format_key)}")
@@ -280,7 +290,6 @@ def main():
     if args.cleanup_fp32 and not args.skip_export:
         logger.info("")
         logger.info("Cleaning up intermediate FP32 models...")
-        import shutil
         for format_key in format_keys:
             for size in args.models:
                 fp32_path = args.output_dir / get_fp32_name(size, format_key)

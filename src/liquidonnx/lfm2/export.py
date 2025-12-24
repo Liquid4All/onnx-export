@@ -635,7 +635,8 @@ def export_model(model_path: str, output_dir: str):
     return output_path
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for lfm2-export command."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Export LFM2 to ONNX")
@@ -656,3 +657,7 @@ if __name__ == "__main__":
             verifier.verify_against_community(args.output, args.community)
         verifier.test_generation(args.output)
         verifier.print_report()
+
+
+if __name__ == "__main__":
+    main()

@@ -6,20 +6,21 @@ Compares Builder and Community quantized versions (Q4 and Q8) to identify which
 produces outputs closer to the original PyTorch model.
 
 Usage:
-    uv run verify_all.py
-    uv run verify_all.py --models 350M 1.2B
-    uv run verify_all.py --quant q4       # Only Q4
-    uv run verify_all.py --quant q8       # Only Q8
+    lfm2-verify-all
+    lfm2-verify-all --models 350M 1.2B
+    lfm2-verify-all --quant q4       # Only Q4
+    lfm2-verify-all --quant q8       # Only Q8
 """
 
 import argparse
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import numpy as np
+
+from liquidonnx.lfm2.verify import NumericalVerifier
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ COMMUNITY_Q8_MODELS = {
     "1.2B": "/Users/ykhrustalev/workplace/models/onnx-community/LFM2-1.2B-ONNX/onnx/model_q8.onnx",
     "2.6B": "/Users/ykhrustalev/workplace/models/onnx-community/LFM2-2.6B-ONNX/onnx/model_q8.onnx",
 }
+
 
 # ============================================================================
 
@@ -104,73 +106,17 @@ class ModelComparator:
     """Compares quantized models against PyTorch ground truth."""
 
     def __init__(self):
-        self.tokenizer = None
-        self.torch_model = None
+        self.verifier = None
         self.current_model_path = None
-        self.pytorch_logits_cache = {}
 
     def load_pytorch_model(self, model_path: str):
         """Load PyTorch model for reference."""
         if self.current_model_path == model_path:
             return
 
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
-        logger.info(f"Loading PyTorch model: {model_path}")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        self.torch_model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.float32,
-            trust_remote_code=True,
-        )
-        self.torch_model.eval()
+        self.verifier = NumericalVerifier(model_path)
+        self.verifier.load_pytorch_model()
         self.current_model_path = model_path
-        self.pytorch_logits_cache = {}
-
-    def load_onnx_model(self, onnx_path: str):
-        """Load ONNX model."""
-        import onnxruntime as ort
-        logger.info(f"Loading ONNX model: {onnx_path}")
-        return ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
-
-    def prepare_inputs(self, prompt: str) -> Dict[str, np.ndarray]:
-        """Prepare input tensors."""
-        input_ids = self.tokenizer.encode(prompt, return_tensors="np")
-        seq_len = input_ids.shape[1]
-        return {
-            "input_ids": input_ids.astype(np.int64),
-            "attention_mask": np.ones((1, seq_len), dtype=np.int64),
-            "position_ids": np.arange(seq_len, dtype=np.int64).reshape(1, -1),
-        }
-
-    def run_pytorch(self, inputs: Dict[str, np.ndarray], prompt: str) -> np.ndarray:
-        """Run PyTorch model and return logits (cached)."""
-        if prompt in self.pytorch_logits_cache:
-            return self.pytorch_logits_cache[prompt]
-
-        import torch
-        with torch.no_grad():
-            outputs = self.torch_model(
-                input_ids=torch.from_numpy(inputs["input_ids"]),
-                attention_mask=torch.from_numpy(inputs["attention_mask"]),
-                position_ids=torch.from_numpy(inputs["position_ids"]),
-            )
-            logits = outputs.logits.numpy()
-            self.pytorch_logits_cache[prompt] = logits
-            return logits
-
-    def run_onnx(self, sess, inputs: Dict[str, np.ndarray]) -> np.ndarray:
-        """Run ONNX model and return logits."""
-        feed = {}
-        for inp in sess.get_inputs():
-            if inp.name in inputs:
-                feed[inp.name] = inputs[inp.name]
-            else:
-                shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-                feed[inp.name] = np.zeros(shape, dtype=np.float32)
-        outputs = sess.run(None, feed)
-        return outputs[0]
 
     def compare(
         self,
@@ -183,11 +129,11 @@ class ModelComparator:
     ) -> ComparisonResult:
         """Compare a quantized model against PyTorch."""
         self.load_pytorch_model(pytorch_path)
-        onnx_sess = self.load_onnx_model(onnx_path)
+        onnx_sess = self.verifier.load_onnx_model(onnx_path)
 
-        inputs = self.prepare_inputs(prompt)
-        pytorch_logits = self.run_pytorch(inputs, prompt)
-        onnx_logits = self.run_onnx(onnx_sess, inputs)
+        inputs = self.verifier.prepare_inputs(prompt)
+        pytorch_logits = self.verifier.run_pytorch(inputs)
+        onnx_logits = self.verifier.run_onnx(onnx_sess, inputs)
 
         diff = np.abs(pytorch_logits - onnx_logits)
         max_diff = float(diff.max())

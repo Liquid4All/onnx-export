@@ -39,7 +39,7 @@ import numpy as np
 import onnx
 from onnx import helper, numpy_helper, TensorProto
 
-from lfm2 import LFM2Config, LFM2Builder
+from liquidonnx.lfm2 import LFM2Config, LFM2Builder
 
 logger = logging.getLogger(__name__)
 
@@ -976,7 +976,7 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     """
     import os
     import json
-    from transformers import AutoConfig, AutoTokenizer, AutoProcessor
+    from transformers import AutoConfig, AutoTokenizer, AutoProcessor, AutoModelForImageTextToText
     import torch
 
     logger.info(f"Vision input format: {vision_input_format}")
@@ -987,7 +987,6 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
 
     # Load model weights
     logger.info(f"Loading weights from {model_path}...")
-    from transformers import AutoModelForImageTextToText
     model = AutoModelForImageTextToText.from_pretrained(
         model_path, torch_dtype=torch.float32, trust_remote_code=True
     )
@@ -1212,7 +1211,8 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     return output_dir
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for lfm2-vl-export command."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Export LFM2-VL to ONNX")
@@ -1238,3 +1238,7 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
     export_vl_model(args.model, args.output, vision_input_format=vision_input_format)
+
+
+if __name__ == "__main__":
+    main()

@@ -10,28 +10,28 @@ Available formats: -T (tiled), -C (conv2d)
 
 Usage:
     # Verify all models with tiled format (default)
-    uv run verify_all_vl.py -T
+    lfm2-vl-verify-all -T
 
     # Verify all models with conv2d format
-    uv run verify_all_vl.py -C
+    lfm2-vl-verify-all -C
 
     # Verify both formats
-    uv run verify_all_vl.py -T -C
+    lfm2-vl-verify-all -T -C
 
     # Verify specific models
-    uv run verify_all_vl.py -T --models 450M 1.6B
+    lfm2-vl-verify-all -T --models 450M 1.6B
 
     # Verify specific variants
-    uv run verify_all_vl.py -T --variants FP32 B4V8
+    lfm2-vl-verify-all -T --variants FP32 B4V8
 
     # Verify single combination
-    uv run verify_all_vl.py -T --models 450M --variants B4V8
+    lfm2-vl-verify-all -T --models 450M --variants B4V8
 
     # Custom tolerances for quantized models
-    uv run verify_all_vl.py -T --quant-atol 0.1 --quant-rtol 0.1
+    lfm2-vl-verify-all -T --quant-atol 0.1 --quant-rtol 0.1
 
     # Use specific image for vision tests
-    uv run verify_all_vl.py -T --image cardinal.jpg
+    lfm2-vl-verify-all -T --image cardinal.jpg
 """
 
 import argparse
@@ -39,7 +39,7 @@ import gc
 import logging
 from pathlib import Path
 
-from verify_vl import VLVerifier
+from liquidonnx.lfm2_vl.verify import VLVerifier
 
 logger = logging.getLogger(__name__)
 

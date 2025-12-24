@@ -1,17 +1,17 @@
 [project]
-name = "lfm2-builder"
+name = "liquidonnx"
 version = "0.1.0"
-description = "LFM2 ONNX export builder"
+description = "LFM2 ONNX export and inference tools"
 requires-python = ">=3.10"
 
 dependencies = [
     "onnx",           # @latest from git (see [tool.uv.sources])
-    "onnx-ir",        # @latest from git (see [tool.uv.sources])
     "onnxruntime",
     "transformers>=5.0.0.dev0",
-    "tqdm>=4.67.1",
     "numpy>=2.2.0",
     "torch>=2.0.0",
+    "pillow",
+    "torchvision>=0.24.1",
 ]
 
 [project.optional-dependencies]
@@ -21,10 +21,35 @@ dev = [
 ]
 
 [project.scripts]
-lfm2-export = "lfm2:main"
+# LFM2 text model tools
+lfm2-export = "liquidonnx.lfm2.export:main"
+lfm2-infer = "liquidonnx.lfm2.inference:main"
+lfm2-verify = "liquidonnx.lfm2.verify:main"
+lfm2-coherence = "liquidonnx.lfm2.coherence:main"
+lfm2-bench = "liquidonnx.lfm2.benchmark:main"
+lfm2-quantize = "liquidonnx.lfm2.quantize:main"
+lfm2-export-all = "liquidonnx.lfm2.tools.export_all:main"
+lfm2-verify-all = "liquidonnx.lfm2.tools.verify_all:main"
+lfm2-bench-all = "liquidonnx.lfm2.tools.benchmark_all:main"
+
+# LFM2-VL vision-language model tools
+lfm2-vl-export = "liquidonnx.lfm2_vl.export:main"
+lfm2-vl-infer = "liquidonnx.lfm2_vl.inference:main"
+lfm2-vl-verify = "liquidonnx.lfm2_vl.verify:main"
+lfm2-vl-coherence = "liquidonnx.lfm2_vl.coherence:main"
+lfm2-vl-bench = "liquidonnx.lfm2_vl.benchmark:main"
+lfm2-vl-quantize = "liquidonnx.lfm2_vl.quantize:main"
+lfm2-vl-export-all = "liquidonnx.lfm2_vl.tools.export_all:main"
+lfm2-vl-verify-all = "liquidonnx.lfm2_vl.tools.verify_all:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/liquidonnx"]
 
 [tool.uv]
 # For bleeding-edge packages from git
 [tool.uv.sources]
 onnx = { git = "https://github.com/onnx/onnx.git" }
-onnx-ir = { git = "https://github.com/onnx/ir-py.git" }

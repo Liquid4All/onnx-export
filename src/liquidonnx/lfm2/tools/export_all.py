@@ -4,30 +4,30 @@ Export all LFM2 models to ONNX with optional quantization.
 
 Usage:
     # Export all models (FP32)
-    uv run export_all.py
+    lfm2-export-all
 
     # Export specific models
-    uv run export_all.py --models 350M 1.2B
+    lfm2-export-all --models 350M 1.2B
 
     # Export and quantize to Q4
-    uv run export_all.py --quantize q4
+    lfm2-export-all --quantize q4
 
     # Export and quantize to Q8
-    uv run export_all.py --quantize q8
+    lfm2-export-all --quantize q8
 
     # Export with custom output directory
-    uv run export_all.py --output-dir ./my_models
+    lfm2-export-all --output-dir ./my_models
 
     # Skip export, only quantize existing models
-    uv run export_all.py --quantize q4 --skip-export
+    lfm2-export-all --quantize q4 --skip-export
 """
 
 import argparse
 import logging
-import os
-import subprocess
-import sys
 from pathlib import Path
+
+from liquidonnx.lfm2.export import export_model
+from liquidonnx.lfm2.quantize import quantize_int4, quantize_int8
 
 logger = logging.getLogger(__name__)
 
@@ -49,34 +49,21 @@ def get_output_name(size: str, quantize: str | None) -> str:
     return base
 
 
-def export_model(size: str, model_path: str, output_dir: Path) -> bool:
+def do_export(size: str, model_path: str, output_dir: Path) -> bool:
     """Export a single model to ONNX."""
     output_path = output_dir / f"LFM2-{size}-ONNX-builder"
 
     logger.info(f"Exporting {size} to {output_path}...")
 
-    cmd = [
-        sys.executable, "lfm2.py",
-        "--model", model_path,
-        "--output", str(output_path),
-    ]
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        logger.error(f"Export failed for {size}:")
-        logger.error(result.stderr)
+    try:
+        export_model(model_path, str(output_path))
+        return True
+    except Exception as e:
+        logger.error(f"Export failed for {size}: {e}")
         return False
 
-    # Print the last line (model size)
-    for line in result.stdout.split('\n'):
-        if 'Model size:' in line:
-            logger.info(line.strip())
 
-    return True
-
-
-def quantize_model(size: str, output_dir: Path, bits: int) -> bool:
+def do_quantize(size: str, output_dir: Path, bits: int) -> bool:
     """Quantize a model to INT4 or INT8."""
     input_path = output_dir / f"LFM2-{size}-ONNX-builder"
 
@@ -91,26 +78,32 @@ def quantize_model(size: str, output_dir: Path, bits: int) -> bool:
 
     logger.info(f"Quantizing {size} to Q{bits}...")
 
-    cmd = [
-        sys.executable, "quantize.py",
-        "--input", str(input_path),
-        "--output", str(output_path),
-        "--bits", str(bits),
-    ]
+    try:
+        input_model = input_path / "onnx" / "model.onnx"
+        if not input_model.exists():
+            input_model = input_path / "model.onnx"
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+        output_onnx_dir = output_path / "onnx"
+        output_onnx_dir.mkdir(parents=True, exist_ok=True)
+        output_model = output_onnx_dir / "model.onnx"
 
-    if result.returncode != 0:
-        logger.error(f"Quantization failed for {size}:")
-        logger.error(result.stderr)
+        if bits == 4:
+            quantize_int4(input_model, output_model, quantize_lm_head=False)
+        else:
+            quantize_int8(input_model, output_model, quantize_lm_head=False)
+
+        # Copy config files
+        import shutil
+        for cfg in ["config.json", "tokenizer.json", "tokenizer_config.json",
+                    "special_tokens_map.json", "genai_config.json", "generation_config.json"]:
+            src = input_path / cfg
+            if src.exists():
+                shutil.copy(src, output_path / cfg)
+
+        return True
+    except Exception as e:
+        logger.error(f"Quantization failed for {size}: {e}")
         return False
-
-    # Print compression info
-    for line in result.stdout.split('\n'):
-        if 'Quantized:' in line or 'Compression:' in line:
-            logger.info(line.strip())
-
-    return True
 
 
 def main():
@@ -162,7 +155,7 @@ def main():
 
         for size in args.models:
             model_path = MODELS[size]
-            success = export_model(size, model_path, args.output_dir)
+            success = do_export(size, model_path, args.output_dir)
             results["export"][size] = success
             if success:
                 logger.info(f"  {size}: OK")
@@ -179,7 +172,7 @@ def main():
         logger.info("=" * 60)
 
         for size in args.models:
-            success = quantize_model(size, args.output_dir, bits)
+            success = do_quantize(size, args.output_dir, bits)
             results["quantize"][size] = success
             if success:
                 logger.info(f"  {size}: OK")

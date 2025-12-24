@@ -1,8 +1,8 @@
 """
-LiquidONNX - Common utilities for LFM2 ONNX inference.
+LFM2-VL vision-language model ONNX export and inference.
 """
 
-from .vl_common import (
+from .preprocessing import (
     detect_vision_format,
     smart_resize,
     preprocess_conv2d,

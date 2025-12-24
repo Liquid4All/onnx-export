@@ -27,7 +27,7 @@ import onnxruntime as ort
 from PIL import Image
 from transformers import AutoProcessor
 
-from liquidonnx import (
+from liquidonnx.lfm2_vl import (
     detect_vision_format,
     preprocess_conv2d,
     preprocess_tiled,
