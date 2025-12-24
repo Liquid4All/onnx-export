@@ -32,7 +32,6 @@ Usage:
 """
 
 import logging
-from typing import List, Dict, Optional
 from dataclasses import dataclass
 
 import numpy as np
@@ -131,13 +130,13 @@ class VisionEmbedBuilder:
         self.downsample = config.downsample_factor
 
         # Graph components
-        self.nodes: List[onnx.NodeProto] = []
-        self.inputs: List[onnx.ValueInfoProto] = []
-        self.outputs: List[onnx.ValueInfoProto] = []
-        self.initializers: List[onnx.TensorProto] = []
+        self.nodes: list[onnx.NodeProto] = []
+        self.inputs: list[onnx.ValueInfoProto] = []
+        self.outputs: list[onnx.ValueInfoProto] = []
+        self.initializers: list[onnx.TensorProto] = []
 
         # Weights storage
-        self.weights: Dict[str, np.ndarray] = {}
+        self.weights: dict[str, np.ndarray] = {}
 
         # Node counter
         self._node_count = 0
@@ -155,7 +154,7 @@ class VisionEmbedBuilder:
             tensor = tensor.astype(dtype)
         self.initializers.append(numpy_helper.from_array(tensor, name))
 
-    def make_node(self, op_type: str, inputs: List[str], outputs: List[str],
+    def make_node(self, op_type: str, inputs: list[str], outputs: list[str],
                   name: str = None, domain: str = "", **attrs) -> str:
         """Create an ONNX node and return the first output name."""
         if name is None:
@@ -692,7 +691,7 @@ class VisionEmbedBuilder:
 
         return "image_embeddings"
 
-    def load_weights(self, weights: Dict[str, np.ndarray]):
+    def load_weights(self, weights: dict[str, np.ndarray]):
         """Load weights from dict."""
         # Filter vision model and projector weights
         # Handle different prefixes: model.vision_tower.vision_model.* -> vision_model.*
@@ -772,15 +771,15 @@ class EmbedTokensBuilder:
         self.vocab_size = config.text_config.vocab_size
 
         # Graph components
-        self.nodes: List[onnx.NodeProto] = []
-        self.inputs: List[onnx.ValueInfoProto] = []
-        self.outputs: List[onnx.ValueInfoProto] = []
-        self.initializers: List[onnx.TensorProto] = []
+        self.nodes: list[onnx.NodeProto] = []
+        self.inputs: list[onnx.ValueInfoProto] = []
+        self.outputs: list[onnx.ValueInfoProto] = []
+        self.initializers: list[onnx.TensorProto] = []
 
         # Weights
-        self.embed_weight: Optional[np.ndarray] = None
+        self.embed_weight: np.ndarray | None = None
 
-    def load_weights(self, weights: Dict[str, np.ndarray]):
+    def load_weights(self, weights: dict[str, np.ndarray]):
         """Load embedding weights."""
         # Try different possible prefixes
         for prefix in ["model.language_model.embed_tokens.weight",
@@ -860,13 +859,13 @@ class DecoderBuilder:
         self.attn_indices = [i for i, t in enumerate(config.text_config.layer_types) if t == "full_attention"]
 
         # Graph components
-        self.nodes: List[onnx.NodeProto] = []
-        self.inputs: List[onnx.ValueInfoProto] = []
-        self.outputs: List[onnx.ValueInfoProto] = []
-        self.initializers: List[onnx.TensorProto] = []
+        self.nodes: list[onnx.NodeProto] = []
+        self.inputs: list[onnx.ValueInfoProto] = []
+        self.outputs: list[onnx.ValueInfoProto] = []
+        self.initializers: list[onnx.TensorProto] = []
 
         # Weights storage
-        self.weights: Dict[str, np.ndarray] = {}
+        self.weights: dict[str, np.ndarray] = {}
 
         # Node counter
         self._node_count = 0
@@ -886,7 +885,7 @@ class DecoderBuilder:
             tensor = tensor.astype(dtype)
         self.initializers.append(numpy_helper.from_array(tensor, name))
 
-    def make_node(self, op_type: str, inputs: List[str], outputs: List[str],
+    def make_node(self, op_type: str, inputs: list[str], outputs: list[str],
                   name: str = None, domain: str = "", **attrs) -> str:
         """Create an ONNX node and return the first output name."""
         if name is None:
@@ -1030,12 +1029,12 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     vision_builder.load_weights(weights)
     vision_model = vision_builder.build()
 
-    vision_path = os.path.join(onnx_dir, "embed_images.onnx")
-    vision_data_path = os.path.join(onnx_dir, "embed_images.onnx_data")
+    vision_path = os.path.join(onnx_dir, "embed_images_fp32.onnx")
+    vision_data_path = os.path.join(onnx_dir, "embed_images_fp32.onnx_data")
     if os.path.exists(vision_data_path):
         os.remove(vision_data_path)
     onnx.save_model(vision_model, vision_path, save_as_external_data=True,
-                    all_tensors_to_one_file=True, location="embed_images.onnx_data",
+                    all_tensors_to_one_file=True, location="embed_images_fp32.onnx_data",
                     size_threshold=1024)
     logger.info(f"embed_images saved to {vision_path}")
 
@@ -1159,14 +1158,14 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     text_builder.initializers.clear()
     gc.collect()
 
-    decoder_path = os.path.join(onnx_dir, "decoder.onnx")
-    decoder_data_path = os.path.join(onnx_dir, "decoder.onnx_data")
+    decoder_path = os.path.join(onnx_dir, "decoder_fp32.onnx")
+    decoder_data_path = os.path.join(onnx_dir, "decoder_fp32.onnx_data")
     if os.path.exists(decoder_data_path):
         os.remove(decoder_data_path)
 
     logger.info("Saving decoder (this may take a while for large models)...")
     onnx.save_model(text_model, decoder_path, save_as_external_data=True,
-                    all_tensors_to_one_file=True, location="decoder.onnx_data",
+                    all_tensors_to_one_file=True, location="decoder_fp32.onnx_data",
                     size_threshold=1024)  # Move tensors > 1KB to external file
     logger.info(f"decoder saved to {decoder_path}")
 
@@ -1209,36 +1208,3 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     logger.info(f"Output directory: {output_dir}")
 
     return output_dir
-
-
-def main():
-    """Entry point for lfm2-vl-export command."""
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Export LFM2-VL to ONNX")
-    parser.add_argument("--model", type=str, required=True,
-                        help="Model path (e.g., LiquidAI/LFM2-VL-1.6B)")
-    parser.add_argument("--output", type=str, required=True,
-                        help="Output directory")
-
-    # Vision input format: mutually exclusive -T (tiled) or -C (conv2d)
-    format_group = parser.add_mutually_exclusive_group()
-    format_group.add_argument("-T", "--tiled", action="store_true",
-                              help="Tiled input format [B, N, 768] (default, HuggingFace style)")
-    format_group.add_argument("-C", "--conv2d", action="store_true",
-                              help="Conv2d input format [B, 3, H, W] (simpler, llama.cpp style)")
-
-    args = parser.parse_args()
-
-    # Determine vision input format
-    if args.conv2d:
-        vision_input_format = "conv2d"
-    else:
-        vision_input_format = "tiled"  # default
-
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
-    export_vl_model(args.model, args.output, vision_input_format=vision_input_format)
-
-
-if __name__ == "__main__":
-    main()

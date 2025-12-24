@@ -18,15 +18,16 @@ Usage:
 """
 
 import argparse
-import json
-import shutil
-from pathlib import Path
+import logging
+import pathlib
 
 import onnx
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     MatMulNBitsQuantizer,
     DefaultWeightOnlyQuantConfig,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def find_lm_head_node(model) -> str | None:
@@ -40,10 +41,10 @@ def find_lm_head_node(model) -> str | None:
     return None
 
 
-def quantize_model(model_path: Path, output_path: Path, bits: int = 4,
-                   block_size: int = 32, exclude_lm_head: bool = False) -> Path:
+def quantize_model(model_path: pathlib.Path, output_path: pathlib.Path, bits: int = 4,
+                   block_size: int = 32, exclude_lm_head: bool = False) -> pathlib.Path:
     """Quantize a single ONNX model to INT4 or INT8."""
-    print(f"Loading {model_path}...")
+    logger.info(f"Loading {model_path}...")
     model = onnx.load(str(model_path))
 
     # Load external data if present
@@ -57,11 +58,11 @@ def quantize_model(model_path: Path, output_path: Path, bits: int = 4,
         lm_head_node = find_lm_head_node(model)
         if lm_head_node:
             nodes_to_exclude = [lm_head_node]
-            print(f"Keeping lm_head in FP32 (excluding: {lm_head_node})")
+            logger.info(f"Keeping lm_head in FP32 (excluding: {lm_head_node})")
         else:
-            print("Warning: Could not find lm_head node")
+            logger.warning("Could not find lm_head node")
 
-    print(f"Quantizing to INT{bits} (block_size={block_size})...")
+    logger.info(f"Quantizing to INT{bits} (block_size={block_size})...")
 
     if bits == 4:
         quantizer = MatMulNBitsQuantizer(
@@ -89,7 +90,7 @@ def quantize_model(model_path: Path, output_path: Path, bits: int = 4,
 
     quantizer.process()
 
-    print(f"Saving to {output_path}...")
+    logger.info(f"Saving to {output_path}...")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     quantized_model = quantizer.model.model
@@ -111,7 +112,7 @@ def quantize_model(model_path: Path, output_path: Path, bits: int = 4,
     return output_path
 
 
-def get_model_size(path: Path) -> tuple[float, float]:
+def get_model_size(path: pathlib.Path) -> tuple[float, float]:
     """Return (model_mb, data_mb)."""
     model_size = path.stat().st_size / 1e6 if path.exists() else 0
     data_path = path.with_suffix(".onnx_data")
@@ -121,9 +122,9 @@ def get_model_size(path: Path) -> tuple[float, float]:
 
 def main():
     parser = argparse.ArgumentParser(description="Quantize LFM2-VL ONNX models")
-    parser.add_argument("--input", type=Path, required=True,
+    parser.add_argument("--input", type=pathlib.Path, required=True,
                         help="Input ONNX model directory")
-    parser.add_argument("--output", type=Path,
+    parser.add_argument("--output", type=pathlib.Path,
                         help="Output directory (auto-generated if not specified)")
     parser.add_argument("--bits", type=int, choices=[4, 8], default=4,
                         help="Quantization bits for decoder (default: 4)")
@@ -133,97 +134,65 @@ def main():
                         help="Quantization bits for vision encoder (default: 8)")
     args = parser.parse_args()
 
-    # Find models
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+
+    # Find models (look for _fp32 versions first)
     onnx_dir = args.input / "onnx"
-    embed_images_path = onnx_dir / "embed_images.onnx"
-    decoder_path = onnx_dir / "decoder.onnx"
+    embed_images_path = onnx_dir / "embed_images_fp32.onnx"
+    decoder_path = onnx_dir / "decoder_fp32.onnx"
+
+    # Fallback to old naming for backwards compatibility
+    if not embed_images_path.exists():
+        embed_images_path = onnx_dir / "embed_images.onnx"
+    if not decoder_path.exists():
+        decoder_path = onnx_dir / "decoder.onnx"
 
     if not embed_images_path.exists():
-        raise FileNotFoundError(f"embed_images.onnx not found in {onnx_dir}")
+        raise FileNotFoundError(f"embed_images_fp32.onnx not found in {onnx_dir}")
     if not decoder_path.exists():
-        raise FileNotFoundError(f"decoder.onnx not found in {onnx_dir}")
+        raise FileNotFoundError(f"decoder_fp32.onnx not found in {onnx_dir}")
 
-    # Auto-generate output name
-    if args.output is None:
-        input_name = args.input.name
-        # Remove -ONNX suffix if present
-        base_name = input_name.replace("-ONNX", "")
-        output_name = f"{base_name}-ONNX-B{args.bits}V{args.vision_bits}"
-        args.output = args.input.parent / output_name
-
-    output_onnx_dir = args.output / "onnx"
-    output_onnx_dir.mkdir(parents=True, exist_ok=True)
+    # Quantize in the same directory (Transformers.js style: multiple dtype files in one repo)
+    output_onnx_dir = onnx_dir
 
     # Get original sizes
     embed_orig_mb, embed_orig_data = get_model_size(embed_images_path)
     decoder_orig_mb, decoder_orig_data = get_model_size(decoder_path)
-    print(f"Original embed_images: {embed_orig_mb:.1f} MB + {embed_orig_data:.1f} MB data")
-    print(f"Original decoder: {decoder_orig_mb:.1f} MB + {decoder_orig_data:.1f} MB data")
-    print()
+    logger.info(f"Original embed_images: {embed_orig_mb:.1f} MB + {embed_orig_data:.1f} MB data")
+    logger.info(f"Original decoder: {decoder_orig_mb:.1f} MB + {decoder_orig_data:.1f} MB data")
 
-    # Quantize embed_images (vision + projector) - always Q8 for quality
-    print(f"=== Quantizing embed_images to Q{args.vision_bits} ===")
-    embed_output = output_onnx_dir / "embed_images.onnx"
+    # Quantize embed_images (vision + projector)
+    logger.info(f"=== Quantizing embed_images to Q{args.vision_bits} ===")
+    embed_output = output_onnx_dir / f"embed_images_q{args.vision_bits}.onnx"
     quantize_model(embed_images_path, embed_output, bits=args.vision_bits,
                    block_size=args.block_size)
 
     embed_quant_mb, embed_quant_data = get_model_size(embed_output)
-    print(f"Quantized: {embed_quant_mb:.1f} MB + {embed_quant_data:.1f} MB data")
+    logger.info(f"Quantized: {embed_quant_mb:.1f} MB + {embed_quant_data:.1f} MB data")
     if embed_orig_data > 0:
         ratio = embed_orig_data / embed_quant_data
-        print(f"Compression: {ratio:.1f}x")
-    print()
+        logger.info(f"Compression: {ratio:.1f}x")
 
     # Quantize decoder (LFM2 backbone) - keep lm_head in FP32
-    print(f"=== Quantizing decoder to Q{args.bits} ===")
-    decoder_output = output_onnx_dir / "decoder.onnx"
+    logger.info(f"=== Quantizing decoder to Q{args.bits} ===")
+    decoder_output = output_onnx_dir / f"decoder_q{args.bits}.onnx"
     quantize_model(decoder_path, decoder_output, bits=args.bits,
                    block_size=args.block_size, exclude_lm_head=True)
 
     decoder_quant_mb, decoder_quant_data = get_model_size(decoder_output)
-    print(f"Quantized: {decoder_quant_mb:.1f} MB + {decoder_quant_data:.1f} MB data")
+    logger.info(f"Quantized: {decoder_quant_mb:.1f} MB + {decoder_quant_data:.1f} MB data")
     if decoder_orig_data > 0:
         ratio = decoder_orig_data / decoder_quant_data
-        print(f"Compression: {ratio:.1f}x")
-    print()
+        logger.info(f"Compression: {ratio:.1f}x")
 
-    # Copy embed_tokens.onnx (no quantization needed - it's just embedding lookup)
-    embed_tokens_src = onnx_dir / "embed_tokens.onnx"
-    if embed_tokens_src.exists():
-        embed_tokens_dst = output_onnx_dir / "embed_tokens.onnx"
-        shutil.copy(embed_tokens_src, embed_tokens_dst)
-        print(f"Copied embed_tokens.onnx ({embed_tokens_src.stat().st_size / 1e6:.1f} MB)")
-    print()
-
-    # Copy config files
-    for cfg in ["config.json", "tokenizer.json", "tokenizer_config.json",
-                "special_tokens_map.json", "generation_config.json",
-                "chat_template.jinja", "preprocessor_config.json"]:
-        src = args.input / cfg
-        if src.exists():
-            shutil.copy(src, args.output / cfg)
-
-    # Embed chat_template in tokenizer_config.json (required for transformers.js)
-    tokenizer_cfg_path = args.output / "tokenizer_config.json"
-    chat_template_path = args.output / "chat_template.jinja"
-    if tokenizer_cfg_path.exists() and chat_template_path.exists():
-        with open(tokenizer_cfg_path) as f:
-            tok_cfg = json.load(f)
-        if "chat_template" not in tok_cfg:
-            with open(chat_template_path) as f:
-                tok_cfg["chat_template"] = f.read()
-            with open(tokenizer_cfg_path, "w") as f:
-                json.dump(tok_cfg, f, indent=2)
-            print("Embedded chat_template in tokenizer_config.json")
-
-    # Print summary
+    # Summary
     total_orig = embed_orig_data + decoder_orig_data
     total_quant = embed_quant_data + decoder_quant_data
-    print("=== Summary ===")
-    print(f"Vision (V{args.vision_bits}): {embed_orig_data:.1f} MB -> {embed_quant_data:.1f} MB")
-    print(f"Backbone (B{args.bits}): {decoder_orig_data:.1f} MB -> {decoder_quant_data:.1f} MB (lm_head FP32)")
-    print(f"Total: {total_orig:.1f} MB -> {total_quant:.1f} MB ({total_orig/total_quant:.1f}x)")
-    print(f"\nOutput: {args.output}")
+    logger.info("=== Summary ===")
+    logger.info(f"Vision (q{args.vision_bits}): {embed_orig_data:.1f} MB -> {embed_quant_data:.1f} MB")
+    logger.info(f"Decoder (q{args.bits}): {decoder_orig_data:.1f} MB -> {decoder_quant_data:.1f} MB (lm_head FP32)")
+    logger.info(f"Total: {total_orig:.1f} MB -> {total_quant:.1f} MB ({total_orig/total_quant:.1f}x)")
+    logger.info(f"Output: {output_onnx_dir}")
 
 
 if __name__ == "__main__":

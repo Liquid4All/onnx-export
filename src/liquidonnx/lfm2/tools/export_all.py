@@ -2,24 +2,41 @@
 """
 Export all LFM2 models to ONNX with optional quantization.
 
+Output Structure (Transformers.js compatible):
+    exports/
+    └── LFM2-{size}-ONNX/
+        ├── config.json
+        ├── tokenizer.json
+        ├── ...
+        └── onnx/
+            ├── decoder_fp32.onnx      # FP32 (reference)
+            ├── decoder_fp32.onnx_data
+            ├── decoder_q4.onnx        # INT4 quantized
+            ├── decoder_q4.onnx_data
+            ├── decoder_q8.onnx        # INT8 quantized
+            └── decoder_q8.onnx_data
+
 Usage:
-    # Export all models (FP32)
+    # Export all models (FP32 only)
     lfm2-export-all
 
     # Export specific models
     lfm2-export-all --models 350M 1.2B
 
-    # Export and quantize to Q4
+    # Export with Q4 quantization
     lfm2-export-all --quantize q4
 
-    # Export and quantize to Q8
+    # Export with Q8 quantization
     lfm2-export-all --quantize q8
 
-    # Export with custom output directory
-    lfm2-export-all --output-dir ./my_models
+    # Export with both Q4 and Q8
+    lfm2-export-all --quantize q4 q8
 
     # Skip export, only quantize existing models
     lfm2-export-all --quantize q4 --skip-export
+
+    # Custom output directory
+    lfm2-export-all --output-dir ./my_models
 """
 
 import argparse
@@ -39,19 +56,14 @@ MODELS = {
 }
 
 
-def get_output_name(size: str, quantize: str | None) -> str:
-    """Get output directory name for a model."""
-    base = f"LFM2-{size}-ONNX-builder"
-    if quantize == "q4":
-        return f"{base}-Q4-fp32head"
-    elif quantize == "q8":
-        return f"{base}-Q8-fp32head"
-    return base
+def get_output_dir(size: str, output_base: Path) -> Path:
+    """Get output directory for a model (single directory per model size)."""
+    return output_base / "exports" / f"LFM2-{size}-ONNX"
 
 
-def do_export(size: str, model_path: str, output_dir: Path) -> bool:
-    """Export a single model to ONNX."""
-    output_path = output_dir / f"LFM2-{size}-ONNX-builder"
+def do_export(size: str, model_path: str, output_base: Path) -> bool:
+    """Export a single model to ONNX (FP32)."""
+    output_path = get_output_dir(size, output_base)
 
     logger.info(f"Exporting {size} to {output_path}...")
 
@@ -63,43 +75,29 @@ def do_export(size: str, model_path: str, output_dir: Path) -> bool:
         return False
 
 
-def do_quantize(size: str, output_dir: Path, bits: int) -> bool:
-    """Quantize a model to INT4 or INT8."""
-    input_path = output_dir / f"LFM2-{size}-ONNX-builder"
+def do_quantize(size: str, output_base: Path, bits: int) -> bool:
+    """Quantize a model to INT4 or INT8 (in-place, same directory)."""
+    model_dir = get_output_dir(size, output_base)
+    onnx_dir = model_dir / "onnx"
 
-    if bits == 4:
-        output_path = output_dir / f"LFM2-{size}-ONNX-builder-Q4-fp32head"
-    else:
-        output_path = output_dir / f"LFM2-{size}-ONNX-builder-Q8-fp32head"
-
-    if not input_path.exists():
-        logger.error(f"Input model not found: {input_path}")
+    # Find FP32 model
+    input_model = onnx_dir / "decoder_fp32.onnx"
+    if not input_model.exists():
+        # Fallback to old naming
+        input_model = onnx_dir / "model.onnx"
+    if not input_model.exists():
+        logger.error(f"Input model not found: {onnx_dir}")
         return False
+
+    output_model = onnx_dir / f"decoder_q{bits}.onnx"
 
     logger.info(f"Quantizing {size} to Q{bits}...")
 
     try:
-        input_model = input_path / "onnx" / "model.onnx"
-        if not input_model.exists():
-            input_model = input_path / "model.onnx"
-
-        output_onnx_dir = output_path / "onnx"
-        output_onnx_dir.mkdir(parents=True, exist_ok=True)
-        output_model = output_onnx_dir / "model.onnx"
-
         if bits == 4:
             quantize_int4(input_model, output_model, quantize_lm_head=False)
         else:
             quantize_int8(input_model, output_model, quantize_lm_head=False)
-
-        # Copy config files
-        import shutil
-        for cfg in ["config.json", "tokenizer.json", "tokenizer_config.json",
-                    "special_tokens_map.json", "genai_config.json", "generation_config.json"]:
-            src = input_path / cfg
-            if src.exists():
-                shutil.copy(src, output_path / cfg)
-
         return True
     except Exception as e:
         logger.error(f"Quantization failed for {size}: {e}")
@@ -123,12 +121,13 @@ def main():
         "--output-dir",
         type=Path,
         default=Path("."),
-        help="Output directory (default: current directory)",
+        help="Output base directory (default: current directory)",
     )
     parser.add_argument(
         "--quantize",
+        nargs="+",
         choices=["q4", "q8"],
-        help="Quantize models after export (q4=INT4, q8=INT8)",
+        help="Quantize models after export (can specify multiple: q4 q8)",
     )
     parser.add_argument(
         "--skip-export",
@@ -150,7 +149,7 @@ def main():
     # Export models
     if not args.skip_export:
         logger.info("=" * 60)
-        logger.info("EXPORTING MODELS")
+        logger.info("EXPORTING MODELS (FP32)")
         logger.info("=" * 60)
 
         for size in args.models:
@@ -162,22 +161,24 @@ def main():
             else:
                 logger.error(f"  {size}: FAILED")
 
-    # Quantize models
+    # Quantize models (all variants in same directory)
     if args.quantize:
-        bits = 4 if args.quantize == "q4" else 8
+        for quant in args.quantize:
+            bits = 4 if quant == "q4" else 8
 
-        logger.info("")
-        logger.info("=" * 60)
-        logger.info(f"QUANTIZING TO Q{bits}")
-        logger.info("=" * 60)
+            logger.info("")
+            logger.info("=" * 60)
+            logger.info(f"QUANTIZING TO Q{bits}")
+            logger.info("=" * 60)
 
-        for size in args.models:
-            success = do_quantize(size, args.output_dir, bits)
-            results["quantize"][size] = success
-            if success:
-                logger.info(f"  {size}: OK")
-            else:
-                logger.error(f"  {size}: FAILED")
+            for size in args.models:
+                key = f"{size}_q{bits}"
+                success = do_quantize(size, args.output_dir, bits)
+                results["quantize"][key] = success
+                if success:
+                    logger.info(f"  {size}: OK")
+                else:
+                    logger.error(f"  {size}: FAILED")
 
     # Summary
     logger.info("")
@@ -199,16 +200,14 @@ def main():
     logger.info("")
     logger.info("Output directories:")
     for size in args.models:
-        if not args.skip_export:
-            fp32_dir = args.output_dir / f"LFM2-{size}-ONNX-builder"
-            if fp32_dir.exists():
-                logger.info(f"  {fp32_dir}")
-
-        if args.quantize:
-            quant_name = get_output_name(size, args.quantize)
-            quant_dir = args.output_dir / quant_name
-            if quant_dir.exists():
-                logger.info(f"  {quant_dir}")
+        out_dir = get_output_dir(size, args.output_dir)
+        if out_dir.exists():
+            onnx_dir = out_dir / "onnx"
+            files = list(onnx_dir.glob("decoder_*.onnx"))
+            file_names = ", ".join(f.name for f in sorted(files))
+            total_size = sum(f.stat().st_size for f in out_dir.rglob("*") if f.is_file())
+            logger.info(f"  {out_dir} ({total_size/1e9:.2f} GB)")
+            logger.info(f"    Files: {file_names}")
 
 
 if __name__ == "__main__":

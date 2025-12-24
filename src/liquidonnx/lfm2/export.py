@@ -566,15 +566,15 @@ def export_model(model_path: str, output_dir: str):
     onnx_dir = os.path.join(output_dir, "onnx")
     os.makedirs(onnx_dir, exist_ok=True)
 
-    output_path = os.path.join(onnx_dir, "model.onnx")
+    output_path = os.path.join(onnx_dir, "decoder_fp32.onnx")
 
     # Remove existing external data file to avoid appending
-    external_data_path = os.path.join(onnx_dir, "model.onnx_data")
+    external_data_path = os.path.join(onnx_dir, "decoder_fp32.onnx_data")
     if os.path.exists(external_data_path):
         os.remove(external_data_path)
 
     onnx.save_model(model, output_path, save_as_external_data=True,
-                    all_tensors_to_one_file=True, location="model.onnx_data")
+                    all_tensors_to_one_file=True, location="decoder_fp32.onnx_data")
 
     logger.info(f"Model saved to {output_path}")
 
@@ -628,7 +628,7 @@ def export_model(model_path: str, output_dir: str):
 
     # Print summary
     size_mb = os.path.getsize(output_path) / 1e6
-    data_path = os.path.join(onnx_dir, "model.onnx_data")
+    data_path = os.path.join(onnx_dir, "decoder_fp32.onnx_data")
     data_size_gb = os.path.getsize(data_path) / 1e9 if os.path.exists(data_path) else 0
     logger.info(f"Model size: {size_mb:.2f} MB + {data_size_gb:.2f} GB data")
 

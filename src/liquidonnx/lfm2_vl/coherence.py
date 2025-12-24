@@ -45,19 +45,10 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from liquidonnx.lfm2_vl import detect_vision_format, preprocess_conv2d, preprocess_tiled
+from liquidonnx.lfm2_vl import MODELS, TEST_IMAGES, SINGLE_IMAGE_PROMPTS, MULTI_IMAGE_PROMPTS
+from liquidonnx.lfm2_vl.preprocessing import detect_vision_format, preprocess_conv2d, preprocess_tiled
 
 logger = logging.getLogger(__name__)
-
-# ============================================================================
-# MODEL PATHS
-# ============================================================================
-
-PYTORCH_MODELS = {
-    "450M": "LiquidAI/LFM2-VL-450M",
-    "1.6B": "LiquidAI/LFM2-VL-1.6B",
-    "3B": "LiquidAI/LFM2-VL-3B",
-}
 
 # Quantization variants: (backbone_bits, vision_bits) or None for FP32
 VARIANTS = {
@@ -67,11 +58,8 @@ VARIANTS = {
     "B8V8": (8, 8),
 }
 
-# Vision input formats
-FORMATS = {
-    "T": "tiled",   # [B, N, 768] pre-extracted patches
-    "C": "conv2d",  # [B, 3, H, W] raw image
-}
+# Vision input formats (short keys for CLI)
+FORMAT_KEYS = {"T": "tiled", "C": "conv2d"}
 
 
 def get_onnx_dir(size: str, variant: str, format_key: str = "T") -> str:
@@ -82,26 +70,6 @@ def get_onnx_dir(size: str, variant: str, format_key: str = "T") -> str:
     else:
         backbone_bits, vision_bits = VARIANTS[variant]
         return f"LFM2-VL-{size}-ONNX-B{backbone_bits}V{vision_bits}{suffix}"
-
-
-# Default conversation for VL coherence testing - tests context retention with image
-DEFAULT_PROMPTS = [
-    "What do you see in this image? Describe the main elements.",
-    "What colors are present in the image?",
-    "Can you identify any shapes or patterns?",
-    "Based on what you described, what type of image is this?",
-    "If I wanted to recreate this image, what would I need?",
-]
-
-# Prompts for multi-image testing
-# Note: Some prompts like "I'm showing you multiple images..." trigger a refusal
-# response on certain model sizes. Use simpler prompts that work reliably.
-MULTI_IMAGE_PROMPTS = [
-    "Which one most important thing do you see on each image? Be concise and exact.",
-    "What are the similarities between these images?",
-    "What are the differences between these images?",
-    "Which image do you prefer and why?",
-]
 
 
 # ============================================================================
@@ -839,8 +807,8 @@ def main():
         "--image",
         type=str,
         nargs="+",
-        default=["cardinal.jpg", "bluejay.jpg"],
-        help="Test image path(s) (default: cardinal.jpg bluejay.jpg)",
+        default=[str(TEST_IMAGES["cardinal"]), str(TEST_IMAGES["bluejay"])],
+        help="Test image path(s) (default: cardinal.jpg, bluejay.jpg from assets)",
     )
     parser.add_argument(
         "--single-image-only",
@@ -909,7 +877,7 @@ def main():
         # Single image test
         if run_single:
             tester.load_images([args.image[0]])
-            prompts = DEFAULT_PROMPTS[: args.turns]
+            prompts = SINGLE_IMAGE_PROMPTS[: args.turns]
             result = tester.test_coherence(size, args.onnx, variant, f"{variant}_1img", prompts)
             results.append(result)
             print_turn_results(result)
@@ -933,12 +901,12 @@ def main():
         print(f"TESTING LFM2-VL-{size}")
         print(f"{'='*60}")
 
-        pytorch_path = PYTORCH_MODELS[size]
+        pytorch_path = MODELS[size]
         tester = VLMultiTurnTester(pytorch_path, max_new_tokens=args.max_tokens)
         tester.load_pytorch()
 
         for format_key in format_keys:
-            format_name = FORMATS[format_key]
+            format_name = FORMAT_KEYS[format_key]
             print(f"\n=== Format: {format_key} ({format_name}) ===")
 
             for variant in args.variants:
@@ -949,7 +917,7 @@ def main():
                     print(f"\n--- {variant} / 1 image ({onnx_path}) ---")
                     try:
                         tester.load_images([args.image[0]])
-                        prompts = DEFAULT_PROMPTS[: args.turns]
+                        prompts = SINGLE_IMAGE_PROMPTS[: args.turns]
                         result = tester.test_coherence(size, onnx_path, variant, f"{variant}_{format_key}_1img", prompts)
                         results.append(result)
                         if args.verbose:
