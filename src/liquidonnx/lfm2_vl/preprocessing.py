@@ -16,6 +16,8 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 from PIL import Image
 
+from liquidonnx.lfm2_vl import VISION_MODE_TILED, VISION_MODE_CONV2D
+
 
 @dataclass
 class VLConfig:
@@ -66,14 +68,14 @@ def detect_vision_format(session) -> str:
         session: ONNX InferenceSession for embed_images model
 
     Returns:
-        "conv2d" if model expects raw image input with spatial dims
-        "tiled" if model expects pre-extracted patches
+        VISION_MODE_CONV2D if model expects raw image input with spatial dims
+        VISION_MODE_TILED if model expects pre-extracted patches
     """
     input_names = {inp.name for inp in session.get_inputs()}
     # Conv2d format has spatial_h and spatial_w inputs
     if "spatial_h" in input_names:
-        return "conv2d"
-    return "tiled"
+        return VISION_MODE_CONV2D
+    return VISION_MODE_TILED
 
 
 def round_by_factor(number: float, factor: int) -> int:
@@ -301,7 +303,7 @@ def get_image_embeddings(
     embeddings = []
 
     for image in images:
-        if vision_format == "conv2d":
+        if vision_format == VISION_MODE_CONV2D:
             # Conv2d format: preprocess and pass spatial dims
             pixel_values, spatial_h, spatial_w = preprocess_conv2d(image, config=config)
 

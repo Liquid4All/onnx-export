@@ -39,6 +39,7 @@ import onnx
 from onnx import helper, numpy_helper, TensorProto
 
 from liquidonnx.lfm2 import LFM2Config, LFM2Builder
+from liquidonnx.lfm2_vl import VISION_MODE_TILED, VISION_MODE_CONV2D
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ class VisionEmbedBuilder:
     - "conv2d": [batch, 3, H, W] raw image pixels (llama.cpp style)
     """
 
-    def __init__(self, config: LFM2VLConfig, vision_input_format: str = "tiled"):
+    def __init__(self, config: LFM2VLConfig, vision_input_format: str = VISION_MODE_TILED):
         """
         Args:
             config: Model configuration
@@ -182,7 +183,7 @@ class VisionEmbedBuilder:
 
     def build_inputs(self):
         """Create model inputs based on vision_input_format."""
-        if self.vision_input_format == "conv2d":
+        if self.vision_input_format == VISION_MODE_CONV2D:
             # Conv2d mode: raw image input [batch, channels, height, width]
             # Simpler preprocessing (just resize + normalize), like llama.cpp
             self.inputs.append(helper.make_tensor_value_info(
@@ -241,7 +242,7 @@ class VisionEmbedBuilder:
         linear_weight = self.weights[f"{prefix}.weight"]  # [hidden_size, patch_dim] = [768, 768]
         linear_bias = self.weights[f"{prefix}.bias"]  # [hidden_size]
 
-        if self.vision_input_format == "conv2d":
+        if self.vision_input_format == VISION_MODE_CONV2D:
             # =====================================================================
             # Conv2d mode: reshape Linear weights to Conv2d format
             # Linear: [hidden_size, C*P*P] -> Conv2d: [hidden_size, C, P, P]
@@ -301,7 +302,7 @@ class VisionEmbedBuilder:
         input_shape = self.make_node("Shape", ["pixel_values"], ["pos_emb/input_shape"])
         self.add_initializer("pos_emb/axes_0", np.array([0], dtype=np.int64))
 
-        if self.vision_input_format == "conv2d":
+        if self.vision_input_format == VISION_MODE_CONV2D:
             # Conv2d mode: use passed spatial dimensions
             # spatial_h, spatial_w are AFTER n_merge (final projector output size)
             # For position embeddings, we need BEFORE n_merge: spatial * n_merge
@@ -571,7 +572,7 @@ class VisionEmbedBuilder:
         self.add_initializer("proj/hidden_size", np.array([C], dtype=np.int64))
         self.add_initializer("proj/axes_0", np.array([0], dtype=np.int64))
 
-        if self.vision_input_format == "conv2d":
+        if self.vision_input_format == VISION_MODE_CONV2D:
             # Conv2d mode: use passed spatial dimensions
             # spatial_h, spatial_w are AFTER n_merge, so we need to multiply by n_merge
             # to get the pre-merge spatial dimensions for the first reshape
@@ -965,7 +966,7 @@ class DecoderBuilder:
             ))
 
 
-def export_vl_model(model_path: str, output_dir: str, vision_input_format: str = "tiled"):
+def export_vl_model(model_path: str, output_dir: str, vision_input_format: str = VISION_MODE_TILED):
     """Export LFM2-VL model to ONNX (embed_tokens + embed_images + decoder).
 
     Args:

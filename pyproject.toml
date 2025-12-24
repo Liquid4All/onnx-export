@@ -35,11 +35,7 @@ lfm2-bench-all = "liquidonnx.lfm2.tools.benchmark_all:main"
 # LFM2-VL vision-language model tools
 lfm2-vl-export = "liquidonnx.lfm2_vl.tools.export:main"
 lfm2-vl-infer = "liquidonnx.lfm2_vl.inference:main"
-lfm2-vl-verify = "liquidonnx.lfm2_vl.verify:main"
-lfm2-vl-coherence = "liquidonnx.lfm2_vl.coherence:main"
 lfm2-vl-bench = "liquidonnx.lfm2_vl.benchmark:main"
-lfm2-vl-quantize = "liquidonnx.lfm2_vl.quantize:main"
-lfm2-vl-verify-all = "liquidonnx.lfm2_vl.tools.verify_all:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -47,6 +43,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/liquidonnx"]
+
+[tool.pytest.ini_options]
+addopts = "-s"
 
 [tool.uv]
 # For bleeding-edge packages from git

@@ -45,9 +45,9 @@ import argparse
 import logging
 import pathlib
 
-from liquidonnx.lfm2_vl import MODELS, FORMATS
+from liquidonnx.lfm2_vl import MODELS, VISION_MODES
 from liquidonnx.lfm2_vl.export import export_vl_model
-from liquidonnx.lfm2_vl.quantize import quantize_model
+from liquidonnx.lfm2_vl.quantize import quantize_model, get_model_size
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,8 @@ def do_export(model_path: str, output_path: pathlib.Path, fmt: str):
     export_vl_model(model_path, str(output_path), vision_input_format=fmt)
 
 
-def do_quantize(onnx_dir: pathlib.Path, decoder_bits: int, vision_bits: int):
+def do_quantize(onnx_dir: pathlib.Path, decoder_bits: int, vision_bits: int,
+                block_size: int = 32):
     """Quantize a VL model (in-place)."""
     if not onnx_dir.exists():
         raise FileNotFoundError(f"ONNX directory not found: {onnx_dir}")
@@ -76,8 +77,13 @@ def do_quantize(onnx_dir: pathlib.Path, decoder_bits: int, vision_bits: int):
         embed_fp32 = onnx_dir / "embed_images.onnx"
 
     if embed_fp32.exists():
+        _, embed_orig_mb = get_model_size(embed_fp32)
         embed_output = onnx_dir / f"embed_images_q{vision_bits}.onnx"
-        quantize_model(embed_fp32, embed_output, bits=vision_bits, exclude_lm_head=False)
+        quantize_model(embed_fp32, embed_output, bits=vision_bits,
+                       block_size=block_size, exclude_lm_head=False)
+        _, embed_quant_mb = get_model_size(embed_output)
+        logger.info(f"  embed_images: {embed_orig_mb:.1f} -> {embed_quant_mb:.1f} MB "
+                    f"({embed_orig_mb/embed_quant_mb:.1f}x)")
 
     # Quantize decoder
     decoder_fp32 = onnx_dir / "decoder_fp32.onnx"
@@ -85,8 +91,13 @@ def do_quantize(onnx_dir: pathlib.Path, decoder_bits: int, vision_bits: int):
         decoder_fp32 = onnx_dir / "decoder.onnx"
 
     if decoder_fp32.exists():
+        _, decoder_orig_mb = get_model_size(decoder_fp32)
         decoder_output = onnx_dir / f"decoder_q{decoder_bits}.onnx"
-        quantize_model(decoder_fp32, decoder_output, bits=decoder_bits, exclude_lm_head=True)
+        quantize_model(decoder_fp32, decoder_output, bits=decoder_bits,
+                       block_size=block_size, exclude_lm_head=True)
+        _, decoder_quant_mb = get_model_size(decoder_output)
+        logger.info(f"  decoder: {decoder_orig_mb:.1f} -> {decoder_quant_mb:.1f} MB "
+                    f"({decoder_orig_mb/decoder_quant_mb:.1f}x)")
 
 
 def main():
@@ -142,6 +153,12 @@ def main():
         action="store_true",
         help="Skip FP32 export, only run quantization",
     )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=32,
+        help="Block size for quantization (default: 32)",
+    )
 
     args = parser.parse_args()
 
@@ -151,7 +168,7 @@ def main():
     if (args.decoder_bits is None) != (args.vision_bits is None):
         parser.error("Both --decoder-bits and --vision-bits must be specified together")
 
-    formats = [f for f in FORMATS if getattr(args, f)] or FORMATS
+    formats = [m for m in VISION_MODES if getattr(args, m)] or VISION_MODES
     sizes = list(MODELS.keys()) if "all" in args.sizes else args.sizes
 
     for s in sizes:
@@ -169,7 +186,8 @@ def main():
         for fmt in formats:
             for size in sizes:
                 onnx_dir = get_output_dir(size, fmt, args.output_dir) / "onnx"
-                do_quantize(onnx_dir, args.decoder_bits, args.vision_bits)
+                do_quantize(onnx_dir, args.decoder_bits, args.vision_bits,
+                            args.block_size)
 
 
 if __name__ == "__main__":

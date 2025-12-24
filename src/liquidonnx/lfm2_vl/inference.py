@@ -27,6 +27,7 @@ import onnxruntime as ort
 from PIL import Image
 from transformers import AutoProcessor
 
+from liquidonnx.lfm2_vl import VISION_MODE_TILED, VISION_MODE_CONV2D
 from liquidonnx.lfm2_vl.preprocessing import (
     detect_vision_format,
     preprocess_conv2d,
@@ -47,7 +48,7 @@ class VLModelInference:
         self.embed_images_sess = None
         self.decoder_sess = None
         self.image_token_id = None
-        self.vision_format = "tiled"  # "tiled" or "conv2d"
+        self.vision_format = VISION_MODE_TILED
 
     def load(self):
         """Load processor and ONNX models."""
@@ -101,7 +102,7 @@ class VLModelInference:
         embeddings = []
 
         for image in images:
-            if self.vision_format == "conv2d":
+            if self.vision_format == VISION_MODE_CONV2D:
                 # Conv2d format: use liquidonnx preprocess_conv2d
                 pixel_values, spatial_h, spatial_w = preprocess_conv2d(image)
                 outputs = self.embed_images_sess.run(
