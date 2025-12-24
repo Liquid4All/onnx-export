@@ -228,26 +228,49 @@ class VLMultiTurnTester:
                     return "tiled"
         return "tiled"
 
-    def _preprocess_conv2d(self, image) -> np.ndarray:
-        """Preprocess image for conv2d format: resize to square + normalize to [1, 3, H, W].
+    def _preprocess_conv2d(self, image) -> tuple[np.ndarray, int, int]:
+        """Preprocess image for conv2d format with aspect ratio preservation.
 
-        NOTE: Current ONNX export assumes square input (uses sqrt(N) for reshape in projector).
-        For non-square support, the ONNX model needs to accept W,H as inputs.
-
-        llama.cpp uses dynamic aspect-preserving resize, but that requires model changes.
+        Like llama.cpp: resize preserving aspect ratio, aligned to 32 pixels.
+        Returns (pixel_values, spatial_h, spatial_w) where spatial dimensions
+        are AFTER n_merge (i.e., the final projector output dimensions).
         """
         from PIL import Image
 
-        # Use square resize for now (ONNX model limitation)
-        # Must be multiple of 32 (patch_size * n_merge)
-        target_size = 512
+        w, h = image.size
 
-        image = image.resize((target_size, target_size), Image.BILINEAR)
-        pixels = np.array(image).astype(np.float32) / 255.0
+        # Max size for any dimension
+        max_size = 512
+
+        # Resize preserving aspect ratio
+        scale = max_size / max(w, h)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+
+        # Align to patch_size * n_merge = 32 (required for pixel_unshuffle)
+        align = 32
+        new_w = (new_w // align) * align
+        new_h = (new_h // align) * align
+
+        # Ensure minimum size
+        new_w = max(new_w, align)
+        new_h = max(new_h, align)
+
+        # Compute spatial dimensions AFTER n_merge (for projector)
+        patch_size, n_merge = 16, 2
+        spatial_h = new_h // patch_size // n_merge
+        spatial_w = new_w // patch_size // n_merge
+
+        # Resize image
+        image_resized = image.resize((new_w, new_h), Image.LANCZOS)
+
+        # Convert to float and normalize
+        pixels = np.array(image_resized).astype(np.float32) / 255.0
         # SigLIP2 normalization: mean=0.5, std=0.5 -> range [-1, 1]
         pixels = (pixels - 0.5) / 0.5
         pixels = pixels.transpose(2, 0, 1)[np.newaxis, ...]
-        return pixels.astype(np.float32)
+
+        return pixels.astype(np.float32), spatial_h, spatial_w
 
     def load_images(self, image_paths: List[str]) -> List:
         """Load images from paths or create test image."""
@@ -341,10 +364,12 @@ class VLMultiTurnTester:
 
         for image in self.images:
             if vision_format == "conv2d":
-                # Conv2d format: [1, 3, H, W] raw image input
-                pixel_values = self._preprocess_conv2d(image)
+                # Conv2d format: [1, 3, H, W] raw image input with spatial dims
+                pixel_values, spatial_h, spatial_w = self._preprocess_conv2d(image)
                 outputs = self.embed_images_sess.run(None, {
                     "pixel_values": pixel_values,
+                    "spatial_h": np.array(spatial_h, dtype=np.int64),
+                    "spatial_w": np.array(spatial_w, dtype=np.int64),
                 })
                 # Output shape: (1, num_tokens, hidden_dim)
                 onnx_embeds = outputs[0][0]  # (num_tokens, hidden_dim)

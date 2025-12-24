@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import math
 from pathlib import Path
 from typing import List, Optional
 
@@ -90,34 +91,65 @@ class VLModelInference:
 
     def _detect_vision_format(self) -> str:
         """Detect vision input format from ONNX model inputs."""
-        for inp in self.embed_images_sess.get_inputs():
-            if inp.name == "pixel_values":
-                # conv2d: [B, 3, H, W] = 4D
-                # tiled: [B, N, 768] = 3D
-                if len(inp.shape) == 4:
-                    return "conv2d"
-                elif len(inp.shape) == 3:
-                    return "tiled"
+        input_names = {inp.name for inp in self.embed_images_sess.get_inputs()}
+        # conv2d format has spatial_h and spatial_w inputs
+        if "spatial_h" in input_names:
+            return "conv2d"
         return "tiled"
 
-    def _preprocess_conv2d(self, image: Image.Image) -> np.ndarray:
+    def _preprocess_conv2d(self, image: Image.Image) -> tuple[np.ndarray, int, int]:
         """Preprocess image for conv2d format.
 
-        Note: ONNX model requires square 512x512 input due to sqrt(N) reshape in projector.
-        llama.cpp handles this differently with dynamic position embeddings.
-        """
-        target_size = 512
+        Matches llama.cpp preprocessing: preserves aspect ratio while keeping
+        total pixels within min/max bounds, aligned to patch_size * n_merge.
 
-        # Direct square resize (ONNX limitation)
-        # Use LANCZOS for best quality when resizing
-        image_resized = image.resize((target_size, target_size), Image.LANCZOS)
+        Returns (pixel_values, spatial_h, spatial_w) where spatial dimensions
+        are AFTER n_merge (i.e., the final projector output dimensions).
+        """
+        patch_size, n_merge = 16, 2
+        align_size = patch_size * n_merge  # 32
+
+        # Token limits from model config (after n_merge downsampling)
+        # image_min_tokens: 64, image_max_tokens: 256
+        min_tokens, max_tokens = 64, 256
+        # patch_area = patch_size^2 * n_merge^2 = 16*16*2*2 = 1024 pixels per output token
+        patch_area = patch_size * patch_size * n_merge * n_merge
+        min_pixels = min_tokens * patch_area  # 64 * 1024 = 65536 (256x256)
+        max_pixels = max_tokens * patch_area  # 256 * 1024 = 262144 (512x512)
+
+        w, h = image.size
+        current_pixels = h * w
+
+        # Scale to fit within min/max pixels while preserving aspect ratio
+        if current_pixels > max_pixels:
+            # Scale down
+            beta = math.sqrt(current_pixels / max_pixels)
+            h_new = max(align_size, int(h / beta) // align_size * align_size)
+            w_new = max(align_size, int(w / beta) // align_size * align_size)
+        elif current_pixels < min_pixels:
+            # Scale up
+            beta = math.sqrt(min_pixels / current_pixels)
+            h_new = math.ceil(h * beta / align_size) * align_size
+            w_new = math.ceil(w * beta / align_size) * align_size
+        else:
+            # Within bounds, just align to grid
+            h_new = max(align_size, round(h / align_size) * align_size)
+            w_new = max(align_size, round(w / align_size) * align_size)
+
+        # Resize with bilinear interpolation (matches llama.cpp)
+        image_resized = image.resize((w_new, h_new), Image.BILINEAR)
+
+        # Compute spatial dimensions AFTER n_merge (for projector)
+        spatial_h = h_new // patch_size // n_merge
+        spatial_w = w_new // patch_size // n_merge
 
         # Convert to float and normalize
-        pixels = np.array(image_resized).astype(np.float32) / 255.0
         # SigLIP2 normalization: mean=0.5, std=0.5 -> range [-1, 1]
+        pixels = np.array(image_resized).astype(np.float32) / 255.0
         pixels = (pixels - 0.5) / 0.5
         pixels = pixels.transpose(2, 0, 1)[np.newaxis, ...]
-        return pixels.astype(np.float32)
+
+        return pixels.astype(np.float32), spatial_h, spatial_w
 
     def _get_image_embeddings(self, images: List[Image.Image]) -> List[np.ndarray]:
         """Get embeddings for a list of images."""
@@ -125,19 +157,49 @@ class VLModelInference:
 
         for image in images:
             if self.vision_format == "conv2d":
-                # Conv2d format: [B, 3, H, W] raw image input
-                pixel_values = self._preprocess_conv2d(image)
+                # Conv2d format: [B, 3, H, W] raw image input with spatial dims
+                pixel_values, spatial_h, spatial_w = self._preprocess_conv2d(image)
                 outputs = self.embed_images_sess.run(
                     None,
-                    {"pixel_values": pixel_values},
+                    {
+                        "pixel_values": pixel_values,
+                        "spatial_h": np.array(spatial_h, dtype=np.int64),
+                        "spatial_w": np.array(spatial_w, dtype=np.int64),
+                    },
                 )
-                # Output: [1, num_tokens, hidden_dim]
+                # Output: [1, num_tokens, hidden_dim] where num_tokens = spatial_h * spatial_w
                 img_embeds = outputs[0][0]  # [num_tokens, hidden_dim]
             else:
-                # Tiled format: [B, N, 768] with pre-extracted patches
-                inputs = self.processor.image_processor(images=image, return_tensors="pt")
-                pixel_values = inputs["pixel_values"].numpy().astype(np.float32)
-                patch_attention_mask = inputs["pixel_attention_mask"].numpy().astype(np.int64)
+                # Tiled format: use HuggingFace processor for patch extraction
+                # The ONNX model's position embedding interpolation assumes square layout
+                # so we need to pad non-square images to square first
+                w, h = image.size
+                if w != h:
+                    # Pad to square by adding black bars
+                    max_dim = max(w, h)
+                    square_img = Image.new('RGB', (max_dim, max_dim), (0, 0, 0))
+                    # Center the original image
+                    paste_x = (max_dim - w) // 2
+                    paste_y = (max_dim - h) // 2
+                    square_img.paste(image, (paste_x, paste_y))
+                    image = square_img
+
+                # Process with image splitting disabled for single square tile
+                processed = self.processor(
+                    images=[image],
+                    text="<image>",  # Minimal text with image token (required by processor)
+                    return_tensors='pt',
+                    do_image_splitting=False  # Single tile for simpler position embeddings
+                )
+
+                # Get pixel values - with square input, all patches should be valid
+                # pixel_values: [1, num_patches, 768] where num_patches should be square
+                pixel_values_pt = processed['pixel_values']
+                attention_mask_pt = processed['pixel_attention_mask']
+
+                # Convert to numpy
+                pixel_values = pixel_values_pt.numpy().astype(np.float32)
+                patch_attention_mask = attention_mask_pt.numpy().astype(np.int64)
 
                 outputs = self.embed_images_sess.run(
                     None,
@@ -147,11 +209,8 @@ class VLModelInference:
                     },
                 )
 
-                # Output: [num_tiles, tokens_per_tile, hidden_dim]
-                # Flatten to [total_tokens, hidden_dim]
-                img_embeds = outputs[0]
-                num_tiles, tokens_per_tile, hidden = img_embeds.shape
-                img_embeds = img_embeds.reshape(-1, hidden)
+                # Output: [1, num_tokens, hidden_dim]
+                img_embeds = outputs[0][0]  # [num_tokens, hidden_dim]
 
             embeddings.append(img_embeds)
 

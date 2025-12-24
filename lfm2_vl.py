@@ -190,6 +190,15 @@ class VisionEmbedBuilder:
                 "pixel_values", TensorProto.FLOAT,
                 ["batch_size", self.vision_config.num_channels, "height", "width"]
             ))
+            # Spatial dimensions after n_merge (for projector reshape)
+            # spatial_h = height / patch_size / n_merge
+            # spatial_w = width / patch_size / n_merge
+            self.inputs.append(helper.make_tensor_value_info(
+                "spatial_h", TensorProto.INT64, []  # scalar
+            ))
+            self.inputs.append(helper.make_tensor_value_info(
+                "spatial_w", TensorProto.INT64, []  # scalar
+            ))
         else:
             # Tiled mode: pre-extracted patches [batch, num_patches, patch_dim]
             # Requires complex preprocessing (tiling, patch extraction)
@@ -239,9 +248,10 @@ class VisionEmbedBuilder:
             # Linear: [hidden_size, C*P*P] -> Conv2d: [hidden_size, C, P, P]
             # =====================================================================
             # Linear weight is [out_features, in_features] = [768, 768]
-            # Input is flattened as CHW (C=3, H=W=16), so 768 = 3*16*16 in CHW order
-            # Conv2d weight should be [out_channels, in_channels, kH, kW] = [768, 3, 16, 16]
-            conv_weight = linear_weight.reshape(H, C, P, P)  # [H, C, P, P]
+            # The original model flattens patches as HWC (P*P*C = 16*16*3 = 768)
+            # So we first reshape to [H, P, P, C] then transpose to [H, C, P, P]
+            # This matches the GGUF converter: view(H, 16, 16, 3).permute(0, 3, 1, 2)
+            conv_weight = linear_weight.reshape(H, P, P, C).transpose(0, 3, 1, 2)  # [H, C, P, P]
             self.add_initializer(f"{prefix}.conv_weight", conv_weight)
             self.add_initializer(f"{prefix}.bias", linear_bias)
 
@@ -293,28 +303,24 @@ class VisionEmbedBuilder:
         self.add_initializer("pos_emb/axes_0", np.array([0], dtype=np.int64))
 
         if self.vision_input_format == "conv2d":
-            # Conv2d mode: input is [B, C, H, W], target size is [H/P, W/P]
-            self.add_initializer("pos_emb/idx_2", np.array(2, dtype=np.int64))  # height index
-            self.add_initializer("pos_emb/idx_3", np.array(3, dtype=np.int64))  # width index
-            self.add_initializer("pos_emb/patch_size", np.array(P, dtype=np.int64))
+            # Conv2d mode: use passed spatial dimensions
+            # spatial_h, spatial_w are AFTER n_merge (final projector output size)
+            # For position embeddings, we need BEFORE n_merge: spatial * n_merge
+            n_merge = self.downsample  # downsample_factor is the n_merge value
+            self.add_initializer("pos_emb/n_merge", np.array(n_merge, dtype=np.int64))
 
-            img_h = self.make_node("Gather", [input_shape, "pos_emb/idx_2"],
-                                   ["pos_emb/img_h"], axis=0)
-            img_w = self.make_node("Gather", [input_shape, "pos_emb/idx_3"],
-                                   ["pos_emb/img_w"], axis=0)
+            # Compute pre-merge spatial dimensions: spatial_h * n_merge, spatial_w * n_merge
+            pre_merge_h = self.make_node("Mul", ["spatial_h", "pos_emb/n_merge"], ["pos_emb/pre_merge_h"])
+            pre_merge_w = self.make_node("Mul", ["spatial_w", "pos_emb/n_merge"], ["pos_emb/pre_merge_w"])
 
-            # spatial_h = img_h / patch_size, spatial_w = img_w / patch_size
-            spatial_h = self.make_node("Div", [img_h, "pos_emb/patch_size"], ["pos_emb/spatial_h"])
-            spatial_w = self.make_node("Div", [img_w, "pos_emb/patch_size"], ["pos_emb/spatial_w"])
-
-            # Build target size tensor: [1, 768, spatial_h, spatial_w]
+            # Build target size tensor: [1, 768, pre_merge_h, pre_merge_w]
             self.add_initializer("pos_emb/one", np.array([1], dtype=np.int64))
             self.add_initializer("pos_emb/hidden", np.array([H], dtype=np.int64))
-            spatial_h_unsq = self.make_node("Unsqueeze", [spatial_h, "pos_emb/axes_0"], ["pos_emb/spatial_h_unsq"])
-            spatial_w_unsq = self.make_node("Unsqueeze", [spatial_w, "pos_emb/axes_0"], ["pos_emb/spatial_w_unsq"])
+            pre_merge_h_unsq = self.make_node("Unsqueeze", [pre_merge_h, "pos_emb/axes_0"], ["pos_emb/pre_merge_h_unsq"])
+            pre_merge_w_unsq = self.make_node("Unsqueeze", [pre_merge_w, "pos_emb/axes_0"], ["pos_emb/pre_merge_w_unsq"])
 
             target_size = self.make_node("Concat", [
-                "pos_emb/one", "pos_emb/hidden", spatial_h_unsq, spatial_w_unsq
+                "pos_emb/one", "pos_emb/hidden", pre_merge_h_unsq, pre_merge_w_unsq
             ], ["pos_emb/target_size"], axis=0)
         else:
             # Tiled mode: input is [B, N, patch_dim], target size is sqrt(N) x sqrt(N)
@@ -347,8 +353,8 @@ class VisionEmbedBuilder:
             "Resize",
             ["pos_emb/4d", "pos_emb/empty_roi", "pos_emb/empty_scales", target_size],
             ["pos_emb/resized"],
-            mode="linear",
-            coordinate_transformation_mode="half_pixel",  # match PyTorch align_corners=False
+            mode="linear",  # bilinear for 2D
+            coordinate_transformation_mode="half_pixel",  # Match tiled model's default
         )
 
         # Reshape from (1, 768, H, W) back to (1, H*W, 768)
@@ -561,65 +567,99 @@ class VisionEmbedBuilder:
         self.add_initializer("proj/shape_indices_seq", np.array(1, dtype=np.int64))  # scalar
         batch_size = self.make_node("Gather", [self.make_node("Shape", [vision_embeddings], ["proj/input_shape"]),
                                                 "proj/shape_indices_batch"], ["proj/batch_size"], axis=0)
-        seq_len = self.make_node("Gather", [self.make_node("Shape", [vision_embeddings], ["proj/input_shape2"]),
-                                            "proj/shape_indices_seq"], ["proj/seq_len"], axis=0)
 
-        # Compute spatial size: sqrt(seq_len) - for 1024 patches, this is 32
-        seq_len_float = self.make_node("Cast", [seq_len], ["proj/seq_len_float"], to=TensorProto.FLOAT)
-        spatial_float = self.make_node("Sqrt", [seq_len_float], ["proj/spatial_float"])
-        spatial_size = self.make_node("Cast", [spatial_float], ["proj/spatial_size"], to=TensorProto.INT64)
-
-        # Build reshape target: [batch, spatial, spatial, C]
         self.add_initializer("proj/hidden_size", np.array([C], dtype=np.int64))
         self.add_initializer("proj/axes_0", np.array([0], dtype=np.int64))
-        reshape_4d_shape = self.make_node("Concat", [
-            self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["proj/batch_unsq"]),
-            self.make_node("Unsqueeze", [spatial_size, "proj/axes_0"], ["proj/spatial1_unsq"]),
-            self.make_node("Unsqueeze", [spatial_size, "proj/axes_0"], ["proj/spatial2_unsq"]),
-            "proj/hidden_size"
-        ], ["proj/reshape_4d_shape"], axis=0)
 
-        # Reshape to 4D: (B, N, C) -> (B, W, H, C)
+        if self.vision_input_format == "conv2d":
+            # Conv2d mode: use passed spatial dimensions
+            # spatial_h, spatial_w are AFTER n_merge, so we need to multiply by n_merge
+            # to get the pre-merge spatial dimensions for the first reshape
+            n_merge = self.downsample  # downsample_factor is the n_merge value
+            self.add_initializer("proj/n_merge", np.array(n_merge, dtype=np.int64))
+
+            # Pre-merge dimensions: spatial_h * n_merge, spatial_w * n_merge
+            pre_merge_h = self.make_node("Mul", ["spatial_h", "proj/n_merge"], ["proj/pre_merge_h"])
+            pre_merge_w = self.make_node("Mul", ["spatial_w", "proj/n_merge"], ["proj/pre_merge_w"])
+
+            # Build reshape target: [batch, pre_merge_h, pre_merge_w, C]
+            # Match position embedding order: row-major (H first, then W)
+            reshape_4d_shape = self.make_node("Concat", [
+                self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["proj/batch_unsq"]),
+                self.make_node("Unsqueeze", [pre_merge_h, "proj/axes_0"], ["proj/spatial_h_unsq"]),
+                self.make_node("Unsqueeze", [pre_merge_w, "proj/axes_0"], ["proj/spatial_w_unsq"]),
+                "proj/hidden_size"
+            ], ["proj/reshape_4d_shape"], axis=0)
+
+            # Store for use in pixel_unshuffle (now H comes first in the 4D tensor)
+            spatial_h_name = pre_merge_h
+            spatial_w_name = pre_merge_w
+            half_spatial_h_name = "spatial_h"  # Already the post-merge size
+            half_spatial_w_name = "spatial_w"  # Already the post-merge size
+        else:
+            # Tiled mode: compute spatial size from sqrt(seq_len), assumes square
+            seq_len = self.make_node("Gather", [self.make_node("Shape", [vision_embeddings], ["proj/input_shape2"]),
+                                                "proj/shape_indices_seq"], ["proj/seq_len"], axis=0)
+            seq_len_float = self.make_node("Cast", [seq_len], ["proj/seq_len_float"], to=TensorProto.FLOAT)
+            spatial_float = self.make_node("Sqrt", [seq_len_float], ["proj/spatial_float"])
+            spatial_size = self.make_node("Cast", [spatial_float], ["proj/spatial_size"], to=TensorProto.INT64)
+
+            # Build reshape target: [batch, spatial, spatial, C] (square)
+            reshape_4d_shape = self.make_node("Concat", [
+                self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["proj/batch_unsq"]),
+                self.make_node("Unsqueeze", [spatial_size, "proj/axes_0"], ["proj/spatial1_unsq"]),
+                self.make_node("Unsqueeze", [spatial_size, "proj/axes_0"], ["proj/spatial2_unsq"]),
+                "proj/hidden_size"
+            ], ["proj/reshape_4d_shape"], axis=0)
+
+            # For tiled mode, compute half_spatial
+            self.add_initializer("proj/two_tiled", np.array(2, dtype=np.int64))
+            half_spatial = self.make_node("Div", [spatial_size, "proj/two_tiled"], ["proj/half_spatial_tiled"])
+            spatial_w_name = spatial_size
+            spatial_h_name = spatial_size
+            half_spatial_w_name = half_spatial
+            half_spatial_h_name = half_spatial
+
+        # Reshape to 4D: (B, N, C) -> (B, H, W, C)
         hidden_4d = self.make_node("Reshape", [vision_embeddings, reshape_4d_shape], ["proj/hidden_4d"])
 
         # Step 2: Pixel unshuffle - complex reshape + transpose sequence
-        # PyTorch pixel_unshuffle:
-        #   hidden = hidden.reshape(B, W, H // factor, C * factor)
-        #   hidden = hidden.permute(0, 2, 1, 3)
-        #   hidden = hidden.reshape(B, H // factor, W // factor, C * factor * factor)
-        #   hidden = hidden.permute(0, 2, 1, 3)
+        # For (B, H, W, C) input:
+        #   hidden = hidden.reshape(B, H, W // factor, C * factor)  # (B, H, W/2, C*2)
+        #   hidden = hidden.permute(0, 2, 1, 3)  # (B, W/2, H, C*2)
+        #   hidden = hidden.reshape(B, W // factor, H // factor, C * factor * factor)  # (B, W/2, H/2, C*4)
+        #   hidden = hidden.permute(0, 2, 1, 3)  # (B, H/2, W/2, C*4)
+        #
+        # For conv2d mode, we use separate H and W dimensions
+        # For tiled mode, H == W (square)
 
-        # Compute half_spatial = spatial_size // 2 (use scalar divisor)
-        self.add_initializer("proj/two", np.array(2, dtype=np.int64))  # scalar
-        half_spatial = self.make_node("Div", [spatial_size, "proj/two"], ["proj/half_spatial"])
-
-        # First reshape: (B, W, H, C) -> (B, W, H/2, C*2)
+        # First reshape: (B, H, W, C) -> (B, H, W/2, C*2)
         self.add_initializer("proj/c_times_2", np.array([C * ds], dtype=np.int64))
         reshape1_shape = self.make_node("Concat", [
             self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["proj/b1"]),
-            self.make_node("Unsqueeze", [spatial_size, "proj/axes_0"], ["proj/w1"]),
-            self.make_node("Unsqueeze", [half_spatial, "proj/axes_0"], ["proj/h_half1"]),
+            self.make_node("Unsqueeze", [spatial_h_name, "proj/axes_0"], ["proj/h1"]),
+            self.make_node("Unsqueeze", [half_spatial_w_name, "proj/axes_0"], ["proj/w_half1"]),
             "proj/c_times_2"
         ], ["proj/reshape1_shape"], axis=0)
         step1 = self.make_node("Reshape", [hidden_4d, reshape1_shape], ["proj/step1"])
 
-        # First transpose: (B, W, H/2, C*2) -> (B, H/2, W, C*2)
+        # First transpose: (B, H, W/2, C*2) -> (B, W/2, H, C*2)
         step2 = self.make_node("Transpose", [step1], ["proj/step2"], perm=[0, 2, 1, 3])
 
-        # Second reshape: (B, H/2, W, C*2) -> (B, H/2, W/2, C*4)
+        # Second reshape: (B, W/2, H, C*2) -> (B, W/2, H/2, C*4)
         self.add_initializer("proj/c_times_4", np.array([input_dim], dtype=np.int64))
         reshape2_shape = self.make_node("Concat", [
             self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["proj/b2"]),
-            self.make_node("Unsqueeze", [half_spatial, "proj/axes_0"], ["proj/h_half2"]),
-            self.make_node("Unsqueeze", [half_spatial, "proj/axes_0"], ["proj/w_half2"]),
+            self.make_node("Unsqueeze", [half_spatial_w_name, "proj/axes_0"], ["proj/w_half2"]),
+            self.make_node("Unsqueeze", [half_spatial_h_name, "proj/axes_0"], ["proj/h_half2"]),
             "proj/c_times_4"
         ], ["proj/reshape2_shape"], axis=0)
         step3 = self.make_node("Reshape", [step2, reshape2_shape], ["proj/step3"])
 
-        # Second transpose: (B, H/2, W/2, C*4) -> (B, W/2, H/2, C*4)
+        # Second transpose: (B, W/2, H/2, C*4) -> (B, H/2, W/2, C*4)
         step4 = self.make_node("Transpose", [step3], ["proj/step4"], perm=[0, 2, 1, 3])
 
-        # Flatten to 3D: (B, W/2, H/2, C*4) -> (B, N/4, C*4)
+        # Flatten to 3D: (B, H/2, W/2, C*4) -> (B, N/4, C*4)
         self.add_initializer("proj/reshape_3d", np.array([0, -1, input_dim], dtype=np.int64))
         unshuffled = self.make_node("Reshape", [step4, "proj/reshape_3d"], ["proj/unshuffled"])
 
