@@ -8,6 +8,7 @@ import numpy as np
 import onnxruntime as ort
 import pytest
 import torch
+from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,19 @@ RTOL_QUANT = 0.5
 
 def bits_to_str(bits: int | None) -> str:
     return f"q{bits}" if bits else "fp32"
+
+
+def pad_to_square(image: Image.Image) -> Image.Image:
+    """Pad image to square with black borders, centered."""
+    w, h = image.size
+    if w == h:
+        return image
+    max_dim = max(w, h)
+    square_img = Image.new('RGB', (max_dim, max_dim), (0, 0, 0))
+    paste_x = (max_dim - w) // 2
+    paste_y = (max_dim - h) // 2
+    square_img.paste(image, (paste_x, paste_y))
+    return square_img
 
 
 @dataclass
@@ -91,6 +105,38 @@ def compare_arrays(name: str, expected: np.ndarray, actual: np.ndarray,
     return VerificationResult(
         name=name, passed=passed,
         max_diff=max_diff, mean_diff=mean_diff, correlation=correlation,
+    )
+
+
+def assert_results(results: list[VerificationResult], logger=None):
+    for r in results:
+        status = "PASS" if r.passed else "FAIL"
+        if logger:
+            logger.info(f"  {r.name}: {status} max_diff={r.max_diff:.6f} corr={r.correlation:.4f}")
+            if r.details:
+                logger.info(f"    {r.details}")
+        assert r.passed, f"{r.name}: max_diff={r.max_diff:.6f}, corr={r.correlation:.4f}, {r.details}"
+
+
+def compare_top_k(name: str, expected: np.ndarray, actual: np.ndarray,
+                  k: int = 5) -> VerificationResult:
+    """Compare top-k predictions between expected and actual logits."""
+    exp_logits = expected[0, -1]
+    act_logits = actual[0, -1]
+
+    exp_top_k = np.argsort(exp_logits)[-k:][::-1]
+    act_top_k = np.argsort(act_logits)[-k:][::-1]
+
+    top1_match = exp_top_k[0] == act_top_k[0]
+    top_k_overlap = len(set(exp_top_k) & set(act_top_k))
+
+    return VerificationResult(
+        name=name, passed=top1_match,
+        max_diff=0.0 if top1_match else 1.0,
+        mean_diff=1.0 - (top_k_overlap / k),
+        correlation=top_k_overlap / k,
+        details=f"Top-1 match: {top1_match}, Top-{k} overlap: {top_k_overlap}/{k}, "
+                f"Expected: {exp_top_k.tolist()}, Actual: {act_top_k.tolist()}"
     )
 
 

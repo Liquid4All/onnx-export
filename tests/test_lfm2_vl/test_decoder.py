@@ -7,16 +7,17 @@ import numpy as np
 import pytest
 import torch
 
-from liquidonnx.lfm2_vl import MODELS, VISION_MODES
+from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
 from test_lfm2_vl.helpers import (
-    VerificationResult,
+    assert_results,
     bits_to_str,
-    skip_if_missing,
-    get_onnx_file,
-    get_vl_onnx_dir,
-    get_tolerances,
-    load_onnx_session,
     compare_arrays,
+    compare_top_k,
+    get_onnx_file,
+    get_tolerances,
+    get_vl_onnx_dir,
+    load_onnx_session,
+    skip_if_missing,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,43 +31,21 @@ DECODER_CONFIGS = [
 ]
 
 
-def compare_top_k(name: str, expected: np.ndarray, actual: np.ndarray, k: int = 5) -> VerificationResult:
-    exp_logits = expected[0, -1]
-    act_logits = actual[0, -1]
-
-    exp_top_k = np.argsort(exp_logits)[-k:][::-1]
-    act_top_k = np.argsort(act_logits)[-k:][::-1]
-
-    top1_match = exp_top_k[0] == act_top_k[0]
-    top_k_overlap = len(set(exp_top_k) & set(act_top_k))
-
-    return VerificationResult(
-        name=name, passed=top1_match,
-        max_diff=0.0 if top1_match else 1.0,
-        mean_diff=1.0 - (top_k_overlap / k),
-        correlation=top_k_overlap / k,
-        details=f"Top-1 match: {top1_match}, Top-{k} overlap: {top_k_overlap}/{k}, "
-                f"Expected: {exp_top_k.tolist()}, Actual: {act_top_k.tolist()}"
-    )
-
-
 # pytorch_model outermost so same model runs consecutively (memory optimization)
 @pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
-@pytest.mark.parametrize("vision_mode", VISION_MODES)
 @pytest.mark.parametrize("decoder_bits,checks", DECODER_CONFIGS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_decoder(
     exports_dir: pathlib.Path,
     pytorch_model,
-    vision_mode: str,
     decoder_bits: int | None,
     checks: list[str],
     prompt: str,
 ):
     size, model, processor = pytorch_model
-    logger.info(f"Testing {size}/{vision_mode}/{bits_to_str(decoder_bits)}: '{prompt}'")
+    logger.info(f"Testing {size}/{bits_to_str(decoder_bits)}: '{prompt}'")
 
-    onnx_dir = get_vl_onnx_dir(exports_dir, size, vision_mode)
+    onnx_dir = get_vl_onnx_dir(exports_dir, size, VISION_MODE_TILED)
     skip_if_missing(onnx_dir, "Export not found")
 
     decoder_file = get_onnx_file(onnx_dir, "decoder", decoder_bits)
@@ -121,9 +100,4 @@ def test_decoder(
             pytorch_logits, onnx_logits
         ))
 
-    for r in results:
-        status = "PASS" if r.passed else "FAIL"
-        logger.info(f"  {r.name}: {status} max_diff={r.max_diff:.6f} corr={r.correlation:.4f}")
-        if r.details:
-            logger.info(f"    {r.details}")
-        assert r.passed, f"{r.name}: max_diff={r.max_diff:.6f}, {r.details}"
+    assert_results(results, logger)

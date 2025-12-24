@@ -15,14 +15,16 @@ from PIL import Image
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
 from test_lfm2_vl.helpers import (
+    assert_results,
     bits_to_str,
-    skip_if_missing,
-    get_onnx_file,
-    get_vl_onnx_dir,
-    get_tolerances,
-    load_onnx_session,
     compare_arrays,
     compare_correlation,
+    get_onnx_file,
+    get_tolerances,
+    get_vl_onnx_dir,
+    load_onnx_session,
+    pad_to_square,
+    skip_if_missing,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,27 +38,9 @@ VISION_CONFIGS = [
 ]
 
 
-def pad_to_square(image):
-    """Pad image to square (matches ONNX preprocessing)."""
-    w, h = image.size
-    if w == h:
-        return image
-    max_dim = max(w, h)
-    square_img = Image.new('RGB', (max_dim, max_dim), (0, 0, 0))
-    paste_x = (max_dim - w) // 2
-    paste_y = (max_dim - h) // 2
-    square_img.paste(image, (paste_x, paste_y))
-    return square_img
-
-
-def get_pytorch_vision_embeddings(model, processor, image, apply_pad_to_square=True):
-    """Get vision embeddings from PyTorch model.
-
-    Args:
-        apply_pad_to_square: Pad to square to match ONNX preprocessing
-    """
-    if apply_pad_to_square:
-        image = pad_to_square(image)
+def get_pytorch_vision_embeddings(model, processor, image):
+    """Get vision embeddings from PyTorch model."""
+    image = pad_to_square(image)
 
     inputs = processor.image_processor(images=image, return_tensors="pt")
     pixel_values = inputs["pixel_values"]
@@ -142,7 +126,4 @@ def test_vision_encoder(
     pytorch_embeddings, inputs = get_pytorch_vision_embeddings(model, processor, image)
     results = verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, vision_bits)
 
-    for r in results:
-        logger.info(f"  {r.name}: {'PASS' if r.passed else 'FAIL'} "
-                    f"max_diff={r.max_diff:.4f} corr={r.correlation:.4f}")
-        assert r.passed, f"{r.name}: max_diff={r.max_diff:.6f}, corr={r.correlation:.4f}, {r.details}"
+    assert_results(results, logger)

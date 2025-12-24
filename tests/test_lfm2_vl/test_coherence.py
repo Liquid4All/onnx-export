@@ -9,12 +9,15 @@ Run with:
     pytest tests/test_lfm2_vl/test_coherence.py -v -k "450M and tiled"
 """
 
+import logging
 import pathlib
 
 import numpy as np
 import pytest
 import torch
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODES, VISION_MODE_CONV2D
 from liquidonnx.lfm2_vl.preprocessing import detect_vision_format, preprocess_conv2d, preprocess_tiled
@@ -294,6 +297,11 @@ def run_multi_turn_coherence(
 
         similarity = compare_logits(pt_logits, ox_logits)
         similarities.append(similarity)
+
+        logger.info(f"  Turn {turn}: similarity={similarity:.4f}")
+        logger.info(f"    Prompt: {prompt[:60]}...")
+        logger.info(f"    PyTorch: {pt_text}")
+        logger.info(f"    ONNX:    {ox_text}")
 
         # Update conversation history
         messages_pytorch = current_pytorch + [{"role": "assistant", "content": pt_text}]
