@@ -16,7 +16,6 @@ import argparse
 import logging
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -41,7 +40,7 @@ class NumericalVerifier:
         self.model_path = model_path
         self.atol = atol
         self.rtol = rtol
-        self.results: List[VerificationResult] = []
+        self.results: list[VerificationResult] = []
 
     def load_pytorch_model(self):
         """Load PyTorch model for reference."""
@@ -80,7 +79,7 @@ class NumericalVerifier:
         logger.info(f"Loading ONNX model from {model_file}...")
         return ort.InferenceSession(model_file, providers=["CPUExecutionProvider"])
 
-    def prepare_inputs(self, prompt: str = "Hello, how are") -> Dict[str, np.ndarray]:
+    def prepare_inputs(self, prompt: str = "Hello, how are") -> dict[str, np.ndarray]:
         """Prepare input tensors."""
         input_ids = self.tokenizer.encode(prompt, return_tensors="np")
         seq_len = input_ids.shape[1]
@@ -91,7 +90,7 @@ class NumericalVerifier:
             "position_ids": np.arange(seq_len, dtype=np.int64).reshape(1, -1),
         }
 
-    def run_pytorch(self, inputs: Dict[str, np.ndarray]) -> np.ndarray:
+    def run_pytorch(self, inputs: dict[str, np.ndarray]) -> np.ndarray:
         """Run PyTorch model and return logits."""
         import torch
 
@@ -107,10 +106,10 @@ class NumericalVerifier:
             )
             return outputs.logits.numpy()
 
-    def run_onnx(self, sess, inputs: Dict[str, np.ndarray]) -> np.ndarray:
+    def run_onnx(self, sess, inputs: dict[str, np.ndarray]) -> np.ndarray:
         """Run ONNX model and return logits."""
         # Get all input names
-        input_names = [inp.name for inp in sess.get_inputs()]
+        [inp.name for inp in sess.get_inputs()]
 
         # Build feed dict with cache inputs initialized to zeros
         feed = {}
@@ -179,7 +178,7 @@ class NumericalVerifier:
                     f"Expected: {exp_top_k.tolist()}, Actual: {act_top_k.tolist()}"
         )
 
-    def verify_against_pytorch(self, onnx_path: str, prompts: List[str] = None) -> List[VerificationResult]:
+    def verify_against_pytorch(self, onnx_path: str, prompts: list[str] = None) -> list[VerificationResult]:
         """Verify ONNX model against PyTorch."""
         if prompts is None:
             prompts = [
@@ -212,7 +211,7 @@ class NumericalVerifier:
         return results
 
     def verify_against_community(self, onnx_path: str, community_path: str,
-                                  prompts: List[str] = None) -> List[VerificationResult]:
+                                  prompts: list[str] = None) -> list[VerificationResult]:
         """Verify ONNX model against community version."""
         if prompts is None:
             prompts = ["Hello, how are"]
@@ -266,7 +265,7 @@ class NumericalVerifier:
         self.results.append(result)
         return result
 
-    def _generate_pytorch(self, input_ids: List[int], max_tokens: int) -> List[int]:
+    def _generate_pytorch(self, input_ids: list[int], max_tokens: int) -> list[int]:
         """Generate tokens with PyTorch model."""
         import torch
 
@@ -297,7 +296,7 @@ class NumericalVerifier:
 
         return generated
 
-    def _generate_onnx(self, sess, input_ids: List[int], max_tokens: int) -> List[int]:
+    def _generate_onnx(self, sess, input_ids: list[int], max_tokens: int) -> list[int]:
         """Generate tokens with ONNX model."""
         generated = input_ids.copy()
 

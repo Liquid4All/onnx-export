@@ -14,7 +14,6 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
 
 import numpy as np
 
@@ -92,10 +91,10 @@ class ONNXBenchmark:
     def run_generation(
         self,
         sess,
-        input_ids: List[int],
+        input_ids: list[int],
         max_tokens: int,
         warmup: int = 2,
-    ) -> tuple[List[int], float, float]:
+    ) -> tuple[list[int], float, float]:
         """Run generation and return tokens, prefill time, and total generation time."""
         generated = input_ids.copy()
 

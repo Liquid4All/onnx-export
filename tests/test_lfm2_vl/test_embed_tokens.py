@@ -6,16 +6,16 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-
-from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
 from test_lfm2_vl.helpers import (
     assert_results,
-    skip_if_missing,
-    get_vl_onnx_dir,
-    get_tolerances,
-    load_onnx_session,
     compare_arrays,
+    get_tolerances,
+    get_vl_onnx_dir,
+    load_onnx_session,
+    skip_if_missing,
 )
+
+from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
 
 logger = logging.getLogger(__name__)
 

@@ -11,12 +11,11 @@ Supports two vision input formats:
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
 
 import numpy as np
 from PIL import Image
 
-from liquidonnx.lfm2_vl import VISION_MODE_TILED, VISION_MODE_CONV2D
+from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 
 
 @dataclass
@@ -43,8 +42,8 @@ class VLConfig:
     use_thumbnail: bool = True
 
     # Normalization (SigLIP2 uses ImageNet mean/std)
-    image_mean: Tuple[float, float, float] = (0.485, 0.456, 0.406)
-    image_std: Tuple[float, float, float] = (0.229, 0.224, 0.225)
+    image_mean: tuple[float, float, float] = (0.485, 0.456, 0.406)
+    image_std: tuple[float, float, float] = (0.229, 0.224, 0.225)
 
     @classmethod
     def from_hf_config(cls, config) -> "VLConfig":
@@ -89,12 +88,12 @@ def round_by_factor(number: float, factor: int) -> int:
 def smart_resize(
     height: int,
     width: int,
-    config: Optional[VLConfig] = None,
+    config: VLConfig | None = None,
     patch_size: int = 16,
     downsample_factor: int = 2,
     min_image_tokens: int = 64,
     max_image_tokens: int = 256,
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     """Compute target size for image, matching PyTorch smart_resize exactly.
 
     Rescales the image so that:
@@ -149,14 +148,14 @@ def smart_resize(
 
 def preprocess_conv2d(
     image: Image.Image,
-    config: Optional[VLConfig] = None,
+    config: VLConfig | None = None,
     patch_size: int = 16,
     downsample_factor: int = 2,
     min_image_tokens: int = 64,
     max_image_tokens: int = 256,
-    image_mean: Tuple[float, float, float] = (0.485, 0.456, 0.406),
-    image_std: Tuple[float, float, float] = (0.229, 0.224, 0.225),
-) -> Tuple[np.ndarray, int, int]:
+    image_mean: tuple[float, float, float] = (0.485, 0.456, 0.406),
+    image_std: tuple[float, float, float] = (0.229, 0.224, 0.225),
+) -> tuple[np.ndarray, int, int]:
     """Preprocess image for conv2d format ONNX model.
 
     Matches PyTorch preprocessing:
@@ -226,7 +225,7 @@ def preprocess_tiled(
     processor,
     do_image_splitting: bool = False,
     pad_to_square: bool = True,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Preprocess image for tiled format ONNX model.
 
     Uses HuggingFace processor for patch extraction, matching PyTorch exactly.
@@ -271,13 +270,13 @@ def preprocess_tiled(
 
 def get_image_embeddings(
     session,
-    images: Union[Image.Image, List[Image.Image]],
-    vision_format: Optional[str] = None,
+    images: Image.Image | list[Image.Image],
+    vision_format: str | None = None,
     processor=None,
-    config: Optional[VLConfig] = None,
+    config: VLConfig | None = None,
     do_image_splitting: bool = False,
     pad_to_square: bool = True,
-) -> List[np.ndarray]:
+) -> list[np.ndarray]:
     """Get image embeddings from ONNX vision encoder.
 
     Unified function that handles both tiled and conv2d formats.
@@ -350,7 +349,7 @@ def get_image_embeddings(
 
 def build_inputs_embeds(
     text_embeds: np.ndarray,
-    image_embeds_list: List[np.ndarray],
+    image_embeds_list: list[np.ndarray],
     image_token_id: int,
     input_ids: np.ndarray,
 ) -> np.ndarray:

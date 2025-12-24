@@ -11,12 +11,11 @@ The builder creates an optimized ONNX graph with fused operators:
 """
 
 import logging
-from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 
 import numpy as np
 import onnx
-from onnx import helper, numpy_helper, TensorProto
+from onnx import TensorProto, helper, numpy_helper
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +28,7 @@ class LFM2Config:
     num_attention_heads: int
     num_key_value_heads: int
     vocab_size: int
-    layer_types: List[str]
+    layer_types: list[str]
     conv_L_cache: int = 3
     max_position_embeddings: int = 128000
     norm_eps: float = 1e-5
@@ -70,13 +69,13 @@ class LFM2Builder:
         self.attn_indices = [i for i, t in enumerate(config.layer_types) if t == "full_attention"]
 
         # Graph components
-        self.nodes: List[onnx.NodeProto] = []
-        self.inputs: List[onnx.ValueInfoProto] = []
-        self.outputs: List[onnx.ValueInfoProto] = []
-        self.initializers: List[onnx.TensorProto] = []
+        self.nodes: list[onnx.NodeProto] = []
+        self.inputs: list[onnx.ValueInfoProto] = []
+        self.outputs: list[onnx.ValueInfoProto] = []
+        self.initializers: list[onnx.TensorProto] = []
 
         # Weights storage
-        self.weights: Dict[str, np.ndarray] = {}
+        self.weights: dict[str, np.ndarray] = {}
 
         # Node counter for unique names
         self._node_count = 0
@@ -97,7 +96,7 @@ class LFM2Builder:
             tensor = tensor.astype(dtype)
         self.initializers.append(numpy_helper.from_array(tensor, name))
 
-    def make_node(self, op_type: str, inputs: List[str], outputs: List[str],
+    def make_node(self, op_type: str, inputs: list[str], outputs: list[str],
                   name: str = None, domain: str = "", **attrs) -> str:
         """Create an ONNX node and return the first output name."""
         if name is None:
@@ -480,8 +479,8 @@ class LFM2Builder:
 
     def load_weights(self, model_path: str):
         """Load weights from HuggingFace model."""
-        from transformers import AutoModelForCausalLM
         import torch
+        from transformers import AutoModelForCausalLM
 
         logger.info(f"Loading weights from {model_path}...")
         model = AutoModelForCausalLM.from_pretrained(
@@ -551,6 +550,7 @@ class LFM2Builder:
 def export_model(model_path: str, output_dir: str):
     """Export LFM2 model to ONNX."""
     import os
+
     from transformers import AutoConfig, AutoTokenizer
 
     # Load config
@@ -598,7 +598,7 @@ def export_model(model_path: str, output_dir: str):
 
     # Add transformers.js_config to config.json (for external data support)
     config_path = os.path.join(output_dir, "config.json")
-    with open(config_path, "r") as f:
+    with open(config_path) as f:
         cfg = json.load(f)
     cfg["transformers.js_config"] = {
         "kv_cache_dtype": {"fp32": "float32"},
@@ -619,7 +619,7 @@ def export_model(model_path: str, output_dir: str):
 
         # Ensure it's also in tokenizer_config.json
         if os.path.exists(tokenizer_config_path):
-            with open(tokenizer_config_path, "r") as f:
+            with open(tokenizer_config_path) as f:
                 tok_cfg = json.load(f)
             if "chat_template" not in tok_cfg:
                 tok_cfg["chat_template"] = tokenizer.chat_template

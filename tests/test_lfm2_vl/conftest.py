@@ -5,13 +5,27 @@ import logging
 import pathlib
 
 import pytest
+import torch
+from transformers import AutoModelForImageTextToText, AutoProcessor
 
 from liquidonnx.lfm2_vl import MODELS
-from test_lfm2_vl.helpers import load_pytorch_model
 
 logger = logging.getLogger(__name__)
 
 ASSETS_DIR = pathlib.Path(__file__).parent / "assets"
+
+
+def load_pytorch_model(model_path: str) -> tuple:
+    """Load PyTorch model and processor from HuggingFace."""
+    logger.info(f"Loading PyTorch model from {model_path}...")
+    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    model = AutoModelForImageTextToText.from_pretrained(
+        model_path,
+        torch_dtype=torch.float32,
+        trust_remote_code=True,
+    )
+    model.eval()
+    return model, processor
 
 
 @pytest.fixture(scope="module")

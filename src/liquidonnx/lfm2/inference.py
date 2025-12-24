@@ -9,7 +9,6 @@ Usage:
 """
 
 import argparse
-import os
 from pathlib import Path
 
 import numpy as np
@@ -103,7 +102,6 @@ class TextModelInference:
         output_names = [out.name for out in self.session.get_outputs()]
 
         seq_len = input_ids.shape[1]
-        attention_mask = np.ones((1, seq_len), dtype=np.int64)
         position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
 
         generated_tokens = []

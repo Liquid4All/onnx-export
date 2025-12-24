@@ -7,9 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 import onnxruntime as ort
 import pytest
-import torch
 from PIL import Image
-from transformers import AutoModelForImageTextToText, AutoProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +19,27 @@ RTOL_QUANT = 0.5
 
 def bits_to_str(bits: int | None) -> str:
     return f"q{bits}" if bits else "fp32"
+
+
+def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Compute cosine similarity between two arrays."""
+    a_flat, b_flat = a.flatten(), b.flatten()
+    dot = np.dot(a_flat, b_flat)
+    norm_a, norm_b = np.linalg.norm(a_flat), np.linalg.norm(b_flat)
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return float(dot / (norm_a * norm_b))
+
+
+def get_image_token_id(tokenizer) -> int:
+    """Get the image token ID from tokenizer."""
+    for token_name in ["<image>", "<|image|>", "[IMG]"]:
+        token_id = tokenizer.convert_tokens_to_ids(token_name)
+        if token_id != tokenizer.unk_token_id:
+            return token_id
+    if hasattr(tokenizer, "image_token_id"):
+        return tokenizer.image_token_id
+    raise ValueError("Could not find image token ID")
 
 
 def pad_to_square(image: Image.Image) -> Image.Image:
@@ -65,18 +84,6 @@ def get_tolerances(bits: int | None) -> tuple[float, float]:
     if bits:
         return ATOL_QUANT, RTOL_QUANT
     return ATOL, RTOL
-
-
-def load_pytorch_model(model_path: str) -> tuple:
-    logger.info(f"Loading PyTorch model from {model_path}...")
-    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-    model = AutoModelForImageTextToText.from_pretrained(
-        model_path,
-        torch_dtype=torch.float32,
-        trust_remote_code=True,
-    )
-    model.eval()
-    return model, processor
 
 
 def load_onnx_session(onnx_dir: pathlib.Path, filename: str) -> ort.InferenceSession:

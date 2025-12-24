@@ -20,20 +20,18 @@ Usage:
 
 import argparse
 from pathlib import Path
-from typing import List, Optional
 
 import numpy as np
 import onnxruntime as ort
 from PIL import Image
 from transformers import AutoProcessor
 
-from liquidonnx.lfm2_vl import VISION_MODE_TILED, VISION_MODE_CONV2D
+from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.preprocessing import (
+    build_inputs_embeds,
     detect_vision_format,
     preprocess_conv2d,
     preprocess_tiled,
-    build_inputs_embeds,
-    VLConfig,
 )
 
 
@@ -97,7 +95,7 @@ class VLModelInference:
         print(f"Vision format: {self.vision_format}")
         print("Model loaded successfully!")
 
-    def _get_image_embeddings(self, images: List[Image.Image]) -> List[np.ndarray]:
+    def _get_image_embeddings(self, images: list[Image.Image]) -> list[np.ndarray]:
         """Get embeddings for a list of images using liquidonnx utilities."""
         embeddings = []
 
@@ -140,7 +138,7 @@ class VLModelInference:
         return outputs[0]  # [1, seq_len, hidden_dim]
 
     def _build_inputs_embeds_expanded(
-        self, input_ids: np.ndarray, image_embeds_list: List[np.ndarray]
+        self, input_ids: np.ndarray, image_embeds_list: list[np.ndarray]
     ) -> np.ndarray:
         """Build inputs_embeds for expanded token sequence using liquidonnx utility."""
         text_embeds = self._get_text_embeddings(input_ids)[0]  # [seq_len, hidden]
@@ -149,7 +147,7 @@ class VLModelInference:
         )
 
     def _build_inputs_embeds(
-        self, input_ids: np.ndarray, image_embeds_list: List[np.ndarray]
+        self, input_ids: np.ndarray, image_embeds_list: list[np.ndarray]
     ) -> np.ndarray:
         """Build inputs_embeds by replacing image tokens with image embeddings (legacy)."""
         text_embeds = self._get_text_embeddings(input_ids)[0]  # [seq_len, hidden]
@@ -211,7 +209,7 @@ class VLModelInference:
     def generate(
         self,
         messages: list,
-        images: Optional[List[Image.Image]] = None,
+        images: list[Image.Image] | None = None,
         max_new_tokens: int = 100,
         stream: bool = True,
     ) -> str:

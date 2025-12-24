@@ -19,8 +19,6 @@ Usage:
 import argparse
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -97,7 +95,7 @@ class CoherenceResult:
     model_size: str
     source: str  # "builder_q4", "builder_q8", "community_q4", "community_q8"
     quant_type: str
-    turns: List[TurnResult] = field(default_factory=list)
+    turns: list[TurnResult] = field(default_factory=list)
     avg_token_match: float = 0.0
     avg_semantic_sim: float = 0.0
     accumulated_error: float = 0.0
@@ -151,8 +149,8 @@ class MultiTurnTester:
         )
 
     def generate_pytorch(
-        self, input_ids: List[int], max_new_tokens: int, stream: bool = False
-    ) -> Tuple[List[int], np.ndarray]:
+        self, input_ids: list[int], max_new_tokens: int, stream: bool = False
+    ) -> tuple[list[int], np.ndarray]:
         """Generate tokens with PyTorch model using KV cache."""
         import torch
 
@@ -197,8 +195,8 @@ class MultiTurnTester:
         return generated, np.stack(all_logits) if all_logits else np.array([])
 
     def generate_onnx(
-        self, input_ids: List[int], max_new_tokens: int, stream: bool = False
-    ) -> Tuple[List[int], np.ndarray]:
+        self, input_ids: list[int], max_new_tokens: int, stream: bool = False
+    ) -> tuple[list[int], np.ndarray]:
         """Generate tokens with ONNX model, return tokens and final logits."""
         sess = self.onnx_session
         generated = input_ids.copy()
@@ -266,8 +264,8 @@ class MultiTurnTester:
         self,
         turn: int,
         prompt: str,
-        messages_pytorch: List[dict],
-        messages_onnx: List[dict],
+        messages_pytorch: list[dict],
+        messages_onnx: list[dict],
     ) -> TurnResult:
         """Compare a single turn between PyTorch and ONNX."""
         # Add user message
@@ -355,7 +353,7 @@ class MultiTurnTester:
         onnx_path: str,
         source: str,
         quant_type: str,
-        prompts: List[str],
+        prompts: list[str],
     ) -> CoherenceResult:
         """Run multi-turn coherence test."""
         self.load_onnx(onnx_path)
@@ -367,8 +365,8 @@ class MultiTurnTester:
         )
 
         # Start with empty message history
-        messages_pytorch: List[dict] = []
-        messages_onnx: List[dict] = []
+        messages_pytorch: list[dict] = []
+        messages_onnx: list[dict] = []
 
         accumulated_error = 0.0
 
@@ -416,13 +414,13 @@ def print_turn_results(result: CoherenceResult):
         print(f"Semantic Sim: {turn.semantic_similarity:.4f}")
         print(f"Max Logit Diff: {turn.max_logit_diff:.4f}")
 
-    print(f"\n--- Summary ---")
+    print("\n--- Summary ---")
     print(f"Avg Token Match: {result.avg_token_match*100:.1f}%")
     print(f"Avg Semantic Sim: {result.avg_semantic_sim:.4f}")
     print(f"Accumulated Error: {result.accumulated_error:.4f}")
 
 
-def print_summary_table(results: List[CoherenceResult], quant_type: str):
+def print_summary_table(results: list[CoherenceResult], quant_type: str):
     """Print summary table for a quant type."""
     quant_results = [r for r in results if r.quant_type == quant_type]
     if not quant_results:
@@ -509,7 +507,7 @@ def main():
         if "q4" in args.quant:
             if "builder" in args.sources:
                 onnx_path = BUILDER_Q4_MODELS[size]
-                print(f"\n--- Builder Q4 ---")
+                print("\n--- Builder Q4 ---")
                 try:
                     result = tester.test_coherence(
                         size, onnx_path, "builder", "q4", prompts
@@ -526,7 +524,7 @@ def main():
 
             if "community" in args.sources:
                 onnx_path = COMMUNITY_Q4_MODELS[size]
-                print(f"\n--- Community Q4 ---")
+                print("\n--- Community Q4 ---")
                 try:
                     result = tester.test_coherence(
                         size, onnx_path, "community", "q4", prompts
@@ -545,7 +543,7 @@ def main():
         if "q8" in args.quant:
             if "builder" in args.sources:
                 onnx_path = BUILDER_Q8_MODELS[size]
-                print(f"\n--- Builder Q8 ---")
+                print("\n--- Builder Q8 ---")
                 try:
                     result = tester.test_coherence(
                         size, onnx_path, "builder", "q8", prompts
@@ -562,7 +560,7 @@ def main():
 
             if "community" in args.sources:
                 onnx_path = COMMUNITY_Q8_MODELS[size]
-                print(f"\n--- Community Q8 ---")
+                print("\n--- Community Q8 ---")
                 try:
                     result = tester.test_coherence(
                         size, onnx_path, "community", "q8", prompts

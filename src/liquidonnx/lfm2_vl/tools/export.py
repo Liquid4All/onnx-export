@@ -47,7 +47,7 @@ import pathlib
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODES
 from liquidonnx.lfm2_vl.export import export_vl_model
-from liquidonnx.lfm2_vl.quantize import quantize_model, get_model_size
+from liquidonnx.lfm2_vl.quantize import get_model_size, quantize_model
 
 logger = logging.getLogger(__name__)
 

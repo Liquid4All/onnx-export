@@ -36,10 +36,10 @@ from dataclasses import dataclass
 
 import numpy as np
 import onnx
-from onnx import helper, numpy_helper, TensorProto
+from onnx import TensorProto, helper, numpy_helper
 
-from liquidonnx.lfm2 import LFM2Config, LFM2Builder
-from liquidonnx.lfm2_vl import VISION_MODE_TILED, VISION_MODE_CONV2D
+from liquidonnx.lfm2 import LFM2Builder, LFM2Config
+from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 
 logger = logging.getLogger(__name__)
 
@@ -392,7 +392,6 @@ class VisionEmbedBuilder:
         H = self.vision_config.hidden_size
         nh = self.vision_config.num_attention_heads
         hd = self.head_dim
-        I = self.vision_config.intermediate_size
 
         # Load weights
         # Layer norm 1
@@ -594,7 +593,6 @@ class VisionEmbedBuilder:
 
             # Store for use in pixel_unshuffle (now H comes first in the 4D tensor)
             spatial_h_name = pre_merge_h
-            spatial_w_name = pre_merge_w
             half_spatial_h_name = "spatial_h"  # Already the post-merge size
             half_spatial_w_name = "spatial_w"  # Already the post-merge size
         else:
@@ -616,7 +614,6 @@ class VisionEmbedBuilder:
             # For tiled mode, compute half_spatial
             self.add_initializer("proj/two_tiled", np.array(2, dtype=np.int64))
             half_spatial = self.make_node("Div", [spatial_size, "proj/two_tiled"], ["proj/half_spatial_tiled"])
-            spatial_w_name = spatial_size
             spatial_h_name = spatial_size
             half_spatial_w_name = half_spatial
             half_spatial_h_name = half_spatial
@@ -974,10 +971,11 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
         output_dir: Output directory for ONNX files
         vision_input_format: "tiled" for [B, N, 768] or "conv2d" for [B, 3, H, W]
     """
-    import os
     import json
-    from transformers import AutoConfig, AutoTokenizer, AutoProcessor, AutoModelForImageTextToText
+    import os
+
     import torch
+    from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
 
     logger.info(f"Vision input format: {vision_input_format}")
 

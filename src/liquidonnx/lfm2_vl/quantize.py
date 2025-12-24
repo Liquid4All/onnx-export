@@ -5,8 +5,8 @@ import pathlib
 
 import onnx
 from onnxruntime.quantization.matmul_nbits_quantizer import (
-    MatMulNBitsQuantizer,
     DefaultWeightOnlyQuantConfig,
+    MatMulNBitsQuantizer,
 )
 
 logger = logging.getLogger(__name__)

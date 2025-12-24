@@ -16,7 +16,6 @@ import argparse
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
 
 import numpy as np
 
@@ -97,8 +96,8 @@ class ComparisonResult:
     mean_diff: float
     top1_match: bool
     top5_overlap: int
-    pytorch_top5: List[int]
-    onnx_top5: List[int]
+    pytorch_top5: list[int]
+    onnx_top5: list[int]
     file_size_mb: float = 0.0
 
 
@@ -164,7 +163,7 @@ class ModelComparator:
         )
 
 
-def print_results(results: List[ComparisonResult], quant_type: str):
+def print_results(results: list[ComparisonResult], quant_type: str):
     """Print comparison results as a table."""
     quant_label = quant_type.upper()
 
@@ -274,7 +273,7 @@ def main():
             builder_q4_path = BUILDER_Q4_MODELS[size]
             community_q4_path = COMMUNITY_Q4_MODELS[size]
 
-            print(f"\n--- Builder Q4 vs PyTorch ---")
+            print("\n--- Builder Q4 vs PyTorch ---")
             try:
                 result = comparator.compare(size, pytorch_path, builder_q4_path, "builder", "q4", args.prompt)
                 results.append(result)
@@ -285,7 +284,7 @@ def main():
             except Exception as e:
                 print(f"  ERROR: {e}")
 
-            print(f"\n--- Community Q4 vs PyTorch ---")
+            print("\n--- Community Q4 vs PyTorch ---")
             try:
                 result = comparator.compare(size, pytorch_path, community_q4_path, "community", "q4", args.prompt)
                 results.append(result)
@@ -301,7 +300,7 @@ def main():
             builder_q8_path = BUILDER_Q8_MODELS[size]
             community_q8_path = COMMUNITY_Q8_MODELS.get(size)
 
-            print(f"\n--- Builder Q8 vs PyTorch ---")
+            print("\n--- Builder Q8 vs PyTorch ---")
             try:
                 result = comparator.compare(size, pytorch_path, builder_q8_path, "builder", "q8", args.prompt)
                 results.append(result)
@@ -313,7 +312,7 @@ def main():
                 print(f"  ERROR: {e}")
 
             if community_q8_path and Path(community_q8_path).exists():
-                print(f"\n--- Community Q8 vs PyTorch ---")
+                print("\n--- Community Q8 vs PyTorch ---")
                 try:
                     result = comparator.compare(size, pytorch_path, community_q8_path, "community", "q8", args.prompt)
                     results.append(result)

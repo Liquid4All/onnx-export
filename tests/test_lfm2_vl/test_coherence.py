@@ -16,23 +16,29 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
-
-logger = logging.getLogger(__name__)
-
-from liquidonnx.lfm2_vl import MODELS, VISION_MODES, VISION_MODE_CONV2D
-from liquidonnx.lfm2_vl.preprocessing import detect_vision_format, preprocess_conv2d, preprocess_tiled
 from test_lfm2_vl.helpers import (
-    skip_if_missing,
+    cosine_similarity,
+    get_image_token_id,
     get_onnx_file,
     get_vl_onnx_dir,
     load_onnx_session,
+    skip_if_missing,
 )
 
+from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D, VISION_MODES
+from liquidonnx.lfm2_vl.preprocessing import (
+    detect_vision_format,
+    preprocess_conv2d,
+    preprocess_tiled,
+)
+
+logger = logging.getLogger(__name__)
+
 QUANT_CONFIGS = [
-    (None, None),  # fp32/fp32 - reference
-    (4, 4),        # q4/q4 - WebGPU optimized
-    (4, 8),        # q4/q8
-    (8, 8),        # q8/q8
+    pytest.param(None, None, id="fp32"),
+    pytest.param(4, 4, id="q4"),
+    pytest.param(4, 8, id="q4d-q8v"),
+    pytest.param(8, 8, id="q8"),
 ]
 
 MAX_NEW_TOKENS = 20
@@ -50,24 +56,10 @@ MULTI_IMAGE_PROMPTS = [
     "What are the differences between these images?",
 ]
 
-
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    a_flat, b_flat = a.flatten(), b.flatten()
-    dot = np.dot(a_flat, b_flat)
-    norm_a, norm_b = np.linalg.norm(a_flat), np.linalg.norm(b_flat)
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return float(dot / (norm_a * norm_b))
-
-
-def get_image_token_id(tokenizer) -> int:
-    for token_name in ["<image>", "<|image|>", "[IMG]"]:
-        token_id = tokenizer.convert_tokens_to_ids(token_name)
-        if token_id != tokenizer.unk_token_id:
-            return token_id
-    if hasattr(tokenizer, "image_token_id"):
-        return tokenizer.image_token_id
-    raise ValueError("Could not find image token ID")
+COHERENCE_SCENARIOS = [
+    pytest.param("single", SINGLE_IMAGE_PROMPTS, id="single"),
+    pytest.param("multi", MULTI_IMAGE_PROMPTS, id="multi"),
+]
 
 
 def get_onnx_image_embeddings(embed_images_sess, images, processor):
@@ -148,7 +140,7 @@ def generate_pytorch(model, processor, messages, images, max_new_tokens):
 
     input_len = inputs['input_ids'].shape[1]
     tokens = output.sequences[0, input_len:].tolist()
-    logits = np.stack([l[0].numpy() for l in output.logits]) if output.logits else np.array([])
+    logits = np.stack([x[0].numpy() for x in output.logits]) if output.logits else np.array([])
     text = processor.tokenizer.decode(tokens, skip_special_tokens=True)
 
     return tokens, logits, text
@@ -314,45 +306,8 @@ def run_multi_turn_coherence(
 @pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
 @pytest.mark.parametrize("vision_mode", VISION_MODES)
 @pytest.mark.parametrize("decoder_bits,vision_bits", QUANT_CONFIGS)
-def test_coherence_single_image(
-    exports_dir: pathlib.Path,
-    cardinal_image: pathlib.Path,
-    pytorch_model,
-    vision_mode: str,
-    decoder_bits: int | None,
-    vision_bits: int | None,
-):
-    size, model, processor = pytorch_model
-
-    onnx_dir = get_vl_onnx_dir(exports_dir, size, vision_mode)
-    skip_if_missing(onnx_dir, "Export not found")
-
-    decoder_file = get_onnx_file(onnx_dir, "decoder", decoder_bits)
-    embed_images_file = get_onnx_file(onnx_dir, "embed_images", vision_bits)
-    skip_if_missing(decoder_file, "Decoder not found")
-    skip_if_missing(embed_images_file, "Vision encoder not found")
-    embed_tokens_sess = load_onnx_session(onnx_dir, "embed_tokens.onnx")
-    embed_images_sess = load_onnx_session(onnx_dir, embed_images_file.name)
-    decoder_sess = load_onnx_session(onnx_dir, decoder_file.name)
-
-    images = [Image.open(cardinal_image).convert("RGB")]
-
-    avg_similarity = run_multi_turn_coherence(
-        model, processor,
-        embed_tokens_sess, embed_images_sess, decoder_sess,
-        images, SINGLE_IMAGE_PROMPTS,
-    )
-
-    assert avg_similarity > SIMILARITY_THRESHOLD, (
-        f"Semantic similarity too low: {avg_similarity:.4f}"
-    )
-
-
-# pytorch_model outermost so same model runs consecutively (memory optimization)
-@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
-@pytest.mark.parametrize("vision_mode", VISION_MODES)
-@pytest.mark.parametrize("decoder_bits,vision_bits", QUANT_CONFIGS)
-def test_coherence_multi_image(
+@pytest.mark.parametrize("scenario,prompts", COHERENCE_SCENARIOS)
+def test_coherence(
     exports_dir: pathlib.Path,
     cardinal_image: pathlib.Path,
     bluejay_image: pathlib.Path,
@@ -360,6 +315,8 @@ def test_coherence_multi_image(
     vision_mode: str,
     decoder_bits: int | None,
     vision_bits: int | None,
+    scenario: str,
+    prompts: list[str],
 ):
     size, model, processor = pytorch_model
 
@@ -374,15 +331,18 @@ def test_coherence_multi_image(
     embed_images_sess = load_onnx_session(onnx_dir, embed_images_file.name)
     decoder_sess = load_onnx_session(onnx_dir, decoder_file.name)
 
-    images = [
-        Image.open(cardinal_image).convert("RGB"),
-        Image.open(bluejay_image).convert("RGB"),
-    ]
+    if scenario == "single":
+        images = [Image.open(cardinal_image).convert("RGB")]
+    else:
+        images = [
+            Image.open(cardinal_image).convert("RGB"),
+            Image.open(bluejay_image).convert("RGB"),
+        ]
 
     avg_similarity = run_multi_turn_coherence(
         model, processor,
         embed_tokens_sess, embed_images_sess, decoder_sess,
-        images, MULTI_IMAGE_PROMPTS,
+        images, prompts,
     )
 
     assert avg_similarity > SIMILARITY_THRESHOLD, (

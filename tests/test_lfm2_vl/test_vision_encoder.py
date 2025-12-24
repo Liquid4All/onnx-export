@@ -12,8 +12,6 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
-
-from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
 from test_lfm2_vl.helpers import (
     assert_results,
     bits_to_str,
@@ -26,6 +24,8 @@ from test_lfm2_vl.helpers import (
     pad_to_square,
     skip_if_missing,
 )
+
+from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
 
 logger = logging.getLogger(__name__)
 

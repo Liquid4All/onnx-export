@@ -7,4 +7,12 @@
 * Use logger instead of print
 * Use f-strings for formatting
 * Do not include obvious comments
-* obey flake8 rules
+
+# Code quality
+
+```bash
+uv run ruff check src tests        # Lint
+uv run ruff format src tests       # Format
+uv run ruff check --fix src tests  # Auto-fix
+uv run pytest tests                # Test
+```

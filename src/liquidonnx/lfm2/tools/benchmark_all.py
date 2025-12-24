@@ -15,10 +15,8 @@ Usage:
 import argparse
 import logging
 from dataclasses import dataclass
-from pathlib import Path
-from typing import List
 
-from liquidonnx.lfm2.benchmark import ONNXBenchmark, get_model_size_mb
+from liquidonnx.lfm2.benchmark import ONNXBenchmark
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +77,7 @@ class BenchmarkResult:
     total_time_s: float
 
 
-def print_results(results: List[BenchmarkResult], quant_type: str):
+def print_results(results: list[BenchmarkResult], quant_type: str):
     """Print benchmark results as a table."""
     quant_label = quant_type.upper()
 
@@ -179,7 +177,7 @@ def main():
             builder_path = BUILDER_Q4_MODELS[size]
             community_path = COMMUNITY_Q4_MODELS[size]
 
-            print(f"\n--- Builder Q4 ---")
+            print("\n--- Builder Q4 ---")
             try:
                 res = benchmark.benchmark(builder_path, args.prompt, args.max_tokens)
                 result = BenchmarkResult(
@@ -201,7 +199,7 @@ def main():
             except Exception as e:
                 print(f"  ERROR: {e}")
 
-            print(f"\n--- Community Q4 ---")
+            print("\n--- Community Q4 ---")
             try:
                 res = benchmark.benchmark(community_path, args.prompt, args.max_tokens)
                 result = BenchmarkResult(
@@ -228,7 +226,7 @@ def main():
             builder_path = BUILDER_Q8_MODELS[size]
             community_path = COMMUNITY_Q8_MODELS[size]
 
-            print(f"\n--- Builder Q8 ---")
+            print("\n--- Builder Q8 ---")
             try:
                 res = benchmark.benchmark(builder_path, args.prompt, args.max_tokens)
                 result = BenchmarkResult(
@@ -250,7 +248,7 @@ def main():
             except Exception as e:
                 print(f"  ERROR: {e}")
 
-            print(f"\n--- Community Q8 ---")
+            print("\n--- Community Q8 ---")
             try:
                 res = benchmark.benchmark(community_path, args.prompt, args.max_tokens)
                 result = BenchmarkResult(
