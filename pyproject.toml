@@ -46,6 +46,9 @@ packages = ["src/liquidonnx"]
 
 [tool.pytest.ini_options]
 addopts = "-s"
+testpaths = ["tests"]
+log_cli = true
+log_cli_level = "INFO"
 
 [tool.uv]
 # For bleeding-edge packages from git

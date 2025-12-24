@@ -1,3 +1,4 @@
+import logging
 import pathlib
 import sys
 
@@ -5,6 +6,10 @@ import pytest
 
 # Add tests directory to path for imports
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
+
+# Suppress noisy loggers
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("transformers").setLevel(logging.WARNING)
 
 
 def pytest_addoption(parser):

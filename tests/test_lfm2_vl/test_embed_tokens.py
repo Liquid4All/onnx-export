@@ -12,7 +12,6 @@ from test_lfm2_vl.helpers import (
     RTOL,
     skip_if_missing,
     get_vl_onnx_dir,
-    load_pytorch_model,
     load_onnx_session,
     compare_arrays,
 )
@@ -20,15 +19,17 @@ from test_lfm2_vl.helpers import (
 PROMPTS = ["Hello, how are you?", "The quick brown fox", "Describe this image:"]
 
 
-@pytest.mark.parametrize("prompt", PROMPTS)
+# pytorch_model outermost so same model runs consecutively (memory optimization)
+@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
 @pytest.mark.parametrize("vision_mode", VISION_MODES)
-@pytest.mark.parametrize("size", MODELS.keys())
-def test_embed_tokens(exports_dir: pathlib.Path, size: str, vision_mode: str, prompt: str):
+@pytest.mark.parametrize("prompt", PROMPTS)
+def test_embed_tokens(exports_dir: pathlib.Path, pytorch_model, vision_mode: str, prompt: str):
+    size, model, processor = pytorch_model
+
     onnx_dir = get_vl_onnx_dir(exports_dir, size, vision_mode)
     skip_if_missing(onnx_dir, "Export not found")
     skip_if_missing(onnx_dir / "onnx" / "embed_tokens.onnx", "embed_tokens not found")
 
-    model, processor = load_pytorch_model(MODELS[size])
     embed_tokens_sess = load_onnx_session(onnx_dir, "embed_tokens.onnx")
 
     input_ids = processor.tokenizer.encode(prompt, return_tensors="pt")

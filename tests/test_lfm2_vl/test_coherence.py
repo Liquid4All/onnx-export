@@ -23,7 +23,6 @@ from test_lfm2_vl.helpers import (
     skip_if_missing,
     get_onnx_file,
     get_vl_onnx_dir,
-    load_pytorch_model,
     load_onnx_session,
 )
 
@@ -297,17 +296,20 @@ def run_multi_turn_coherence(
     return float(np.mean(similarities)) if similarities else 0.0
 
 
-@pytest.mark.parametrize("decoder_bits,vision_bits", QUANT_CONFIGS)
+# pytorch_model outermost so same model runs consecutively (memory optimization)
+@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
 @pytest.mark.parametrize("vision_mode", VISION_MODES)
-@pytest.mark.parametrize("size", MODELS.keys())
+@pytest.mark.parametrize("decoder_bits,vision_bits", QUANT_CONFIGS)
 def test_coherence_single_image(
     exports_dir: pathlib.Path,
     cardinal_image: pathlib.Path,
-    size: str,
+    pytorch_model,
     vision_mode: str,
     decoder_bits: int | None,
     vision_bits: int | None,
 ):
+    size, model, processor = pytorch_model
+
     onnx_dir = get_vl_onnx_dir(exports_dir, size, vision_mode)
     skip_if_missing(onnx_dir, "Export not found")
 
@@ -315,8 +317,6 @@ def test_coherence_single_image(
     embed_images_file = get_onnx_file(onnx_dir, "embed_images", vision_bits)
     skip_if_missing(decoder_file, "Decoder not found")
     skip_if_missing(embed_images_file, "Vision encoder not found")
-
-    model, processor = load_pytorch_model(MODELS[size])
     embed_tokens_sess = load_onnx_session(onnx_dir, "embed_tokens.onnx")
     embed_images_sess = load_onnx_session(onnx_dir, embed_images_file.name)
     decoder_sess = load_onnx_session(onnx_dir, decoder_file.name)
@@ -334,18 +334,21 @@ def test_coherence_single_image(
     )
 
 
-@pytest.mark.parametrize("decoder_bits,vision_bits", QUANT_CONFIGS)
+# pytorch_model outermost so same model runs consecutively (memory optimization)
+@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
 @pytest.mark.parametrize("vision_mode", VISION_MODES)
-@pytest.mark.parametrize("size", MODELS.keys())
+@pytest.mark.parametrize("decoder_bits,vision_bits", QUANT_CONFIGS)
 def test_coherence_multi_image(
     exports_dir: pathlib.Path,
     cardinal_image: pathlib.Path,
     bluejay_image: pathlib.Path,
-    size: str,
+    pytorch_model,
     vision_mode: str,
     decoder_bits: int | None,
     vision_bits: int | None,
 ):
+    size, model, processor = pytorch_model
+
     onnx_dir = get_vl_onnx_dir(exports_dir, size, vision_mode)
     skip_if_missing(onnx_dir, "Export not found")
 
@@ -353,8 +356,6 @@ def test_coherence_multi_image(
     embed_images_file = get_onnx_file(onnx_dir, "embed_images", vision_bits)
     skip_if_missing(decoder_file, "Decoder not found")
     skip_if_missing(embed_images_file, "Vision encoder not found")
-
-    model, processor = load_pytorch_model(MODELS[size])
     embed_tokens_sess = load_onnx_session(onnx_dir, "embed_tokens.onnx")
     embed_images_sess = load_onnx_session(onnx_dir, embed_images_file.name)
     decoder_sess = load_onnx_session(onnx_dir, decoder_file.name)

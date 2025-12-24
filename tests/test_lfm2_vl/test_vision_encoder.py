@@ -15,7 +15,6 @@ from test_lfm2_vl.helpers import (
     get_onnx_file,
     get_vl_onnx_dir,
     get_tolerances,
-    load_pytorch_model,
     load_onnx_session,
     compare_arrays,
 )
@@ -90,23 +89,25 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, atol, rto
     return results
 
 
-@pytest.mark.parametrize("vision_bits", VISION_BITS)
+# pytorch_model outermost so same model runs consecutively (memory optimization)
+@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
 @pytest.mark.parametrize("vision_mode", VISION_MODES)
-@pytest.mark.parametrize("size", MODELS.keys())
+@pytest.mark.parametrize("vision_bits", VISION_BITS)
 def test_vision_encoder(
     exports_dir: pathlib.Path,
     cardinal_image: pathlib.Path,
-    size: str,
+    pytorch_model,
     vision_mode: str,
     vision_bits: int | None,
 ):
+    size, model, processor = pytorch_model
+
     onnx_dir = get_vl_onnx_dir(exports_dir, size, vision_mode)
     skip_if_missing(onnx_dir, "Export not found")
 
     embed_images_file = get_onnx_file(onnx_dir, "embed_images", vision_bits)
     skip_if_missing(embed_images_file, "Vision encoder not found")
 
-    model, processor = load_pytorch_model(MODELS[size])
     embed_images_sess = load_onnx_session(onnx_dir, embed_images_file.name)
     image = Image.open(cardinal_image).convert("RGB")
 
