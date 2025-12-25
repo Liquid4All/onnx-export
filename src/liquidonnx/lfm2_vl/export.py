@@ -564,7 +564,6 @@ class VisionEmbedBuilder:
 
         # First get batch size dynamically (use scalar indices)
         self.add_initializer("proj/shape_indices_batch", np.array(0, dtype=np.int64))  # scalar
-        self.add_initializer("proj/shape_indices_seq", np.array(1, dtype=np.int64))  # scalar
         batch_size = self.make_node("Gather", [self.make_node("Shape", [vision_embeddings], ["proj/input_shape"]),
                                                 "proj/shape_indices_batch"], ["proj/batch_size"], axis=0)
 
@@ -597,6 +596,7 @@ class VisionEmbedBuilder:
             half_spatial_w_name = "spatial_w"  # Already the post-merge size
         else:
             # Tiled mode: compute spatial size from sqrt(seq_len), assumes square
+            self.add_initializer("proj/shape_indices_seq", np.array(1, dtype=np.int64))  # scalar
             seq_len = self.make_node("Gather", [self.make_node("Shape", [vision_embeddings], ["proj/input_shape2"]),
                                                 "proj/shape_indices_seq"], ["proj/seq_len"], axis=0)
             seq_len_float = self.make_node("Cast", [seq_len], ["proj/seq_len_float"], to=TensorProto.FLOAT)
@@ -838,129 +838,6 @@ class EmbedTokensBuilder:
         logger.info(f"embed_tokens built: {len(self.nodes)} nodes, "
                     f"vocab_size={self.vocab_size}, hidden_size={self.hidden_size}")
         return model
-
-
-class DecoderBuilder:
-    """
-    Modified LFM2 decoder builder that takes inputs_embeds instead of input_ids.
-
-    This enables clean fusion of text and image embeddings before feeding to decoder.
-    """
-
-    def __init__(self, config: LFM2VLConfig):
-        self.config = config
-        self.text_config = config.text_config
-        self.head_dim = config.text_config.hidden_size // config.text_config.num_attention_heads
-
-        # Categorize layers
-        self.conv_indices = [i for i, t in enumerate(config.text_config.layer_types) if t == "conv"]
-        self.attn_indices = [i for i, t in enumerate(config.text_config.layer_types) if t == "full_attention"]
-
-        # Graph components
-        self.nodes: list[onnx.NodeProto] = []
-        self.inputs: list[onnx.ValueInfoProto] = []
-        self.outputs: list[onnx.ValueInfoProto] = []
-        self.initializers: list[onnx.TensorProto] = []
-
-        # Weights storage
-        self.weights: dict[str, np.ndarray] = {}
-
-        # Node counter
-        self._node_count = 0
-
-    def _unique_name(self, prefix: str) -> str:
-        self._node_count += 1
-        return f"{prefix}_{self._node_count}"
-
-    def add_initializer(self, name: str, tensor: np.ndarray, dtype=None):
-        """Add weight tensor as graph initializer."""
-        if dtype is None:
-            if tensor.dtype in [np.int32, np.int64]:
-                pass
-            else:
-                tensor = tensor.astype(np.float32)
-        else:
-            tensor = tensor.astype(dtype)
-        self.initializers.append(numpy_helper.from_array(tensor, name))
-
-    def make_node(self, op_type: str, inputs: list[str], outputs: list[str],
-                  name: str = None, domain: str = "", **attrs) -> str:
-        """Create an ONNX node and return the first output name."""
-        if name is None:
-            name = self._unique_name(op_type)
-        node = helper.make_node(op_type, inputs, outputs, name=name, domain=domain, **attrs)
-        self.nodes.append(node)
-        return outputs[0] if outputs else None
-
-    def build_inputs(self):
-        """Create model inputs - takes inputs_embeds instead of input_ids."""
-        H = self.text_config.hidden_size
-
-        # inputs_embeds: pre-computed embeddings (text + image fused)
-        self.inputs.append(helper.make_tensor_value_info(
-            "inputs_embeds", TensorProto.FLOAT,
-            ["batch_size", "sequence_length", H]
-        ))
-
-        # attention_mask
-        self.inputs.append(helper.make_tensor_value_info(
-            "attention_mask", TensorProto.INT64,
-            ["batch_size", "total_sequence_length"]
-        ))
-
-        # position_ids
-        self.inputs.append(helper.make_tensor_value_info(
-            "position_ids", TensorProto.INT64,
-            ["batch_size", "sequence_length"]
-        ))
-
-        # Conv caches
-        for idx in self.conv_indices:
-            self.inputs.append(helper.make_tensor_value_info(
-                f"past_conv.{idx}", TensorProto.FLOAT,
-                ["batch_size", H, self.text_config.conv_L_cache]
-            ))
-
-        # KV caches
-        for idx in self.attn_indices:
-            self.inputs.append(helper.make_tensor_value_info(
-                f"past_key_values.{idx}.key", TensorProto.FLOAT,
-                ["batch_size", self.text_config.num_key_value_heads,
-                 "past_sequence_length", self.head_dim]
-            ))
-            self.inputs.append(helper.make_tensor_value_info(
-                f"past_key_values.{idx}.value", TensorProto.FLOAT,
-                ["batch_size", self.text_config.num_key_value_heads,
-                 "past_sequence_length", self.head_dim]
-            ))
-
-    def build_outputs(self):
-        """Create model outputs."""
-        # Logits
-        self.outputs.append(helper.make_tensor_value_info(
-            "logits", TensorProto.FLOAT,
-            ["batch_size", "sequence_length", self.text_config.vocab_size]
-        ))
-
-        # Conv cache outputs
-        for idx in self.conv_indices:
-            self.outputs.append(helper.make_tensor_value_info(
-                f"present_conv.{idx}", TensorProto.FLOAT,
-                ["batch_size", self.text_config.hidden_size, self.text_config.conv_L_cache]
-            ))
-
-        # KV cache outputs
-        for idx in self.attn_indices:
-            self.outputs.append(helper.make_tensor_value_info(
-                f"present.{idx}.key", TensorProto.FLOAT,
-                ["batch_size", self.text_config.num_key_value_heads,
-                 "total_sequence_length", self.head_dim]
-            ))
-            self.outputs.append(helper.make_tensor_value_info(
-                f"present.{idx}.value", TensorProto.FLOAT,
-                ["batch_size", self.text_config.num_key_value_heads,
-                 "total_sequence_length", self.head_dim]
-            ))
 
 
 def export_vl_model(model_path: str, output_dir: str, vision_input_format: str = VISION_MODE_TILED):

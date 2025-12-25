@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +34,8 @@ from liquidonnx.lfm2_vl.preprocessing import (
     preprocess_conv2d,
     preprocess_tiled,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class VLModelInference:
@@ -50,7 +53,7 @@ class VLModelInference:
 
     def load(self):
         """Load processor and ONNX models."""
-        print(f"Loading VL model from {self.model_path}...")
+        logger.info(f"Loading VL model from {self.model_path}...")
 
         # Find the HuggingFace model ID based on directory name
         dir_name = self.model_path.name
@@ -64,36 +67,36 @@ class VLModelInference:
             hf_model = str(self.model_path)
 
         # Load processor from HuggingFace (for image processing)
-        print(f"Loading processor from {hf_model}...")
+        logger.info(f"Loading processor from {hf_model}...")
         self.processor = AutoProcessor.from_pretrained(hf_model, trust_remote_code=True)
         self.tokenizer = self.processor.tokenizer
 
         # Get image token ID
         self.image_token_id = self.tokenizer.convert_tokens_to_ids("<image>")
-        print(f"Image token ID: {self.image_token_id}")
+        logger.debug(f"Image token ID: {self.image_token_id}")
 
         # Load ONNX models
         onnx_dir = self.model_path / "onnx"
 
-        print("Loading embed_tokens.onnx...")
+        logger.info("Loading embed_tokens.onnx...")
         self.embed_tokens_sess = ort.InferenceSession(
             str(onnx_dir / "embed_tokens.onnx"), providers=["CPUExecutionProvider"]
         )
 
-        print("Loading embed_images.onnx...")
+        logger.info("Loading embed_images.onnx...")
         self.embed_images_sess = ort.InferenceSession(
             str(onnx_dir / "embed_images.onnx"), providers=["CPUExecutionProvider"]
         )
 
-        print("Loading decoder.onnx...")
+        logger.info("Loading decoder.onnx...")
         self.decoder_sess = ort.InferenceSession(
             str(onnx_dir / "decoder.onnx"), providers=["CPUExecutionProvider"]
         )
 
         # Detect vision format from embed_images input shape
         self.vision_format = detect_vision_format(self.embed_images_sess)
-        print(f"Vision format: {self.vision_format}")
-        print("Model loaded successfully!")
+        logger.info(f"Vision format: {self.vision_format}")
+        logger.info("Model loaded successfully!")
 
     def _get_image_embeddings(self, images: list[Image.Image]) -> list[np.ndarray]:
         """Get embeddings for a list of images using liquidonnx utilities."""
