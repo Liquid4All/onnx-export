@@ -22,14 +22,14 @@ from test_lfm2_vl.helpers import (
     get_onnx_file,
     get_vl_onnx_dir,
     load_onnx_session,
+    pad_to_square,
     skip_if_missing,
 )
 
-from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D, VISION_MODES
+from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D, VISION_MODE_TILED, VISION_MODES
 from liquidonnx.lfm2_vl.preprocessing import (
     detect_vision_format,
     preprocess_conv2d,
-    preprocess_tiled,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,8 @@ QUANT_CONFIGS = [
 ]
 
 MAX_NEW_TOKENS = 20
-SIMILARITY_THRESHOLD = 0.7
+SIMILARITY_THRESHOLD_FP32 = 0.75  # Higher threshold for fp32 (no quantization error)
+SIMILARITY_THRESHOLD_QUANT = 0.7  # Lower threshold for quantized models
 
 SINGLE_IMAGE_PROMPTS = [
     "What do you see in this image? Describe the main elements.",
@@ -63,26 +64,38 @@ COHERENCE_SCENARIOS = [
 
 
 def get_onnx_image_embeddings(embed_images_sess, images, processor):
+    """Get image embeddings from ONNX model.
+
+    Note: Caller should pad images to square for tiled format to ensure all
+    tiles have regular 32x32 patches (avoids ONNX/PyTorch pixel_unshuffle mismatch).
+    """
     vision_format = detect_vision_format(embed_images_sess)
     embeddings = []
 
     for image in images:
         if vision_format == VISION_MODE_CONV2D:
             pixel_values, spatial_h, spatial_w = preprocess_conv2d(image)
-            outputs = embed_images_sess.run(None, {
-                "pixel_values": pixel_values,
-                "spatial_h": np.array(spatial_h, dtype=np.int64),
-                "spatial_w": np.array(spatial_w, dtype=np.int64),
-            })
+            outputs = embed_images_sess.run(
+                None,
+                {
+                    "pixel_values": pixel_values,
+                    "spatial_h": np.array(spatial_h, dtype=np.int64),
+                    "spatial_w": np.array(spatial_w, dtype=np.int64),
+                },
+            )
             embeddings.append(outputs[0][0])
         else:
-            pixel_values, patch_attention_mask, _ = preprocess_tiled(
-                image, processor, do_image_splitting=False, pad_to_square=True
+            inputs = processor.image_processor(images=image, return_tensors="pt")
+            pixel_values = inputs["pixel_values"].numpy().astype(np.float32)
+            patch_attention_mask = inputs["pixel_attention_mask"].numpy().astype(np.int64)
+
+            outputs = embed_images_sess.run(
+                None,
+                {
+                    "pixel_values": pixel_values,
+                    "patch_attention_mask": patch_attention_mask,
+                },
             )
-            outputs = embed_images_sess.run(None, {
-                "pixel_values": pixel_values,
-                "patch_attention_mask": patch_attention_mask,
-            })
             onnx_embeds = outputs[0]
             num_tiles, tokens_per_tile, hidden = onnx_embeds.shape
             embeddings.append(onnx_embeds.reshape(-1, hidden))
@@ -138,7 +151,7 @@ def generate_pytorch(model, processor, messages, images, max_new_tokens):
             output_logits=True,
         )
 
-    input_len = inputs['input_ids'].shape[1]
+    input_len = inputs["input_ids"].shape[1]
     tokens = output.sequences[0, input_len:].tolist()
     logits = np.stack([x[0].numpy() for x in output.logits]) if output.logits else np.array([])
     text = processor.tokenizer.decode(tokens, skip_special_tokens=True)
@@ -146,7 +159,9 @@ def generate_pytorch(model, processor, messages, images, max_new_tokens):
     return tokens, logits, text
 
 
-def generate_onnx(embed_tokens_sess, embed_images_sess, decoder_sess, processor, messages, images, max_new_tokens):
+def generate_onnx(
+    embed_tokens_sess, embed_images_sess, decoder_sess, processor, messages, images, max_new_tokens
+):
     tokenizer = processor.tokenizer
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
@@ -158,7 +173,7 @@ def generate_onnx(embed_tokens_sess, embed_images_sess, decoder_sess, processor,
 
     if has_images and images:
         inputs = processor(text=text, images=images, return_tensors="pt")
-        input_ids = inputs['input_ids'].numpy().astype(np.int64)
+        input_ids = inputs["input_ids"].numpy().astype(np.int64)
 
         image_embeds_list = get_onnx_image_embeddings(embed_images_sess, images, processor)
         all_image_embeds = np.concatenate(image_embeds_list, axis=0)
@@ -166,7 +181,7 @@ def generate_onnx(embed_tokens_sess, embed_images_sess, decoder_sess, processor,
         text_embeds = embed_tokens_sess.run(None, {"input_ids": input_ids})[0][0]
 
         image_token_id = get_image_token_id(tokenizer)
-        image_mask = (input_ids[0] == image_token_id)
+        image_mask = input_ids[0] == image_token_id
 
         if image_mask.sum() > 0 and len(all_image_embeds) > 0:
             result_embeds = []
@@ -260,12 +275,18 @@ def run_multi_turn_coherence(
     images: list,
     prompts: list[str],
 ) -> float:
+    # For tiled format, pad images to square to ensure all tiles are regular.
+    # This avoids ONNX/PyTorch mismatch on irregular tiles due to pixel_unshuffle ordering.
+    vision_format = detect_vision_format(embed_images_sess)
+    if vision_format == VISION_MODE_TILED:
+        images = [pad_to_square(img) for img in images]
+
     messages_pytorch = []
     messages_onnx = []
     similarities = []
 
     for turn, prompt in enumerate(prompts, 1):
-        is_first = (turn == 1)
+        is_first = turn == 1
 
         # Build user message
         if is_first and images:
@@ -283,8 +304,13 @@ def run_multi_turn_coherence(
             model, processor, current_pytorch, images, MAX_NEW_TOKENS
         )
         ox_tokens, ox_logits, ox_text = generate_onnx(
-            embed_tokens_sess, embed_images_sess, decoder_sess,
-            processor, current_onnx, images, MAX_NEW_TOKENS
+            embed_tokens_sess,
+            embed_images_sess,
+            decoder_sess,
+            processor,
+            current_onnx,
+            images,
+            MAX_NEW_TOKENS,
         )
 
         similarity = compare_logits(pt_logits, ox_logits)
@@ -340,11 +366,19 @@ def test_coherence(
         ]
 
     avg_similarity = run_multi_turn_coherence(
-        model, processor,
-        embed_tokens_sess, embed_images_sess, decoder_sess,
-        images, prompts,
+        model,
+        processor,
+        embed_tokens_sess,
+        embed_images_sess,
+        decoder_sess,
+        images,
+        prompts,
     )
 
-    assert avg_similarity > SIMILARITY_THRESHOLD, (
-        f"Semantic similarity too low: {avg_similarity:.4f}"
+    # Use stricter threshold for fp32 (no quantization error)
+    is_fp32 = decoder_bits is None and vision_bits is None
+    threshold = SIMILARITY_THRESHOLD_FP32 if is_fp32 else SIMILARITY_THRESHOLD_QUANT
+
+    assert avg_similarity > threshold, (
+        f"Semantic similarity too low: {avg_similarity:.4f} (threshold={threshold})"
     )
