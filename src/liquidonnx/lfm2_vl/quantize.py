@@ -28,9 +28,13 @@ def quantize_model(
     output_path: pathlib.Path,
     bits: int = 4,
     block_size: int = 32,
-    exclude_lm_head: bool = False,
+    exclude_lm_head: bool = True,
 ) -> pathlib.Path:
-    """Quantize a single ONNX model to INT4 or INT8."""
+    """Quantize a single ONNX model to INT4 or INT8.
+
+    By default, lm_head is kept in FP32 (matches community approach).
+    Use exclude_lm_head=False to quantize it as well.
+    """
     logger.info(f"Loading {model_path}...")
     model = onnx.load(str(model_path))
 

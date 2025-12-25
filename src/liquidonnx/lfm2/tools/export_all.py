@@ -95,9 +95,9 @@ def do_quantize(size: str, output_base: Path, bits: int) -> bool:
 
     try:
         if bits == 4:
-            quantize_int4(input_model, output_model, quantize_lm_head=False)
+            quantize_int4(input_model, output_model, exclude_lm_head=True)
         else:
-            quantize_int8(input_model, output_model, quantize_lm_head=False)
+            quantize_int8(input_model, output_model, exclude_lm_head=True)
         return True
     except Exception as e:
         logger.error(f"Quantization failed for {size}: {e}")

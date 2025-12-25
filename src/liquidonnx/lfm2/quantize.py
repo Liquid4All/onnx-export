@@ -15,7 +15,7 @@ Usage:
     uv run quantize.py --input LFM2-1.2B-ONNX-builder --output my-output
 
     # Quantize lm_head as well (by default lm_head is kept in FP32)
-    uv run quantize.py --input LFM2-1.2B-ONNX-builder --quantize-lm-head
+    uv run quantize.py --input LFM2-1.2B-ONNX-builder --no-exclude-lm-head
     # -> LFM2-1.2B-ONNX-builder-Q4
 """
 
@@ -47,12 +47,12 @@ def quantize_int4(
     model_path: pathlib.Path,
     output_path: pathlib.Path,
     block_size: int = 32,
-    quantize_lm_head: bool = False,
+    exclude_lm_head: bool = True,
 ):
     """Quantize model to INT4 using MatMulNBits.
 
     By default, lm_head is kept in FP32 (matches community approach).
-    Use quantize_lm_head=True to quantize it as well.
+    Use exclude_lm_head=False to quantize it as well.
     """
     logger.info(f"Loading {model_path}...")
     model = onnx.load(str(model_path))
@@ -64,7 +64,7 @@ def quantize_int4(
 
     # Find nodes to exclude (by default exclude lm_head)
     nodes_to_exclude = None
-    if not quantize_lm_head:
+    if exclude_lm_head:
         lm_head_node = find_lm_head_node(model)
         if lm_head_node:
             nodes_to_exclude = [lm_head_node]
@@ -113,12 +113,12 @@ def quantize_int8(
     model_path: pathlib.Path,
     output_path: pathlib.Path,
     block_size: int = 32,
-    quantize_lm_head: bool = False,
+    exclude_lm_head: bool = True,
 ):
     """Quantize model to INT8 using MatMulNBits (same approach as INT4).
 
     By default, lm_head is kept in FP32 (matches INT4 approach).
-    Use quantize_lm_head=True to quantize it as well.
+    Use exclude_lm_head=False to quantize it as well.
     """
     logger.info(f"Loading {model_path}...")
     model = onnx.load(str(model_path))
@@ -130,7 +130,7 @@ def quantize_int8(
 
     # Find nodes to exclude (by default exclude lm_head)
     nodes_to_exclude = None
-    if not quantize_lm_head:
+    if exclude_lm_head:
         lm_head_node = find_lm_head_node(model)
         if lm_head_node:
             nodes_to_exclude = [lm_head_node]
@@ -200,11 +200,12 @@ def main():
     parser.add_argument("--bits", type=int, choices=[4, 8], default=4, help="Quantization bits")
     parser.add_argument("--block-size", type=int, default=32, help="Block size for INT4")
     parser.add_argument(
-        "--quantize-lm-head",
+        "--no-exclude-lm-head",
         action="store_true",
         help="Quantize lm_head layer (by default kept in FP32)",
     )
     args = parser.parse_args()
+    args.exclude_lm_head = not args.no_exclude_lm_head
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
@@ -230,9 +231,9 @@ def main():
 
     # Quantize
     if args.bits == 4:
-        quantize_int4(input_model, output_model, args.block_size, args.quantize_lm_head)
+        quantize_int4(input_model, output_model, args.block_size, args.exclude_lm_head)
     else:
-        quantize_int8(input_model, output_model, args.block_size, args.quantize_lm_head)
+        quantize_int8(input_model, output_model, args.block_size, args.exclude_lm_head)
 
     # Get quantized size
     quant_model_mb, quant_data_gb = get_model_size(output_model)
