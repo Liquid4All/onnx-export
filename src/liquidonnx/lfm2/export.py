@@ -795,32 +795,3 @@ def export_model(model_path: str, output_dir: str):
     logger.info(f"Model size: {size_mb:.2f} MB + {data_size_gb:.2f} GB data")
 
     return output_path
-
-
-def main():
-    """Entry point for lfm2-export command."""
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Export LFM2 to ONNX")
-    parser.add_argument("--model", type=str, required=True, help="Model path")
-    parser.add_argument("--output", type=str, required=True, help="Output directory")
-    parser.add_argument("--verify", action="store_true", help="Verify against PyTorch after export")
-    parser.add_argument("--community", type=str, help="Community ONNX path for comparison")
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
-    export_model(args.model, args.output)
-
-    if args.verify:
-        from verify import NumericalVerifier
-
-        verifier = NumericalVerifier(args.model)
-        verifier.verify_against_pytorch(args.output)
-        if args.community:
-            verifier.verify_against_community(args.output, args.community)
-        verifier.test_generation(args.output)
-        verifier.print_report()
-
-
-if __name__ == "__main__":
-    main()

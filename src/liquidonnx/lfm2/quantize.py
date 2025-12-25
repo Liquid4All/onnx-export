@@ -1,25 +1,13 @@
-#!/usr/bin/env python3
 """
 INT4/INT8 Quantization for LFM2 ONNX models.
 
-Usage:
-    # Quantize a single model (auto-generates output name)
-    uv run quantize.py --input LFM2-1.2B-ONNX-builder
-    # -> LFM2-1.2B-ONNX-builder-Q4-fp32head
+Provides quantize_int4() and quantize_int8() functions for converting
+FP32 ONNX models to INT4/INT8 using MatMulNBits quantization.
 
-    # INT8 quantization
-    uv run quantize.py --input LFM2-1.2B-ONNX-builder --bits 8
-    # -> LFM2-1.2B-ONNX-builder-Q8-fp32head
-
-    # Custom output path
-    uv run quantize.py --input LFM2-1.2B-ONNX-builder --output my-output
-
-    # Quantize lm_head as well (by default lm_head is kept in FP32)
-    uv run quantize.py --input LFM2-1.2B-ONNX-builder --no-exclude-lm-head
-    # -> LFM2-1.2B-ONNX-builder-Q4
+By default, lm_head is kept in FP32 (matches community approach).
+Use exclude_lm_head=False to quantize it as well.
 """
 
-import argparse
 import logging
 import pathlib
 
@@ -187,67 +175,3 @@ def get_model_size(path: pathlib.Path) -> tuple[float, float]:
     data_path = path.with_suffix(".onnx_data")
     data_size = data_path.stat().st_size / 1e9 if data_path.exists() else 0
     return model_size, data_size
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Quantize LFM2 ONNX models")
-    parser.add_argument(
-        "--input", type=pathlib.Path, required=True, help="Input ONNX model directory"
-    )
-    parser.add_argument(
-        "--output", type=pathlib.Path, help="Output directory (auto-generated if not specified)"
-    )
-    parser.add_argument("--bits", type=int, choices=[4, 8], default=4, help="Quantization bits")
-    parser.add_argument("--block-size", type=int, default=32, help="Block size for INT4")
-    parser.add_argument(
-        "--no-exclude-lm-head",
-        action="store_true",
-        help="Quantize lm_head layer (by default kept in FP32)",
-    )
-    args = parser.parse_args()
-    args.exclude_lm_head = not args.no_exclude_lm_head
-
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
-
-    # Find decoder_fp32.onnx (or fallback to model.onnx for backwards compatibility)
-    onnx_dir = args.input / "onnx"
-    input_model = onnx_dir / "decoder_fp32.onnx"
-    if not input_model.exists():
-        input_model = onnx_dir / "model.onnx"
-    if not input_model.exists():
-        input_model = args.input / "decoder_fp32.onnx"
-    if not input_model.exists():
-        input_model = args.input / "model.onnx"
-    if not input_model.exists():
-        raise FileNotFoundError(f"No decoder_fp32.onnx or model.onnx found in {args.input}")
-
-    # Quantize in the same directory (Transformers.js style: multiple dtype files in one repo)
-    output_onnx_dir = input_model.parent
-    output_model = output_onnx_dir / f"decoder_q{args.bits}.onnx"
-
-    # Get original size
-    orig_model_mb, orig_data_gb = get_model_size(input_model)
-    logger.info(f"Original: {orig_model_mb:.1f} MB + {orig_data_gb:.2f} GB data")
-
-    # Quantize
-    if args.bits == 4:
-        quantize_int4(input_model, output_model, args.block_size, args.exclude_lm_head)
-    else:
-        quantize_int8(input_model, output_model, args.block_size, args.exclude_lm_head)
-
-    # Get quantized size
-    quant_model_mb, quant_data_gb = get_model_size(output_model)
-    logger.info(f"Quantized: {quant_model_mb:.1f} MB + {quant_data_gb:.2f} GB data")
-
-    # Compression ratio
-    orig_total = orig_model_mb / 1000 + orig_data_gb
-    quant_total = quant_model_mb / 1000 + quant_data_gb
-    if orig_total > 0:
-        ratio = orig_total / quant_total
-        logger.info(f"Compression: {ratio:.1f}x")
-
-    logger.info(f"Output: {output_model}")
-
-
-if __name__ == "__main__":
-    main()
