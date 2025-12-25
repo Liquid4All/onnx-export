@@ -43,8 +43,12 @@ def find_lm_head_node(model) -> str | None:
     return None
 
 
-def quantize_int4(model_path: pathlib.Path, output_path: pathlib.Path, block_size: int = 32,
-                  quantize_lm_head: bool = False):
+def quantize_int4(
+    model_path: pathlib.Path,
+    output_path: pathlib.Path,
+    block_size: int = 32,
+    quantize_lm_head: bool = False,
+):
     """Quantize model to INT4 using MatMulNBits.
 
     By default, lm_head is kept in FP32 (matches community approach).
@@ -105,8 +109,12 @@ def quantize_int4(model_path: pathlib.Path, output_path: pathlib.Path, block_siz
     return output_path
 
 
-def quantize_int8(model_path: pathlib.Path, output_path: pathlib.Path, block_size: int = 32,
-                  quantize_lm_head: bool = False):
+def quantize_int8(
+    model_path: pathlib.Path,
+    output_path: pathlib.Path,
+    block_size: int = 32,
+    quantize_lm_head: bool = False,
+):
     """Quantize model to INT8 using MatMulNBits (same approach as INT4).
 
     By default, lm_head is kept in FP32 (matches INT4 approach).
@@ -183,12 +191,19 @@ def get_model_size(path: pathlib.Path) -> tuple[float, float]:
 
 def main():
     parser = argparse.ArgumentParser(description="Quantize LFM2 ONNX models")
-    parser.add_argument("--input", type=pathlib.Path, required=True, help="Input ONNX model directory")
-    parser.add_argument("--output", type=pathlib.Path, help="Output directory (auto-generated if not specified)")
+    parser.add_argument(
+        "--input", type=pathlib.Path, required=True, help="Input ONNX model directory"
+    )
+    parser.add_argument(
+        "--output", type=pathlib.Path, help="Output directory (auto-generated if not specified)"
+    )
     parser.add_argument("--bits", type=int, choices=[4, 8], default=4, help="Quantization bits")
     parser.add_argument("--block-size", type=int, default=32, help="Block size for INT4")
-    parser.add_argument("--quantize-lm-head", action="store_true",
-                        help="Quantize lm_head layer (by default kept in FP32)")
+    parser.add_argument(
+        "--quantize-lm-head",
+        action="store_true",
+        help="Quantize lm_head layer (by default kept in FP32)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")

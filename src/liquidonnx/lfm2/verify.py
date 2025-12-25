@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class VerificationResult:
     """Result of a single verification check."""
+
     name: str
     passed: bool
     max_diff: float
@@ -124,16 +125,18 @@ class NumericalVerifier:
         outputs = sess.run(None, feed)
         return outputs[0]  # logits
 
-    def compare_arrays(self, name: str, expected: np.ndarray, actual: np.ndarray) -> VerificationResult:
+    def compare_arrays(
+        self, name: str, expected: np.ndarray, actual: np.ndarray
+    ) -> VerificationResult:
         """Compare two arrays and return verification result."""
         if expected.shape != actual.shape:
             return VerificationResult(
                 name=name,
                 passed=False,
-                max_diff=float('inf'),
-                mean_diff=float('inf'),
+                max_diff=float("inf"),
+                mean_diff=float("inf"),
                 correlation=0.0,
-                details=f"Shape mismatch: {expected.shape} vs {actual.shape}"
+                details=f"Shape mismatch: {expected.shape} vs {actual.shape}",
             )
 
         diff = np.abs(expected - actual)
@@ -156,7 +159,9 @@ class NumericalVerifier:
             correlation=correlation,
         )
 
-    def compare_top_k(self, name: str, expected: np.ndarray, actual: np.ndarray, k: int = 5) -> VerificationResult:
+    def compare_top_k(
+        self, name: str, expected: np.ndarray, actual: np.ndarray, k: int = 5
+    ) -> VerificationResult:
         """Compare top-k predictions."""
         # Get last token logits
         exp_logits = expected[0, -1]
@@ -175,10 +180,12 @@ class NumericalVerifier:
             mean_diff=1.0 - (top_k_overlap / k),
             correlation=top_k_overlap / k,
             details=f"Top-1 match: {top1_match}, Top-{k} overlap: {top_k_overlap}/{k}, "
-                    f"Expected: {exp_top_k.tolist()}, Actual: {act_top_k.tolist()}"
+            f"Expected: {exp_top_k.tolist()}, Actual: {act_top_k.tolist()}",
         )
 
-    def verify_against_pytorch(self, onnx_path: str, prompts: list[str] = None) -> list[VerificationResult]:
+    def verify_against_pytorch(
+        self, onnx_path: str, prompts: list[str] = None
+    ) -> list[VerificationResult]:
         """Verify ONNX model against PyTorch."""
         if prompts is None:
             prompts = [
@@ -204,14 +211,17 @@ class NumericalVerifier:
             results.append(result)
 
             # Compare top-k
-            top_k_result = self.compare_top_k(f"top-5: '{prompt[:20]}...'", pytorch_logits, onnx_logits)
+            top_k_result = self.compare_top_k(
+                f"top-5: '{prompt[:20]}...'", pytorch_logits, onnx_logits
+            )
             results.append(top_k_result)
 
         self.results.extend(results)
         return results
 
-    def verify_against_community(self, onnx_path: str, community_path: str,
-                                  prompts: list[str] = None) -> list[VerificationResult]:
+    def verify_against_community(
+        self, onnx_path: str, community_path: str, prompts: list[str] = None
+    ) -> list[VerificationResult]:
         """Verify ONNX model against community version."""
         if prompts is None:
             prompts = ["Hello, how are"]
@@ -230,18 +240,22 @@ class NumericalVerifier:
             community_logits = self.run_onnx(community_sess, inputs)
 
             # Compare
-            result = self.compare_arrays(f"vs community: '{prompt[:20]}...'", community_logits, our_logits)
+            result = self.compare_arrays(
+                f"vs community: '{prompt[:20]}...'", community_logits, our_logits
+            )
             results.append(result)
 
-            top_k_result = self.compare_top_k(f"top-5 vs community: '{prompt[:20]}...'",
-                                               community_logits, our_logits)
+            top_k_result = self.compare_top_k(
+                f"top-5 vs community: '{prompt[:20]}...'", community_logits, our_logits
+            )
             results.append(top_k_result)
 
         self.results.extend(results)
         return results
 
-    def test_generation(self, onnx_path: str, prompt: str = "Hello, how are",
-                        max_tokens: int = 10) -> VerificationResult:
+    def test_generation(
+        self, onnx_path: str, prompt: str = "Hello, how are", max_tokens: int = 10
+    ) -> VerificationResult:
         """Test multi-step generation with cache updates."""
         self.load_pytorch_model()
         onnx_sess = self.load_onnx_model(onnx_path)
@@ -260,7 +274,7 @@ class NumericalVerifier:
             max_diff=0.0 if match else 1.0,
             mean_diff=0.0 if match else 1.0,
             correlation=1.0 if match else 0.0,
-            details=f"PyTorch: '{text_pytorch}'\nONNX: '{text_onnx}'"
+            details=f"PyTorch: '{text_pytorch}'\nONNX: '{text_onnx}'",
         )
         self.results.append(result)
         return result

@@ -69,9 +69,12 @@ def test_decoder(
         pytorch_logits = model.lm_head(lm_outputs.last_hidden_state).numpy()
     logger.info(f"  PyTorch logits: shape={pytorch_logits.shape}")
 
-    onnx_embeds = embed_tokens_sess.run(None, {
-        "input_ids": input_ids.numpy().astype(np.int64),
-    })[0]
+    onnx_embeds = embed_tokens_sess.run(
+        None,
+        {
+            "input_ids": input_ids.numpy().astype(np.int64),
+        },
+    )[0]
 
     onnx_inputs = {
         "inputs_embeds": onnx_embeds.astype(np.float32),
@@ -90,14 +93,10 @@ def test_decoder(
     results = []
     if "arrays" in checks:
         atol, rtol = get_tolerances(decoder_bits)
-        results.append(compare_arrays(
-            f"decoder: '{prompt[:20]}...'",
-            pytorch_logits, onnx_logits, atol, rtol
-        ))
+        results.append(
+            compare_arrays(f"decoder: '{prompt[:20]}...'", pytorch_logits, onnx_logits, atol, rtol)
+        )
     if "top_k" in checks:
-        results.append(compare_top_k(
-            f"top-5: '{prompt[:20]}...'",
-            pytorch_logits, onnx_logits
-        ))
+        results.append(compare_top_k(f"top-5: '{prompt[:20]}...'", pytorch_logits, onnx_logits))
 
     assert_results(results, logger)

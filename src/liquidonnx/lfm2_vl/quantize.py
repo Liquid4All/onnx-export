@@ -23,8 +23,13 @@ def find_lm_head_node(model) -> str | None:
     return None
 
 
-def quantize_model(model_path: pathlib.Path, output_path: pathlib.Path, bits: int = 4,
-                   block_size: int = 32, exclude_lm_head: bool = False) -> pathlib.Path:
+def quantize_model(
+    model_path: pathlib.Path,
+    output_path: pathlib.Path,
+    bits: int = 4,
+    block_size: int = 32,
+    exclude_lm_head: bool = False,
+) -> pathlib.Path:
     """Quantize a single ONNX model to INT4 or INT8."""
     logger.info(f"Loading {model_path}...")
     model = onnx.load(str(model_path))

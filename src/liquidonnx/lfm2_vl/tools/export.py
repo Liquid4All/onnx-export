@@ -63,13 +63,16 @@ def do_export(model_path: str, output_path: pathlib.Path, fmt: str):
     export_vl_model(model_path, str(output_path), vision_input_format=fmt)
 
 
-def do_quantize(onnx_dir: pathlib.Path, decoder_bits: int, vision_bits: int = 8,
-                block_size: int = 32):
+def do_quantize(
+    onnx_dir: pathlib.Path, decoder_bits: int, vision_bits: int = 8, block_size: int = 32
+):
     """Quantize a VL model."""
     if not onnx_dir.exists():
         raise FileNotFoundError(f"ONNX directory not found: {onnx_dir}")
 
-    logger.info(f"Quantizing {onnx_dir.parent.name} -> decoder=q{decoder_bits}, vision=q{vision_bits}...")
+    logger.info(
+        f"Quantizing {onnx_dir.parent.name} -> decoder=q{decoder_bits}, vision=q{vision_bits}..."
+    )
 
     # Quantize embed_images
     embed_fp32 = onnx_dir / "embed_images_fp32.onnx"
@@ -79,11 +82,14 @@ def do_quantize(onnx_dir: pathlib.Path, decoder_bits: int, vision_bits: int = 8,
     embed_output = onnx_dir / f"embed_images_q{vision_bits}.onnx"
     if embed_fp32.exists() and not embed_output.exists():
         _, embed_orig_mb = get_model_size(embed_fp32)
-        quantize_model(embed_fp32, embed_output, bits=vision_bits,
-                       block_size=block_size, exclude_lm_head=False)
+        quantize_model(
+            embed_fp32, embed_output, bits=vision_bits, block_size=block_size, exclude_lm_head=False
+        )
         _, embed_quant_mb = get_model_size(embed_output)
-        logger.info(f"  embed_images: {embed_orig_mb:.1f} -> {embed_quant_mb:.1f} MB "
-                    f"({embed_orig_mb/embed_quant_mb:.1f}x)")
+        logger.info(
+            f"  embed_images: {embed_orig_mb:.1f} -> {embed_quant_mb:.1f} MB "
+            f"({embed_orig_mb / embed_quant_mb:.1f}x)"
+        )
 
     # Quantize decoder
     decoder_fp32 = onnx_dir / "decoder_fp32.onnx"
@@ -93,18 +99,25 @@ def do_quantize(onnx_dir: pathlib.Path, decoder_bits: int, vision_bits: int = 8,
     decoder_output = onnx_dir / f"decoder_q{decoder_bits}.onnx"
     if decoder_fp32.exists() and not decoder_output.exists():
         _, decoder_orig_mb = get_model_size(decoder_fp32)
-        quantize_model(decoder_fp32, decoder_output, bits=decoder_bits,
-                       block_size=block_size, exclude_lm_head=True)
+        quantize_model(
+            decoder_fp32,
+            decoder_output,
+            bits=decoder_bits,
+            block_size=block_size,
+            exclude_lm_head=True,
+        )
         _, decoder_quant_mb = get_model_size(decoder_output)
-        logger.info(f"  decoder: {decoder_orig_mb:.1f} -> {decoder_quant_mb:.1f} MB "
-                    f"({decoder_orig_mb/decoder_quant_mb:.1f}x)")
+        logger.info(
+            f"  decoder: {decoder_orig_mb:.1f} -> {decoder_quant_mb:.1f} MB "
+            f"({decoder_orig_mb / decoder_quant_mb:.1f}x)"
+        )
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Export LFM2-VL models to ONNX",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__
+        epilog=__doc__,
     )
 
     # Model selection

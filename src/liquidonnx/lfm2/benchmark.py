@@ -40,6 +40,7 @@ def get_model_size_mb(onnx_path: str) -> float:
 @dataclass
 class BenchmarkResult:
     """Result of benchmarking a model."""
+
     name: str
     file_size_mb: float
     load_time_s: float
@@ -62,9 +63,7 @@ class ONNXBenchmark:
         from transformers import AutoTokenizer
 
         logger.info(f"Loading tokenizer: {self.model_path}")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_path, trust_remote_code=True
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
 
     def load_onnx_model(self, onnx_path: str):
         """Load ONNX model and return session + load time."""
@@ -195,9 +194,7 @@ class ONNXBenchmark:
         input_ids = self.tokenizer.encode(prompt)
 
         # Run generation
-        generated, prefill_time, gen_time = self.run_generation(
-            sess, input_ids, max_tokens
-        )
+        generated, prefill_time, gen_time = self.run_generation(sess, input_ids, max_tokens)
 
         # Calculate metrics
         new_tokens = len(generated) - len(input_ids)
@@ -225,14 +222,18 @@ def print_result(result: BenchmarkResult):
     print(f"Size: {result.file_size_mb:.1f} MB")
     print(f"Load time: {result.load_time_s:.2f}s")
     print(f"Prefill: {result.prefill_time_ms:.1f}ms")
-    print(f"Generation: {result.tokens_per_second:.1f} tok/s ({result.total_tokens} tokens in {result.total_time_s:.2f}s)")
+    print(
+        f"Generation: {result.tokens_per_second:.1f} tok/s ({result.total_tokens} tokens in {result.total_time_s:.2f}s)"
+    )
     print(f"\nGenerated: {result.generated_text}")
     print("=" * 70)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark ONNX model performance")
-    parser.add_argument("--model", type=str, required=True, help="HuggingFace model path (for tokenizer)")
+    parser.add_argument(
+        "--model", type=str, required=True, help="HuggingFace model path (for tokenizer)"
+    )
     parser.add_argument("--onnx", type=str, required=True, help="ONNX model path or directory")
     parser.add_argument("--prompt", type=str, default="Hello, how are", help="Input prompt")
     parser.add_argument("--max-tokens", type=int, default=20, help="Max tokens to generate")

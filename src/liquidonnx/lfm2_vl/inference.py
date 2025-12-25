@@ -135,9 +135,7 @@ class VLModelInference:
 
     def _get_text_embeddings(self, input_ids: np.ndarray) -> np.ndarray:
         """Get text embeddings from token IDs."""
-        outputs = self.embed_tokens_sess.run(
-            None, {"input_ids": input_ids.astype(np.int64)}
-        )
+        outputs = self.embed_tokens_sess.run(None, {"input_ids": input_ids.astype(np.int64)})
         return outputs[0]  # [1, seq_len, hidden_dim]
 
     def _build_inputs_embeds_expanded(
@@ -145,9 +143,7 @@ class VLModelInference:
     ) -> np.ndarray:
         """Build inputs_embeds for expanded token sequence using liquidonnx utility."""
         text_embeds = self._get_text_embeddings(input_ids)[0]  # [seq_len, hidden]
-        return build_inputs_embeds(
-            text_embeds, image_embeds_list, self.image_token_id, input_ids
-        )
+        return build_inputs_embeds(text_embeds, image_embeds_list, self.image_token_id, input_ids)
 
     def _initialize_cache(self) -> dict:
         """Initialize cache tensors for decoder."""
@@ -194,8 +190,7 @@ class VLModelInference:
             # plus <|image_start|> and <|image_end|> separators
             messages_with_images = []
             last_user_idx = max(
-                (i for i, msg in enumerate(messages) if msg["role"] == "user"),
-                default=-1
+                (i for i, msg in enumerate(messages) if msg["role"] == "user"), default=-1
             )
             for i, msg in enumerate(messages):
                 if msg["role"] == "user" and i == last_user_idx:
@@ -219,10 +214,10 @@ class VLModelInference:
             inputs = self.processor(
                 images=images,
                 text=prompt,
-                return_tensors='pt',  # Processor requires PyTorch
-                do_image_splitting=False  # Match our ONNX preprocessing
+                return_tensors="pt",  # Processor requires PyTorch
+                do_image_splitting=False,  # Match our ONNX preprocessing
             )
-            input_ids = inputs['input_ids'].numpy()  # Convert to numpy
+            input_ids = inputs["input_ids"].numpy()  # Convert to numpy
 
             # Get image embeddings
             image_embeds_list = self._get_image_embeddings(images)
@@ -243,9 +238,7 @@ class VLModelInference:
         cache = self._initialize_cache()
 
         # Check for position_ids input
-        has_position_ids = "position_ids" in {
-            inp.name for inp in self.decoder_sess.get_inputs()
-        }
+        has_position_ids = "position_ids" in {inp.name for inp in self.decoder_sess.get_inputs()}
 
         seq_len = inputs_embeds.shape[1]
         generated_tokens = []
@@ -303,16 +296,10 @@ def main():
         description="ONNX inference for LFM2-VL models (0-2 images per turn)"
     )
     parser.add_argument("--model", required=True, help="Path to ONNX model directory")
-    parser.add_argument(
-        "--images", nargs="*", default=[], help="Image paths (0-2 images)"
-    )
+    parser.add_argument("--images", nargs="*", default=[], help="Image paths (0-2 images)")
     parser.add_argument("--prompt", default=None, help="Initial prompt (optional)")
-    parser.add_argument(
-        "--max-tokens", type=int, default=100, help="Max tokens to generate"
-    )
-    parser.add_argument(
-        "--no-stream", action="store_true", help="Disable streaming output"
-    )
+    parser.add_argument("--max-tokens", type=int, default=100, help="Max tokens to generate")
+    parser.add_argument("--no-stream", action="store_true", help="Disable streaming output")
     args = parser.parse_args()
 
     if len(args.images) > 2:

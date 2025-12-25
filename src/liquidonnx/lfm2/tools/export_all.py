@@ -108,7 +108,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Export all LFM2 models to ONNX",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__
+        epilog=__doc__,
     )
     parser.add_argument(
         "--models",
@@ -136,10 +136,7 @@ def main():
     )
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(levelname)s - %(message)s"
-    )
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -206,7 +203,7 @@ def main():
             files = list(onnx_dir.glob("decoder_*.onnx"))
             file_names = ", ".join(f.name for f in sorted(files))
             total_size = sum(f.stat().st_size for f in out_dir.rglob("*") if f.is_file())
-            logger.info(f"  {out_dir} ({total_size/1e9:.2f} GB)")
+            logger.info(f"  {out_dir} ({total_size / 1e9:.2f} GB)")
             logger.info(f"    Files: {file_names}")
 
 

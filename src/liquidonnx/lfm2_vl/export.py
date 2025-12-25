@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SigLIP2Config:
     """Configuration for SigLIP2 vision encoder."""
+
     hidden_size: int
     intermediate_size: int
     num_hidden_layers: int
@@ -64,15 +65,16 @@ class SigLIP2Config:
             num_hidden_layers=vision_config.num_hidden_layers,
             num_attention_heads=vision_config.num_attention_heads,
             patch_size=vision_config.patch_size,
-            num_channels=getattr(vision_config, 'num_channels', 3),
-            layer_norm_eps=getattr(vision_config, 'layer_norm_eps', 1e-6),
-            hidden_act=getattr(vision_config, 'hidden_act', 'gelu_pytorch_tanh'),
+            num_channels=getattr(vision_config, "num_channels", 3),
+            layer_norm_eps=getattr(vision_config, "layer_norm_eps", 1e-6),
+            hidden_act=getattr(vision_config, "hidden_act", "gelu_pytorch_tanh"),
         )
 
 
 @dataclass
 class LFM2VLConfig:
     """Configuration for LFM2-VL model."""
+
     text_config: LFM2Config
     vision_config: SigLIP2Config
     projector_hidden_size: int
@@ -89,12 +91,12 @@ class LFM2VLConfig:
             text_config=LFM2Config.from_hf_config(config.text_config),
             vision_config=SigLIP2Config.from_hf_config(config.vision_config),
             projector_hidden_size=config.projector_hidden_size,
-            projector_hidden_act=getattr(config, 'projector_hidden_act', 'gelu'),
-            projector_bias=getattr(config, 'projector_bias', True),
-            downsample_factor=getattr(config, 'downsample_factor', 2),
-            image_token_id=getattr(config, 'image_token_id', 396),
-            tile_size=getattr(config, 'tile_size', 512),
-            max_tiles=getattr(config, 'max_tiles', 10),
+            projector_hidden_act=getattr(config, "projector_hidden_act", "gelu"),
+            projector_bias=getattr(config, "projector_bias", True),
+            downsample_factor=getattr(config, "downsample_factor", 2),
+            image_token_id=getattr(config, "image_token_id", 396),
+            tile_size=getattr(config, "tile_size", 512),
+            max_tiles=getattr(config, "max_tiles", 10),
         )
 
 
@@ -155,8 +157,15 @@ class VisionEmbedBuilder:
             tensor = tensor.astype(dtype)
         self.initializers.append(numpy_helper.from_array(tensor, name))
 
-    def make_node(self, op_type: str, inputs: list[str], outputs: list[str],
-                  name: str = None, domain: str = "", **attrs) -> str:
+    def make_node(
+        self,
+        op_type: str,
+        inputs: list[str],
+        outputs: list[str],
+        name: str = None,
+        domain: str = "",
+        **attrs,
+    ) -> str:
         """Create an ONNX node and return the first output name."""
         if name is None:
             name = self._unique_name(op_type)
@@ -165,8 +174,9 @@ class VisionEmbedBuilder:
         self.nodes.append(node)
         return outputs[0] if outputs else None
 
-    def make_layernorm(self, input_name: str, weight_name: str, bias_name: str,
-                       output_name: str) -> str:
+    def make_layernorm(
+        self, input_name: str, weight_name: str, bias_name: str, output_name: str
+    ) -> str:
         """Create LayerNormalization node."""
         return self.make_node(
             "LayerNormalization",
@@ -178,49 +188,68 @@ class VisionEmbedBuilder:
     def make_gelu(self, input_name: str, output_name: str) -> str:
         """Create GELU activation (approximate tanh version)."""
         # Use standard ONNX Gelu (opset 20+) which supports approximate attribute
-        return self.make_node("Gelu", [input_name], [output_name],
-                              approximate="tanh")
+        return self.make_node("Gelu", [input_name], [output_name], approximate="tanh")
 
     def build_inputs(self):
         """Create model inputs based on vision_input_format."""
         if self.vision_input_format == VISION_MODE_CONV2D:
             # Conv2d mode: raw image input [batch, channels, height, width]
             # Simpler preprocessing (just resize + normalize), like llama.cpp
-            self.inputs.append(helper.make_tensor_value_info(
-                "pixel_values", TensorProto.FLOAT,
-                ["batch_size", self.vision_config.num_channels, "height", "width"]
-            ))
+            self.inputs.append(
+                helper.make_tensor_value_info(
+                    "pixel_values",
+                    TensorProto.FLOAT,
+                    ["batch_size", self.vision_config.num_channels, "height", "width"],
+                )
+            )
             # Spatial dimensions after n_merge (for projector reshape)
             # spatial_h = height / patch_size / n_merge
             # spatial_w = width / patch_size / n_merge
-            self.inputs.append(helper.make_tensor_value_info(
-                "spatial_h", TensorProto.INT64, []  # scalar
-            ))
-            self.inputs.append(helper.make_tensor_value_info(
-                "spatial_w", TensorProto.INT64, []  # scalar
-            ))
+            self.inputs.append(
+                helper.make_tensor_value_info(
+                    "spatial_h",
+                    TensorProto.INT64,
+                    [],  # scalar
+                )
+            )
+            self.inputs.append(
+                helper.make_tensor_value_info(
+                    "spatial_w",
+                    TensorProto.INT64,
+                    [],  # scalar
+                )
+            )
         else:
             # Tiled mode: pre-extracted patches [batch, num_patches, patch_dim]
             # Requires complex preprocessing (tiling, patch extraction)
-            patch_dim = self.vision_config.num_channels * self.vision_config.patch_size * self.vision_config.patch_size
-            self.inputs.append(helper.make_tensor_value_info(
-                "pixel_values", TensorProto.FLOAT,
-                ["batch_size", "num_patches", patch_dim]
-            ))
+            patch_dim = (
+                self.vision_config.num_channels
+                * self.vision_config.patch_size
+                * self.vision_config.patch_size
+            )
+            self.inputs.append(
+                helper.make_tensor_value_info(
+                    "pixel_values", TensorProto.FLOAT, ["batch_size", "num_patches", patch_dim]
+                )
+            )
 
             # patch_attention_mask only needed for tiled mode
-            self.inputs.append(helper.make_tensor_value_info(
-                "patch_attention_mask", TensorProto.INT64,
-                ["batch_size", "num_patches"]
-            ))
+            self.inputs.append(
+                helper.make_tensor_value_info(
+                    "patch_attention_mask", TensorProto.INT64, ["batch_size", "num_patches"]
+                )
+            )
 
     def build_outputs(self):
         """Create model outputs."""
         # Image embeddings in text space: [batch, num_image_tokens, text_hidden_size]
-        self.outputs.append(helper.make_tensor_value_info(
-            "image_embeddings", TensorProto.FLOAT,
-            ["batch_size", "num_image_tokens", self.text_hidden]
-        ))
+        self.outputs.append(
+            helper.make_tensor_value_info(
+                "image_embeddings",
+                TensorProto.FLOAT,
+                ["batch_size", "num_image_tokens", self.text_hidden],
+            )
+        )
 
     def build_patch_embedding(self) -> str:
         """Build patch embedding layer with position embeddings.
@@ -267,12 +296,14 @@ class VisionEmbedBuilder:
 
             # Reshape from [B, H, h, w] to [B, h*w, H]
             # First transpose to [B, h, w, H]
-            transposed = self.make_node("Transpose", [conv_out], ["patch_embed/transposed"],
-                                        perm=[0, 2, 3, 1])
+            transposed = self.make_node(
+                "Transpose", [conv_out], ["patch_embed/transposed"], perm=[0, 2, 3, 1]
+            )
             # Then reshape to [B, N, H]
             self.add_initializer("patch_embed/reshape_3d", np.array([0, -1, H], dtype=np.int64))
-            patch_embeds = self.make_node("Reshape", [transposed, "patch_embed/reshape_3d"],
-                                          ["patch_embed/out"])
+            patch_embeds = self.make_node(
+                "Reshape", [transposed, "patch_embed/reshape_3d"], ["patch_embed/out"]
+            )
         else:
             # =====================================================================
             # Tiled mode: Linear projection (original)
@@ -281,10 +312,12 @@ class VisionEmbedBuilder:
             self.add_initializer(f"{prefix}.bias", linear_bias)
 
             # MatMul: [B, N, patch_dim] x [patch_dim, H] -> [B, N, H]
-            matmul_out = self.make_node("MatMul", ["pixel_values", f"{prefix}.weight"],
-                                        ["patch_embed/matmul"])
-            patch_embeds = self.make_node("Add", [matmul_out, f"{prefix}.bias"],
-                                          ["patch_embed/out"])
+            matmul_out = self.make_node(
+                "MatMul", ["pixel_values", f"{prefix}.weight"], ["patch_embed/matmul"]
+            )
+            patch_embeds = self.make_node(
+                "Add", [matmul_out, f"{prefix}.bias"], ["patch_embed/out"]
+            )
 
         # =====================================================================
         # Position embeddings with bilinear interpolation
@@ -310,39 +343,58 @@ class VisionEmbedBuilder:
             self.add_initializer("pos_emb/n_merge", np.array(n_merge, dtype=np.int64))
 
             # Compute pre-merge spatial dimensions: spatial_h * n_merge, spatial_w * n_merge
-            pre_merge_h = self.make_node("Mul", ["spatial_h", "pos_emb/n_merge"], ["pos_emb/pre_merge_h"])
-            pre_merge_w = self.make_node("Mul", ["spatial_w", "pos_emb/n_merge"], ["pos_emb/pre_merge_w"])
+            pre_merge_h = self.make_node(
+                "Mul", ["spatial_h", "pos_emb/n_merge"], ["pos_emb/pre_merge_h"]
+            )
+            pre_merge_w = self.make_node(
+                "Mul", ["spatial_w", "pos_emb/n_merge"], ["pos_emb/pre_merge_w"]
+            )
 
             # Build target size tensor: [1, 768, pre_merge_h, pre_merge_w]
             self.add_initializer("pos_emb/one", np.array([1], dtype=np.int64))
             self.add_initializer("pos_emb/hidden", np.array([H], dtype=np.int64))
-            pre_merge_h_unsq = self.make_node("Unsqueeze", [pre_merge_h, "pos_emb/axes_0"], ["pos_emb/pre_merge_h_unsq"])
-            pre_merge_w_unsq = self.make_node("Unsqueeze", [pre_merge_w, "pos_emb/axes_0"], ["pos_emb/pre_merge_w_unsq"])
+            pre_merge_h_unsq = self.make_node(
+                "Unsqueeze", [pre_merge_h, "pos_emb/axes_0"], ["pos_emb/pre_merge_h_unsq"]
+            )
+            pre_merge_w_unsq = self.make_node(
+                "Unsqueeze", [pre_merge_w, "pos_emb/axes_0"], ["pos_emb/pre_merge_w_unsq"]
+            )
 
-            target_size = self.make_node("Concat", [
-                "pos_emb/one", "pos_emb/hidden", pre_merge_h_unsq, pre_merge_w_unsq
-            ], ["pos_emb/target_size"], axis=0)
+            target_size = self.make_node(
+                "Concat",
+                ["pos_emb/one", "pos_emb/hidden", pre_merge_h_unsq, pre_merge_w_unsq],
+                ["pos_emb/target_size"],
+                axis=0,
+            )
         else:
             # Tiled mode: input is [B, N, patch_dim], target size is sqrt(N) x sqrt(N)
             self.add_initializer("pos_emb/idx_1", np.array(1, dtype=np.int64))  # scalar
-            num_patches = self.make_node("Gather", [input_shape, "pos_emb/idx_1"],
-                                         ["pos_emb/num_patches"], axis=0)
+            num_patches = self.make_node(
+                "Gather", [input_shape, "pos_emb/idx_1"], ["pos_emb/num_patches"], axis=0
+            )
 
             # sqrt(num_patches) to get spatial size
-            num_patches_float = self.make_node("Cast", [num_patches], ["pos_emb/np_float"],
-                                               to=TensorProto.FLOAT)
+            num_patches_float = self.make_node(
+                "Cast", [num_patches], ["pos_emb/np_float"], to=TensorProto.FLOAT
+            )
             spatial_float = self.make_node("Sqrt", [num_patches_float], ["pos_emb/spatial_float"])
-            spatial_int = self.make_node("Cast", [spatial_float], ["pos_emb/spatial_int"],
-                                         to=TensorProto.INT64)
+            spatial_int = self.make_node(
+                "Cast", [spatial_float], ["pos_emb/spatial_int"], to=TensorProto.INT64
+            )
 
             # Build target size tensor: [1, 768, target_h, target_w]
             self.add_initializer("pos_emb/one", np.array([1], dtype=np.int64))
             self.add_initializer("pos_emb/hidden", np.array([H], dtype=np.int64))
-            spatial_unsq = self.make_node("Unsqueeze", [spatial_int, "pos_emb/axes_0"], ["pos_emb/spatial_unsq"])
+            spatial_unsq = self.make_node(
+                "Unsqueeze", [spatial_int, "pos_emb/axes_0"], ["pos_emb/spatial_unsq"]
+            )
 
-            target_size = self.make_node("Concat", [
-                "pos_emb/one", "pos_emb/hidden", spatial_unsq, spatial_unsq
-            ], ["pos_emb/target_size"], axis=0)
+            target_size = self.make_node(
+                "Concat",
+                ["pos_emb/one", "pos_emb/hidden", spatial_unsq, spatial_unsq],
+                ["pos_emb/target_size"],
+                axis=0,
+            )
 
         # Use Resize with bilinear interpolation
         # Resize needs: X, roi, scales, sizes
@@ -359,27 +411,32 @@ class VisionEmbedBuilder:
 
         # Reshape from (1, 768, H, W) back to (1, H*W, 768)
         # First transpose to (1, H, W, 768)
-        resized_transposed = self.make_node("Transpose", [resized_pos_emb],
-                                            ["pos_emb/transposed"], perm=[0, 2, 3, 1])
+        resized_transposed = self.make_node(
+            "Transpose", [resized_pos_emb], ["pos_emb/transposed"], perm=[0, 2, 3, 1]
+        )
 
         # Flatten to (1, H*W, 768)
         self.add_initializer("pos_emb/reshape_3d", np.array([1, -1, H], dtype=np.int64))
-        pos_emb_final = self.make_node("Reshape", [resized_transposed, "pos_emb/reshape_3d"],
-                                       ["pos_emb/final"])
+        pos_emb_final = self.make_node(
+            "Reshape", [resized_transposed, "pos_emb/reshape_3d"], ["pos_emb/final"]
+        )
 
         # Broadcast position embeddings to batch size
         # Get batch size (use scalar index)
         self.add_initializer("pos_emb/idx_0", np.array(0, dtype=np.int64))  # scalar
-        batch_size = self.make_node("Gather", [input_shape, "pos_emb/idx_0"],
-                                    ["pos_emb/batch_size"], axis=0)
+        batch_size = self.make_node(
+            "Gather", [input_shape, "pos_emb/idx_0"], ["pos_emb/batch_size"], axis=0
+        )
 
         # Tile position embeddings across batch: (1, N, H) -> (B, N, H)
-        batch_unsq = self.make_node("Unsqueeze", [batch_size, "pos_emb/axes_0"], ["pos_emb/batch_unsq"])
+        batch_unsq = self.make_node(
+            "Unsqueeze", [batch_size, "pos_emb/axes_0"], ["pos_emb/batch_unsq"]
+        )
         self.add_initializer("pos_emb/ones_2d", np.array([1, 1], dtype=np.int64))
-        tile_repeats = self.make_node("Concat", [batch_unsq, "pos_emb/ones_2d"],
-                                      ["pos_emb/tile_repeats"], axis=0)
-        pos_emb_tiled = self.make_node("Tile", [pos_emb_final, tile_repeats],
-                                       ["pos_emb/tiled"])
+        tile_repeats = self.make_node(
+            "Concat", [batch_unsq, "pos_emb/ones_2d"], ["pos_emb/tile_repeats"], axis=0
+        )
+        pos_emb_tiled = self.make_node("Tile", [pos_emb_final, tile_repeats], ["pos_emb/tiled"])
 
         # =====================================================================
         # Add patch embeddings + position embeddings
@@ -395,63 +452,79 @@ class VisionEmbedBuilder:
 
         # Load weights
         # Layer norm 1
-        self.add_initializer(f"{prefix}.layer_norm1.weight",
-                             self.weights[f"{prefix}.layer_norm1.weight"])
-        self.add_initializer(f"{prefix}.layer_norm1.bias",
-                             self.weights[f"{prefix}.layer_norm1.bias"])
+        self.add_initializer(
+            f"{prefix}.layer_norm1.weight", self.weights[f"{prefix}.layer_norm1.weight"]
+        )
+        self.add_initializer(
+            f"{prefix}.layer_norm1.bias", self.weights[f"{prefix}.layer_norm1.bias"]
+        )
 
         # Self attention
-        self.add_initializer(f"{prefix}.self_attn.q_proj.weight",
-                             self.weights[f"{prefix}.self_attn.q_proj.weight"].T)
-        self.add_initializer(f"{prefix}.self_attn.q_proj.bias",
-                             self.weights[f"{prefix}.self_attn.q_proj.bias"])
-        self.add_initializer(f"{prefix}.self_attn.k_proj.weight",
-                             self.weights[f"{prefix}.self_attn.k_proj.weight"].T)
-        self.add_initializer(f"{prefix}.self_attn.k_proj.bias",
-                             self.weights[f"{prefix}.self_attn.k_proj.bias"])
-        self.add_initializer(f"{prefix}.self_attn.v_proj.weight",
-                             self.weights[f"{prefix}.self_attn.v_proj.weight"].T)
-        self.add_initializer(f"{prefix}.self_attn.v_proj.bias",
-                             self.weights[f"{prefix}.self_attn.v_proj.bias"])
-        self.add_initializer(f"{prefix}.self_attn.out_proj.weight",
-                             self.weights[f"{prefix}.self_attn.out_proj.weight"].T)
-        self.add_initializer(f"{prefix}.self_attn.out_proj.bias",
-                             self.weights[f"{prefix}.self_attn.out_proj.bias"])
+        self.add_initializer(
+            f"{prefix}.self_attn.q_proj.weight", self.weights[f"{prefix}.self_attn.q_proj.weight"].T
+        )
+        self.add_initializer(
+            f"{prefix}.self_attn.q_proj.bias", self.weights[f"{prefix}.self_attn.q_proj.bias"]
+        )
+        self.add_initializer(
+            f"{prefix}.self_attn.k_proj.weight", self.weights[f"{prefix}.self_attn.k_proj.weight"].T
+        )
+        self.add_initializer(
+            f"{prefix}.self_attn.k_proj.bias", self.weights[f"{prefix}.self_attn.k_proj.bias"]
+        )
+        self.add_initializer(
+            f"{prefix}.self_attn.v_proj.weight", self.weights[f"{prefix}.self_attn.v_proj.weight"].T
+        )
+        self.add_initializer(
+            f"{prefix}.self_attn.v_proj.bias", self.weights[f"{prefix}.self_attn.v_proj.bias"]
+        )
+        self.add_initializer(
+            f"{prefix}.self_attn.out_proj.weight",
+            self.weights[f"{prefix}.self_attn.out_proj.weight"].T,
+        )
+        self.add_initializer(
+            f"{prefix}.self_attn.out_proj.bias", self.weights[f"{prefix}.self_attn.out_proj.bias"]
+        )
 
         # Layer norm 2
-        self.add_initializer(f"{prefix}.layer_norm2.weight",
-                             self.weights[f"{prefix}.layer_norm2.weight"])
-        self.add_initializer(f"{prefix}.layer_norm2.bias",
-                             self.weights[f"{prefix}.layer_norm2.bias"])
+        self.add_initializer(
+            f"{prefix}.layer_norm2.weight", self.weights[f"{prefix}.layer_norm2.weight"]
+        )
+        self.add_initializer(
+            f"{prefix}.layer_norm2.bias", self.weights[f"{prefix}.layer_norm2.bias"]
+        )
 
         # MLP
-        self.add_initializer(f"{prefix}.mlp.fc1.weight",
-                             self.weights[f"{prefix}.mlp.fc1.weight"].T)
-        self.add_initializer(f"{prefix}.mlp.fc1.bias",
-                             self.weights[f"{prefix}.mlp.fc1.bias"])
-        self.add_initializer(f"{prefix}.mlp.fc2.weight",
-                             self.weights[f"{prefix}.mlp.fc2.weight"].T)
-        self.add_initializer(f"{prefix}.mlp.fc2.bias",
-                             self.weights[f"{prefix}.mlp.fc2.bias"])
+        self.add_initializer(f"{prefix}.mlp.fc1.weight", self.weights[f"{prefix}.mlp.fc1.weight"].T)
+        self.add_initializer(f"{prefix}.mlp.fc1.bias", self.weights[f"{prefix}.mlp.fc1.bias"])
+        self.add_initializer(f"{prefix}.mlp.fc2.weight", self.weights[f"{prefix}.mlp.fc2.weight"].T)
+        self.add_initializer(f"{prefix}.mlp.fc2.bias", self.weights[f"{prefix}.mlp.fc2.bias"])
 
         residual = hidden_state
 
         # Layer norm 1
-        normed = self.make_layernorm(hidden_state, f"{prefix}.layer_norm1.weight",
-                                     f"{prefix}.layer_norm1.bias", f"{prefix}/ln1")
+        normed = self.make_layernorm(
+            hidden_state,
+            f"{prefix}.layer_norm1.weight",
+            f"{prefix}.layer_norm1.bias",
+            f"{prefix}/ln1",
+        )
 
         # Self attention
         # Q, K, V projections
-        q = self.make_node("MatMul", [normed, f"{prefix}.self_attn.q_proj.weight"],
-                           [f"{prefix}/q_matmul"])
+        q = self.make_node(
+            "MatMul", [normed, f"{prefix}.self_attn.q_proj.weight"], [f"{prefix}/q_matmul"]
+        )
         q = self.make_node("Add", [q, f"{prefix}.self_attn.q_proj.bias"], [f"{prefix}/q"])
 
-        k = self.make_node("MatMul", [normed, f"{prefix}.self_attn.k_proj.weight"],
-                           [f"{prefix}/k_matmul"])
+        k = self.make_node(
+            "MatMul", [normed, f"{prefix}.self_attn.k_proj.weight"], [f"{prefix}/k_matmul"]
+        )
         k = self.make_node("Add", [k, f"{prefix}.self_attn.k_proj.bias"], [f"{prefix}/k"])
 
-        v = self.make_node("MatMul", [normed, f"{prefix}.self_attn.v_proj.weight"],
-                           [f"{prefix}/v_matmul"])
+        v = self.make_node(
+            "MatMul", [normed, f"{prefix}.self_attn.v_proj.weight"], [f"{prefix}/v_matmul"]
+        )
         v = self.make_node("Add", [v, f"{prefix}.self_attn.v_proj.bias"], [f"{prefix}/v"])
 
         # Reshape to [B, N, nh, hd] then transpose to [B, nh, N, hd]
@@ -465,46 +538,65 @@ class VisionEmbedBuilder:
         v_t = self.make_node("Transpose", [v_4d], [f"{prefix}/v_t"], perm=[0, 2, 1, 3])
 
         # Scaled dot-product attention
-        scale = 1.0 / (hd ** 0.5)
+        scale = 1.0 / (hd**0.5)
         self.add_initializer(f"{prefix}/scale", np.array(scale, dtype=np.float32))
 
         # Q @ K^T
         k_t_transposed = self.make_node("Transpose", [k_t], [f"{prefix}/k_t_t"], perm=[0, 1, 3, 2])
         scores = self.make_node("MatMul", [q_t, k_t_transposed], [f"{prefix}/scores"])
-        scores_scaled = self.make_node("Mul", [scores, f"{prefix}/scale"], [f"{prefix}/scores_scaled"])
+        scores_scaled = self.make_node(
+            "Mul", [scores, f"{prefix}/scale"], [f"{prefix}/scores_scaled"]
+        )
 
         # Softmax
-        attn_weights = self.make_node("Softmax", [scores_scaled], [f"{prefix}/attn_weights"], axis=-1)
+        attn_weights = self.make_node(
+            "Softmax", [scores_scaled], [f"{prefix}/attn_weights"], axis=-1
+        )
 
         # Attention output
         attn_out = self.make_node("MatMul", [attn_weights, v_t], [f"{prefix}/attn_out"])
 
         # Transpose back and reshape
-        attn_out_t = self.make_node("Transpose", [attn_out], [f"{prefix}/attn_out_t"], perm=[0, 2, 1, 3])
+        attn_out_t = self.make_node(
+            "Transpose", [attn_out], [f"{prefix}/attn_out_t"], perm=[0, 2, 1, 3]
+        )
         self.add_initializer(f"{prefix}/reshape_out", np.array([0, -1, H], dtype=np.int64))
-        attn_out_reshaped = self.make_node("Reshape", [attn_out_t, f"{prefix}/reshape_out"],
-                                           [f"{prefix}/attn_out_reshaped"])
+        attn_out_reshaped = self.make_node(
+            "Reshape", [attn_out_t, f"{prefix}/reshape_out"], [f"{prefix}/attn_out_reshaped"]
+        )
 
         # Output projection
-        out_proj = self.make_node("MatMul", [attn_out_reshaped, f"{prefix}.self_attn.out_proj.weight"],
-                                  [f"{prefix}/out_proj_matmul"])
-        out_proj = self.make_node("Add", [out_proj, f"{prefix}.self_attn.out_proj.bias"],
-                                  [f"{prefix}/out_proj"])
+        out_proj = self.make_node(
+            "MatMul",
+            [attn_out_reshaped, f"{prefix}.self_attn.out_proj.weight"],
+            [f"{prefix}/out_proj_matmul"],
+        )
+        out_proj = self.make_node(
+            "Add", [out_proj, f"{prefix}.self_attn.out_proj.bias"], [f"{prefix}/out_proj"]
+        )
 
         # Residual 1
         hidden_state = self.make_node("Add", [residual, out_proj], [f"{prefix}/residual1"])
 
         # Layer norm 2
         residual2 = hidden_state
-        normed2 = self.make_layernorm(hidden_state, f"{prefix}.layer_norm2.weight",
-                                      f"{prefix}.layer_norm2.bias", f"{prefix}/ln2")
+        normed2 = self.make_layernorm(
+            hidden_state,
+            f"{prefix}.layer_norm2.weight",
+            f"{prefix}.layer_norm2.bias",
+            f"{prefix}/ln2",
+        )
 
         # MLP
-        fc1 = self.make_node("MatMul", [normed2, f"{prefix}.mlp.fc1.weight"], [f"{prefix}/fc1_matmul"])
+        fc1 = self.make_node(
+            "MatMul", [normed2, f"{prefix}.mlp.fc1.weight"], [f"{prefix}/fc1_matmul"]
+        )
         fc1 = self.make_node("Add", [fc1, f"{prefix}.mlp.fc1.bias"], [f"{prefix}/fc1"])
         fc1_act = self.make_gelu(fc1, f"{prefix}/fc1_act")
 
-        fc2 = self.make_node("MatMul", [fc1_act, f"{prefix}.mlp.fc2.weight"], [f"{prefix}/fc2_matmul"])
+        fc2 = self.make_node(
+            "MatMul", [fc1_act, f"{prefix}.mlp.fc2.weight"], [f"{prefix}/fc2_matmul"]
+        )
         fc2 = self.make_node("Add", [fc2, f"{prefix}.mlp.fc2.bias"], [f"{prefix}/fc2"])
 
         # Residual 2
@@ -512,14 +604,18 @@ class VisionEmbedBuilder:
 
     def build_post_layernorm(self, hidden_state: str) -> str:
         """Build post layer norm."""
-        self.add_initializer("vision_model.post_layernorm.weight",
-                             self.weights["vision_model.post_layernorm.weight"])
-        self.add_initializer("vision_model.post_layernorm.bias",
-                             self.weights["vision_model.post_layernorm.bias"])
-        return self.make_layernorm(hidden_state,
-                                   "vision_model.post_layernorm.weight",
-                                   "vision_model.post_layernorm.bias",
-                                   "vision_embeddings")
+        self.add_initializer(
+            "vision_model.post_layernorm.weight", self.weights["vision_model.post_layernorm.weight"]
+        )
+        self.add_initializer(
+            "vision_model.post_layernorm.bias", self.weights["vision_model.post_layernorm.bias"]
+        )
+        return self.make_layernorm(
+            hidden_state,
+            "vision_model.post_layernorm.weight",
+            "vision_model.post_layernorm.bias",
+            "vision_embeddings",
+        )
 
     def build_projector(self, vision_embeddings: str) -> str:
         """Build the MLP projector with pixel unshuffle.
@@ -540,23 +636,35 @@ class VisionEmbedBuilder:
 
         # Load weights
         # Layer norm
-        self.add_initializer("multi_modal_projector.layer_norm.weight",
-                             self.weights["multi_modal_projector.layer_norm.weight"])
-        self.add_initializer("multi_modal_projector.layer_norm.bias",
-                             self.weights["multi_modal_projector.layer_norm.bias"])
+        self.add_initializer(
+            "multi_modal_projector.layer_norm.weight",
+            self.weights["multi_modal_projector.layer_norm.weight"],
+        )
+        self.add_initializer(
+            "multi_modal_projector.layer_norm.bias",
+            self.weights["multi_modal_projector.layer_norm.bias"],
+        )
 
         # Linear layers
-        self.add_initializer("multi_modal_projector.linear_1.weight",
-                             self.weights["multi_modal_projector.linear_1.weight"].T)
+        self.add_initializer(
+            "multi_modal_projector.linear_1.weight",
+            self.weights["multi_modal_projector.linear_1.weight"].T,
+        )
         if self.config.projector_bias:
-            self.add_initializer("multi_modal_projector.linear_1.bias",
-                                 self.weights["multi_modal_projector.linear_1.bias"])
+            self.add_initializer(
+                "multi_modal_projector.linear_1.bias",
+                self.weights["multi_modal_projector.linear_1.bias"],
+            )
 
-        self.add_initializer("multi_modal_projector.linear_2.weight",
-                             self.weights["multi_modal_projector.linear_2.weight"].T)
+        self.add_initializer(
+            "multi_modal_projector.linear_2.weight",
+            self.weights["multi_modal_projector.linear_2.weight"].T,
+        )
         if self.config.projector_bias:
-            self.add_initializer("multi_modal_projector.linear_2.bias",
-                                 self.weights["multi_modal_projector.linear_2.bias"])
+            self.add_initializer(
+                "multi_modal_projector.linear_2.bias",
+                self.weights["multi_modal_projector.linear_2.bias"],
+            )
 
         # Step 1: Reshape from (B, N, C) to (B, H, W, C)
         # For 1024 patches: (B, 1024, 768) -> (B, 32, 32, 768)
@@ -564,8 +672,15 @@ class VisionEmbedBuilder:
 
         # First get batch size dynamically (use scalar indices)
         self.add_initializer("proj/shape_indices_batch", np.array(0, dtype=np.int64))  # scalar
-        batch_size = self.make_node("Gather", [self.make_node("Shape", [vision_embeddings], ["proj/input_shape"]),
-                                                "proj/shape_indices_batch"], ["proj/batch_size"], axis=0)
+        batch_size = self.make_node(
+            "Gather",
+            [
+                self.make_node("Shape", [vision_embeddings], ["proj/input_shape"]),
+                "proj/shape_indices_batch",
+            ],
+            ["proj/batch_size"],
+            axis=0,
+        )
 
         self.add_initializer("proj/hidden_size", np.array([C], dtype=np.int64))
         self.add_initializer("proj/axes_0", np.array([0], dtype=np.int64))
@@ -583,12 +698,21 @@ class VisionEmbedBuilder:
 
             # Build reshape target: [batch, pre_merge_h, pre_merge_w, C]
             # Match position embedding order: row-major (H first, then W)
-            reshape_4d_shape = self.make_node("Concat", [
-                self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["proj/batch_unsq"]),
-                self.make_node("Unsqueeze", [pre_merge_h, "proj/axes_0"], ["proj/spatial_h_unsq"]),
-                self.make_node("Unsqueeze", [pre_merge_w, "proj/axes_0"], ["proj/spatial_w_unsq"]),
-                "proj/hidden_size"
-            ], ["proj/reshape_4d_shape"], axis=0)
+            reshape_4d_shape = self.make_node(
+                "Concat",
+                [
+                    self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["proj/batch_unsq"]),
+                    self.make_node(
+                        "Unsqueeze", [pre_merge_h, "proj/axes_0"], ["proj/spatial_h_unsq"]
+                    ),
+                    self.make_node(
+                        "Unsqueeze", [pre_merge_w, "proj/axes_0"], ["proj/spatial_w_unsq"]
+                    ),
+                    "proj/hidden_size",
+                ],
+                ["proj/reshape_4d_shape"],
+                axis=0,
+            )
 
             # Store for use in pixel_unshuffle (now H comes first in the 4D tensor)
             spatial_h_name = pre_merge_h
@@ -597,29 +721,53 @@ class VisionEmbedBuilder:
         else:
             # Tiled mode: compute spatial size from sqrt(seq_len), assumes square
             self.add_initializer("proj/shape_indices_seq", np.array(1, dtype=np.int64))  # scalar
-            seq_len = self.make_node("Gather", [self.make_node("Shape", [vision_embeddings], ["proj/input_shape2"]),
-                                                "proj/shape_indices_seq"], ["proj/seq_len"], axis=0)
-            seq_len_float = self.make_node("Cast", [seq_len], ["proj/seq_len_float"], to=TensorProto.FLOAT)
+            seq_len = self.make_node(
+                "Gather",
+                [
+                    self.make_node("Shape", [vision_embeddings], ["proj/input_shape2"]),
+                    "proj/shape_indices_seq",
+                ],
+                ["proj/seq_len"],
+                axis=0,
+            )
+            seq_len_float = self.make_node(
+                "Cast", [seq_len], ["proj/seq_len_float"], to=TensorProto.FLOAT
+            )
             spatial_float = self.make_node("Sqrt", [seq_len_float], ["proj/spatial_float"])
-            spatial_size = self.make_node("Cast", [spatial_float], ["proj/spatial_size"], to=TensorProto.INT64)
+            spatial_size = self.make_node(
+                "Cast", [spatial_float], ["proj/spatial_size"], to=TensorProto.INT64
+            )
 
             # Build reshape target: [batch, spatial, spatial, C] (square)
-            reshape_4d_shape = self.make_node("Concat", [
-                self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["proj/batch_unsq"]),
-                self.make_node("Unsqueeze", [spatial_size, "proj/axes_0"], ["proj/spatial1_unsq"]),
-                self.make_node("Unsqueeze", [spatial_size, "proj/axes_0"], ["proj/spatial2_unsq"]),
-                "proj/hidden_size"
-            ], ["proj/reshape_4d_shape"], axis=0)
+            reshape_4d_shape = self.make_node(
+                "Concat",
+                [
+                    self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["proj/batch_unsq"]),
+                    self.make_node(
+                        "Unsqueeze", [spatial_size, "proj/axes_0"], ["proj/spatial1_unsq"]
+                    ),
+                    self.make_node(
+                        "Unsqueeze", [spatial_size, "proj/axes_0"], ["proj/spatial2_unsq"]
+                    ),
+                    "proj/hidden_size",
+                ],
+                ["proj/reshape_4d_shape"],
+                axis=0,
+            )
 
             # For tiled mode, compute half_spatial
             self.add_initializer("proj/two_tiled", np.array(2, dtype=np.int64))
-            half_spatial = self.make_node("Div", [spatial_size, "proj/two_tiled"], ["proj/half_spatial_tiled"])
+            half_spatial = self.make_node(
+                "Div", [spatial_size, "proj/two_tiled"], ["proj/half_spatial_tiled"]
+            )
             spatial_h_name = spatial_size
             half_spatial_w_name = half_spatial
             half_spatial_h_name = half_spatial
 
         # Reshape to 4D: (B, N, C) -> (B, H, W, C)
-        hidden_4d = self.make_node("Reshape", [vision_embeddings, reshape_4d_shape], ["proj/hidden_4d"])
+        hidden_4d = self.make_node(
+            "Reshape", [vision_embeddings, reshape_4d_shape], ["proj/hidden_4d"]
+        )
 
         # Step 2: Pixel unshuffle (matches PyTorch Lfm2VlMultiModalProjector.pixel_unshuffle)
         # Input: (B, H, W, C)
@@ -632,12 +780,17 @@ class VisionEmbedBuilder:
 
         # First reshape: (B, H, W, C) -> (B, H, W/2, C*2)
         self.add_initializer("proj/c_times_2", np.array([C * ds], dtype=np.int64))
-        reshape1_shape = self.make_node("Concat", [
-            self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["proj/b1"]),
-            self.make_node("Unsqueeze", [spatial_h_name, "proj/axes_0"], ["proj/h1"]),
-            self.make_node("Unsqueeze", [half_spatial_w_name, "proj/axes_0"], ["proj/w_half1"]),
-            "proj/c_times_2"
-        ], ["proj/reshape1_shape"], axis=0)
+        reshape1_shape = self.make_node(
+            "Concat",
+            [
+                self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["proj/b1"]),
+                self.make_node("Unsqueeze", [spatial_h_name, "proj/axes_0"], ["proj/h1"]),
+                self.make_node("Unsqueeze", [half_spatial_w_name, "proj/axes_0"], ["proj/w_half1"]),
+                "proj/c_times_2",
+            ],
+            ["proj/reshape1_shape"],
+            axis=0,
+        )
         step1 = self.make_node("Reshape", [hidden_4d, reshape1_shape], ["proj/step1"])
 
         # First transpose: (B, H, W/2, C*2) -> (B, W/2, H, C*2)
@@ -645,12 +798,17 @@ class VisionEmbedBuilder:
 
         # Second reshape: (B, W/2, H, C*2) -> (B, W/2, H/2, C*4)
         self.add_initializer("proj/c_times_4", np.array([input_dim], dtype=np.int64))
-        reshape2_shape = self.make_node("Concat", [
-            self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["proj/b2"]),
-            self.make_node("Unsqueeze", [half_spatial_w_name, "proj/axes_0"], ["proj/w_half2"]),
-            self.make_node("Unsqueeze", [half_spatial_h_name, "proj/axes_0"], ["proj/h_half2"]),
-            "proj/c_times_4"
-        ], ["proj/reshape2_shape"], axis=0)
+        reshape2_shape = self.make_node(
+            "Concat",
+            [
+                self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["proj/b2"]),
+                self.make_node("Unsqueeze", [half_spatial_w_name, "proj/axes_0"], ["proj/w_half2"]),
+                self.make_node("Unsqueeze", [half_spatial_h_name, "proj/axes_0"], ["proj/h_half2"]),
+                "proj/c_times_4",
+            ],
+            ["proj/reshape2_shape"],
+            axis=0,
+        )
         step3 = self.make_node("Reshape", [step2, reshape2_shape], ["proj/step3"])
 
         # Second transpose: (B, W/2, H/2, C*4) -> (B, H/2, W/2, C*4)
@@ -663,15 +821,19 @@ class VisionEmbedBuilder:
         # Step 3: Layer norm
         normed = self.make_node(
             "LayerNormalization",
-            [unshuffled, "multi_modal_projector.layer_norm.weight",
-             "multi_modal_projector.layer_norm.bias"],
+            [
+                unshuffled,
+                "multi_modal_projector.layer_norm.weight",
+                "multi_modal_projector.layer_norm.bias",
+            ],
             ["proj/normed"],
-            epsilon=1e-5
+            epsilon=1e-5,
         )
 
         # Step 4: Linear 1
-        fc1 = self.make_node("MatMul", [normed, "multi_modal_projector.linear_1.weight"],
-                             ["proj/fc1_matmul"])
+        fc1 = self.make_node(
+            "MatMul", [normed, "multi_modal_projector.linear_1.weight"], ["proj/fc1_matmul"]
+        )
         if self.config.projector_bias:
             fc1 = self.make_node("Add", [fc1, "multi_modal_projector.linear_1.bias"], ["proj/fc1"])
 
@@ -679,11 +841,13 @@ class VisionEmbedBuilder:
         fc1_act = self.make_gelu(fc1, "proj/fc1_act")
 
         # Step 5: Linear 2
-        fc2 = self.make_node("MatMul", [fc1_act, "multi_modal_projector.linear_2.weight"],
-                             ["proj/fc2_matmul"])
+        fc2 = self.make_node(
+            "MatMul", [fc1_act, "multi_modal_projector.linear_2.weight"], ["proj/fc2_matmul"]
+        )
         if self.config.projector_bias:
-            fc2 = self.make_node("Add", [fc2, "multi_modal_projector.linear_2.bias"],
-                                 ["image_embeddings"])
+            fc2 = self.make_node(
+                "Add", [fc2, "multi_modal_projector.linear_2.bias"], ["image_embeddings"]
+            )
         else:
             self.make_node("Identity", [fc2], ["image_embeddings"])
 
@@ -780,9 +944,11 @@ class EmbedTokensBuilder:
     def load_weights(self, weights: dict[str, np.ndarray]):
         """Load embedding weights."""
         # Try different possible prefixes
-        for prefix in ["model.language_model.embed_tokens.weight",
-                       "language_model.embed_tokens.weight",
-                       "model.embed_tokens.weight"]:
+        for prefix in [
+            "model.language_model.embed_tokens.weight",
+            "language_model.embed_tokens.weight",
+            "model.embed_tokens.weight",
+        ]:
             if prefix in weights:
                 self.embed_weight = weights[prefix].astype(np.float32)
                 logger.info(f"Loaded embed_tokens weight: {self.embed_weight.shape}")
@@ -795,15 +961,20 @@ class EmbedTokensBuilder:
         logger.info("Building embed_tokens...")
 
         # Input: input_ids [batch_size, sequence_length]
-        self.inputs.append(helper.make_tensor_value_info(
-            "input_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
-        ))
+        self.inputs.append(
+            helper.make_tensor_value_info(
+                "input_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
+            )
+        )
 
         # Output: inputs_embeds [batch_size, sequence_length, hidden_size]
-        self.outputs.append(helper.make_tensor_value_info(
-            "inputs_embeds", TensorProto.FLOAT,
-            ["batch_size", "sequence_length", self.hidden_size]
-        ))
+        self.outputs.append(
+            helper.make_tensor_value_info(
+                "inputs_embeds",
+                TensorProto.FLOAT,
+                ["batch_size", "sequence_length", self.hidden_size],
+            )
+        )
 
         # Add embedding weight as initializer
         self.initializers.append(numpy_helper.from_array(self.embed_weight, "weight"))
@@ -835,8 +1006,10 @@ class EmbedTokensBuilder:
         )
         model.producer_name = "lfm2-vl-builder"
 
-        logger.info(f"embed_tokens built: {len(self.nodes)} nodes, "
-                    f"vocab_size={self.vocab_size}, hidden_size={self.hidden_size}")
+        logger.info(
+            f"embed_tokens built: {len(self.nodes)} nodes, "
+            f"vocab_size={self.vocab_size}, hidden_size={self.hidden_size}"
+        )
         return model
 
 
@@ -875,6 +1048,7 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
 
     del model
     import gc
+
     gc.collect()
 
     # Create output directories
@@ -900,7 +1074,9 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     # =========================================================================
     # 2. Export embed_images (vision encoder + projector)
     # =========================================================================
-    logger.info(f"Exporting embed_images (vision encoder + projector) [{vision_input_format} mode]...")
+    logger.info(
+        f"Exporting embed_images (vision encoder + projector) [{vision_input_format} mode]..."
+    )
     vision_builder = VisionEmbedBuilder(vl_config, vision_input_format=vision_input_format)
     vision_builder.load_weights(weights)
     vision_model = vision_builder.build()
@@ -909,9 +1085,14 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     vision_data_path = os.path.join(onnx_dir, "embed_images_fp32.onnx_data")
     if os.path.exists(vision_data_path):
         os.remove(vision_data_path)
-    onnx.save_model(vision_model, vision_path, save_as_external_data=True,
-                    all_tensors_to_one_file=True, location="embed_images_fp32.onnx_data",
-                    size_threshold=1024)
+    onnx.save_model(
+        vision_model,
+        vision_path,
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="embed_images_fp32.onnx_data",
+        size_threshold=1024,
+    )
     logger.info(f"embed_images saved to {vision_path}")
 
     # Free memory before decoder export
@@ -944,42 +1125,62 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     H = vl_config.text_config.hidden_size
 
     # inputs_embeds: pre-computed embeddings (text + image fused)
-    text_builder.inputs.append(helper.make_tensor_value_info(
-        "inputs_embeds", TensorProto.FLOAT,
-        ["batch_size", "sequence_length", H]
-    ))
+    text_builder.inputs.append(
+        helper.make_tensor_value_info(
+            "inputs_embeds", TensorProto.FLOAT, ["batch_size", "sequence_length", H]
+        )
+    )
 
     # attention_mask
-    text_builder.inputs.append(helper.make_tensor_value_info(
-        "attention_mask", TensorProto.INT64,
-        ["batch_size", "total_sequence_length"]
-    ))
+    text_builder.inputs.append(
+        helper.make_tensor_value_info(
+            "attention_mask", TensorProto.INT64, ["batch_size", "total_sequence_length"]
+        )
+    )
 
     # position_ids
-    text_builder.inputs.append(helper.make_tensor_value_info(
-        "position_ids", TensorProto.INT64,
-        ["batch_size", "sequence_length"]
-    ))
+    text_builder.inputs.append(
+        helper.make_tensor_value_info(
+            "position_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
+        )
+    )
 
     # Conv caches
     for idx in text_builder.conv_indices:
-        text_builder.inputs.append(helper.make_tensor_value_info(
-            f"past_conv.{idx}", TensorProto.FLOAT,
-            ["batch_size", H, vl_config.text_config.conv_L_cache]
-        ))
+        text_builder.inputs.append(
+            helper.make_tensor_value_info(
+                f"past_conv.{idx}",
+                TensorProto.FLOAT,
+                ["batch_size", H, vl_config.text_config.conv_L_cache],
+            )
+        )
 
     # KV caches
     for idx in text_builder.attn_indices:
-        text_builder.inputs.append(helper.make_tensor_value_info(
-            f"past_key_values.{idx}.key", TensorProto.FLOAT,
-            ["batch_size", vl_config.text_config.num_key_value_heads,
-             "past_sequence_length", text_builder.head_dim]
-        ))
-        text_builder.inputs.append(helper.make_tensor_value_info(
-            f"past_key_values.{idx}.value", TensorProto.FLOAT,
-            ["batch_size", vl_config.text_config.num_key_value_heads,
-             "past_sequence_length", text_builder.head_dim]
-        ))
+        text_builder.inputs.append(
+            helper.make_tensor_value_info(
+                f"past_key_values.{idx}.key",
+                TensorProto.FLOAT,
+                [
+                    "batch_size",
+                    vl_config.text_config.num_key_value_heads,
+                    "past_sequence_length",
+                    text_builder.head_dim,
+                ],
+            )
+        )
+        text_builder.inputs.append(
+            helper.make_tensor_value_info(
+                f"past_key_values.{idx}.value",
+                TensorProto.FLOAT,
+                [
+                    "batch_size",
+                    vl_config.text_config.num_key_value_heads,
+                    "past_sequence_length",
+                    text_builder.head_dim,
+                ],
+            )
+        )
 
     # Build outputs
     text_builder.build_outputs()
@@ -990,8 +1191,9 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
 
     # Skip build_embedding() - use inputs_embeds directly as hidden_state
     # But we still need embed_tokens weight for lm_head (tied weights)
-    text_builder.add_initializer("model.embed_tokens.weight",
-                                 text_builder.weights["model.embed_tokens.weight"])
+    text_builder.add_initializer(
+        "model.embed_tokens.weight", text_builder.weights["model.embed_tokens.weight"]
+    )
     hidden_state = "inputs_embeds"
 
     # Build all layers
@@ -1040,9 +1242,14 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
         os.remove(decoder_data_path)
 
     logger.info("Saving decoder (this may take a while for large models)...")
-    onnx.save_model(text_model, decoder_path, save_as_external_data=True,
-                    all_tensors_to_one_file=True, location="decoder_fp32.onnx_data",
-                    size_threshold=1024)  # Move tensors > 1KB to external file
+    onnx.save_model(
+        text_model,
+        decoder_path,
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="decoder_fp32.onnx_data",
+        size_threshold=1024,
+    )  # Move tensors > 1KB to external file
     logger.info(f"decoder saved to {decoder_path}")
 
     del text_model
@@ -1062,10 +1269,14 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     # Create generation_config.json
     gen_config = {
         "_from_model_config": True,
-        "bos_token_id": config.text_config.bos_token_id if hasattr(config.text_config, 'bos_token_id') else 1,
-        "eos_token_id": config.text_config.eos_token_id if hasattr(config.text_config, 'eos_token_id') else 7,
+        "bos_token_id": config.text_config.bos_token_id
+        if hasattr(config.text_config, "bos_token_id")
+        else 1,
+        "eos_token_id": config.text_config.eos_token_id
+        if hasattr(config.text_config, "eos_token_id")
+        else 7,
         "pad_token_id": 0,
-        "transformers_version": "4.57.0"
+        "transformers_version": "4.57.0",
     }
     gen_config_path = os.path.join(output_dir, "generation_config.json")
     with open(gen_config_path, "w") as f:

@@ -89,6 +89,7 @@ def get_model_size_mb(onnx_path: str) -> float:
 @dataclass
 class ComparisonResult:
     """Result of comparing a quantized model against PyTorch."""
+
     model_size: str
     source: str  # "builder_q4", "builder_q8", "community_q4", "community_q8"
     quant_type: str  # "q4" or "q8"
@@ -181,8 +182,12 @@ def print_results(results: list[ComparisonResult], quant_type: str):
         by_size[r.model_size][r.source] = r
 
     # Print header
-    print(f"\n{'Model':<12} | {'Builder ' + quant_label:<40} | {'Community ' + quant_label:<40} | Winner")
-    print(f"{'':<12} | {'Size MB':<10} {'MaxDiff':<10} {'MeanDiff':<10} {'Top1':<8} | {'Size MB':<10} {'MaxDiff':<10} {'MeanDiff':<10} {'Top1':<8} |")
+    print(
+        f"\n{'Model':<12} | {'Builder ' + quant_label:<40} | {'Community ' + quant_label:<40} | Winner"
+    )
+    print(
+        f"{'':<12} | {'Size MB':<10} {'MaxDiff':<10} {'MeanDiff':<10} {'Top1':<8} | {'Size MB':<10} {'MaxDiff':<10} {'MeanDiff':<10} {'Top1':<8} |"
+    )
     print("-" * 115)
 
     for size in ["350M", "700M", "1.2B", "2.6B"]:
@@ -218,13 +223,17 @@ def print_results(results: list[ComparisonResult], quant_type: str):
 
     # Summary
     builder_wins = sum(
-        1 for size, data in by_size.items()
-        if "builder" in data and "community" in data
+        1
+        for size, data in by_size.items()
+        if "builder" in data
+        and "community" in data
         and data["builder"].max_diff < data["community"].max_diff
     )
     community_wins = sum(
-        1 for size, data in by_size.items()
-        if "builder" in data and "community" in data
+        1
+        for size, data in by_size.items()
+        if "builder" in data
+        and "community" in data
         and data["community"].max_diff < data["builder"].max_diff
     )
     print(f"\nSUMMARY ({quant_label}):")
@@ -262,9 +271,9 @@ def main():
     results = []
 
     for size in args.models:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"COMPARING LFM2-{size}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         pytorch_path = PYTORCH_MODELS[size]
 
@@ -275,7 +284,9 @@ def main():
 
             print("\n--- Builder Q4 vs PyTorch ---")
             try:
-                result = comparator.compare(size, pytorch_path, builder_q4_path, "builder", "q4", args.prompt)
+                result = comparator.compare(
+                    size, pytorch_path, builder_q4_path, "builder", "q4", args.prompt
+                )
                 results.append(result)
                 print(f"  Size: {result.file_size_mb:.1f} MB")
                 print(f"  Max diff: {result.max_diff:.4f}")
@@ -286,7 +297,9 @@ def main():
 
             print("\n--- Community Q4 vs PyTorch ---")
             try:
-                result = comparator.compare(size, pytorch_path, community_q4_path, "community", "q4", args.prompt)
+                result = comparator.compare(
+                    size, pytorch_path, community_q4_path, "community", "q4", args.prompt
+                )
                 results.append(result)
                 print(f"  Size: {result.file_size_mb:.1f} MB")
                 print(f"  Max diff: {result.max_diff:.4f}")
@@ -302,7 +315,9 @@ def main():
 
             print("\n--- Builder Q8 vs PyTorch ---")
             try:
-                result = comparator.compare(size, pytorch_path, builder_q8_path, "builder", "q8", args.prompt)
+                result = comparator.compare(
+                    size, pytorch_path, builder_q8_path, "builder", "q8", args.prompt
+                )
                 results.append(result)
                 print(f"  Size: {result.file_size_mb:.1f} MB")
                 print(f"  Max diff: {result.max_diff:.4f}")
@@ -314,7 +329,9 @@ def main():
             if community_q8_path and Path(community_q8_path).exists():
                 print("\n--- Community Q8 vs PyTorch ---")
                 try:
-                    result = comparator.compare(size, pytorch_path, community_q8_path, "community", "q8", args.prompt)
+                    result = comparator.compare(
+                        size, pytorch_path, community_q8_path, "community", "q8", args.prompt
+                    )
                     results.append(result)
                     print(f"  Size: {result.file_size_mb:.1f} MB")
                     print(f"  Max diff: {result.max_diff:.4f}")

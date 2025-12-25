@@ -66,6 +66,7 @@ TOKENIZER_PATHS = {
 @dataclass
 class BenchmarkResult:
     """Result of benchmarking a model."""
+
     model_size: str
     source: str  # "builder" or "community"
     quant_type: str  # "q4" or "q8"
@@ -96,7 +97,9 @@ def print_results(results: list[BenchmarkResult], quant_type: str):
 
     # Print header
     print(f"\n{'Model':<12} | {'Builder ' + quant_label:<50} | {'Community ' + quant_label:<50}")
-    print(f"{'':<12} | {'Size MB':<10} {'Load(s)':<10} {'Prefill(ms)':<12} {'Tok/s':<10} | {'Size MB':<10} {'Load(s)':<10} {'Prefill(ms)':<12} {'Tok/s':<10}")
+    print(
+        f"{'':<12} | {'Size MB':<10} {'Load(s)':<10} {'Prefill(ms)':<12} {'Tok/s':<10} | {'Size MB':<10} {'Load(s)':<10} {'Prefill(ms)':<12} {'Tok/s':<10}"
+    )
     print("-" * 120)
 
     # Print each model
@@ -165,9 +168,9 @@ def main():
     results = []
 
     for size in args.models:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"BENCHMARKING LFM2-{size}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         tokenizer_path = TOKENIZER_PATHS[size]
         benchmark.model_path = tokenizer_path
@@ -195,7 +198,9 @@ def main():
                 print(f"  Size: {result.file_size_mb:.1f} MB")
                 print(f"  Load time: {result.load_time_s:.2f}s")
                 print(f"  Prefill: {result.prefill_time_ms:.1f}ms")
-                print(f"  Generation: {result.tokens_per_second:.1f} tok/s ({result.total_tokens} tokens)")
+                print(
+                    f"  Generation: {result.tokens_per_second:.1f} tok/s ({result.total_tokens} tokens)"
+                )
             except Exception as e:
                 print(f"  ERROR: {e}")
 
@@ -217,7 +222,9 @@ def main():
                 print(f"  Size: {result.file_size_mb:.1f} MB")
                 print(f"  Load time: {result.load_time_s:.2f}s")
                 print(f"  Prefill: {result.prefill_time_ms:.1f}ms")
-                print(f"  Generation: {result.tokens_per_second:.1f} tok/s ({result.total_tokens} tokens)")
+                print(
+                    f"  Generation: {result.tokens_per_second:.1f} tok/s ({result.total_tokens} tokens)"
+                )
             except Exception as e:
                 print(f"  ERROR: {e}")
 
@@ -244,7 +251,9 @@ def main():
                 print(f"  Size: {result.file_size_mb:.1f} MB")
                 print(f"  Load time: {result.load_time_s:.2f}s")
                 print(f"  Prefill: {result.prefill_time_ms:.1f}ms")
-                print(f"  Generation: {result.tokens_per_second:.1f} tok/s ({result.total_tokens} tokens)")
+                print(
+                    f"  Generation: {result.tokens_per_second:.1f} tok/s ({result.total_tokens} tokens)"
+                )
             except Exception as e:
                 print(f"  ERROR: {e}")
 
@@ -266,7 +275,9 @@ def main():
                 print(f"  Size: {result.file_size_mb:.1f} MB")
                 print(f"  Load time: {result.load_time_s:.2f}s")
                 print(f"  Prefill: {result.prefill_time_ms:.1f}ms")
-                print(f"  Generation: {result.tokens_per_second:.1f} tok/s ({result.total_tokens} tokens)")
+                print(
+                    f"  Generation: {result.tokens_per_second:.1f} tok/s ({result.total_tokens} tokens)"
+                )
             except Exception as e:
                 print(f"  ERROR: {e}")
 

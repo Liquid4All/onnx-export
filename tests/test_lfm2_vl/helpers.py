@@ -48,7 +48,7 @@ def pad_to_square(image: Image.Image) -> Image.Image:
     if w == h:
         return image
     max_dim = max(w, h)
-    square_img = Image.new('RGB', (max_dim, max_dim), (0, 0, 0))
+    square_img = Image.new("RGB", (max_dim, max_dim), (0, 0, 0))
     paste_x = (max_dim - w) // 2
     paste_y = (max_dim - h) // 2
     square_img.paste(image, (paste_x, paste_y))
@@ -94,13 +94,17 @@ def load_onnx_session(onnx_dir: pathlib.Path, filename: str) -> ort.InferenceSes
     return ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
 
 
-def compare_arrays(name: str, expected: np.ndarray, actual: np.ndarray,
-                   atol: float, rtol: float) -> VerificationResult:
+def compare_arrays(
+    name: str, expected: np.ndarray, actual: np.ndarray, atol: float, rtol: float
+) -> VerificationResult:
     if expected.shape != actual.shape:
         return VerificationResult(
-            name=name, passed=False,
-            max_diff=float('inf'), mean_diff=float('inf'), correlation=0.0,
-            details=f"Shape mismatch: {expected.shape} vs {actual.shape}"
+            name=name,
+            passed=False,
+            max_diff=float("inf"),
+            mean_diff=float("inf"),
+            correlation=0.0,
+            details=f"Shape mismatch: {expected.shape} vs {actual.shape}",
         )
 
     diff = np.abs(expected - actual)
@@ -110,8 +114,11 @@ def compare_arrays(name: str, expected: np.ndarray, actual: np.ndarray,
     passed = np.allclose(expected, actual, atol=atol, rtol=rtol)
 
     return VerificationResult(
-        name=name, passed=passed,
-        max_diff=max_diff, mean_diff=mean_diff, correlation=correlation,
+        name=name,
+        passed=passed,
+        max_diff=max_diff,
+        mean_diff=mean_diff,
+        correlation=correlation,
     )
 
 
@@ -122,11 +129,14 @@ def assert_results(results: list[VerificationResult], logger=None):
             logger.info(f"  {r.name}: {status} max_diff={r.max_diff:.6f} corr={r.correlation:.4f}")
             if r.details:
                 logger.info(f"    {r.details}")
-        assert r.passed, f"{r.name}: max_diff={r.max_diff:.6f}, corr={r.correlation:.4f}, {r.details}"
+        assert r.passed, (
+            f"{r.name}: max_diff={r.max_diff:.6f}, corr={r.correlation:.4f}, {r.details}"
+        )
 
 
-def compare_top_k(name: str, expected: np.ndarray, actual: np.ndarray,
-                  k: int = 5) -> VerificationResult:
+def compare_top_k(
+    name: str, expected: np.ndarray, actual: np.ndarray, k: int = 5
+) -> VerificationResult:
     """Compare top-k predictions between expected and actual logits."""
     exp_logits = expected[0, -1]
     act_logits = actual[0, -1]
@@ -138,23 +148,28 @@ def compare_top_k(name: str, expected: np.ndarray, actual: np.ndarray,
     top_k_overlap = len(set(exp_top_k) & set(act_top_k))
 
     return VerificationResult(
-        name=name, passed=top1_match,
+        name=name,
+        passed=top1_match,
         max_diff=0.0 if top1_match else 1.0,
         mean_diff=1.0 - (top_k_overlap / k),
         correlation=top_k_overlap / k,
         details=f"Top-1 match: {top1_match}, Top-{k} overlap: {top_k_overlap}/{k}, "
-                f"Expected: {exp_top_k.tolist()}, Actual: {act_top_k.tolist()}"
+        f"Expected: {exp_top_k.tolist()}, Actual: {act_top_k.tolist()}",
     )
 
 
-def compare_correlation(name: str, expected: np.ndarray, actual: np.ndarray,
-                        threshold: float) -> VerificationResult:
+def compare_correlation(
+    name: str, expected: np.ndarray, actual: np.ndarray, threshold: float
+) -> VerificationResult:
     """Check correlation between arrays (for quantized models where exact match isn't expected)."""
     if expected.shape != actual.shape:
         return VerificationResult(
-            name=name, passed=False,
-            max_diff=float('inf'), mean_diff=float('inf'), correlation=0.0,
-            details=f"Shape mismatch: {expected.shape} vs {actual.shape}"
+            name=name,
+            passed=False,
+            max_diff=float("inf"),
+            mean_diff=float("inf"),
+            correlation=0.0,
+            details=f"Shape mismatch: {expected.shape} vs {actual.shape}",
         )
 
     diff = np.abs(expected - actual)
@@ -164,7 +179,10 @@ def compare_correlation(name: str, expected: np.ndarray, actual: np.ndarray,
     passed = correlation >= threshold
 
     return VerificationResult(
-        name=name, passed=passed,
-        max_diff=max_diff, mean_diff=mean_diff, correlation=correlation,
-        details=f"threshold={threshold}"
+        name=name,
+        passed=passed,
+        max_diff=max_diff,
+        mean_diff=mean_diff,
+        correlation=correlation,
+        details=f"threshold={threshold}",
     )

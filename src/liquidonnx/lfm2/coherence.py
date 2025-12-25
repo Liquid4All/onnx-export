@@ -79,6 +79,7 @@ DEFAULT_PROMPTS = [
 @dataclass
 class TurnResult:
     """Result of a single conversation turn."""
+
     turn: int
     prompt: str
     pytorch_response: str
@@ -92,6 +93,7 @@ class TurnResult:
 @dataclass
 class CoherenceResult:
     """Result of multi-turn coherence test."""
+
     model_size: str
     source: str  # "builder_q4", "builder_q8", "community_q4", "community_q8"
     quant_type: str
@@ -129,9 +131,7 @@ class MultiTurnTester:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         logger.info(f"Loading PyTorch model: {self.pytorch_path}")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.pytorch_path, trust_remote_code=True
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(self.pytorch_path, trust_remote_code=True)
         self.torch_model = AutoModelForCausalLM.from_pretrained(
             self.pytorch_path,
             torch_dtype=torch.float32,
@@ -144,9 +144,7 @@ class MultiTurnTester:
         import onnxruntime as ort
 
         logger.info(f"Loading ONNX model: {onnx_path}")
-        self.onnx_session = ort.InferenceSession(
-            onnx_path, providers=["CPUExecutionProvider"]
-        )
+        self.onnx_session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
 
     def generate_pytorch(
         self, input_ids: list[int], max_new_tokens: int, stream: bool = False
@@ -291,21 +289,17 @@ class MultiTurnTester:
         )
         print()
         print(f"  Turn {turn} ONNX:    ", end="", flush=True)
-        onnx_output, onnx_logits = self.generate_onnx(
-            onnx_input, self.max_new_tokens, stream=True
-        )
+        onnx_output, onnx_logits = self.generate_onnx(onnx_input, self.max_new_tokens, stream=True)
         print()
 
         # Extract new tokens only
-        pytorch_new = pytorch_output[len(pytorch_input):]
-        onnx_new = onnx_output[len(onnx_input):]
+        pytorch_new = pytorch_output[len(pytorch_input) :]
+        onnx_new = onnx_output[len(onnx_input) :]
 
         # Token match rate
         min_len = min(len(pytorch_new), len(onnx_new))
         if min_len > 0:
-            matches = sum(
-                1 for i in range(min_len) if pytorch_new[i] == onnx_new[i]
-            )
+            matches = sum(1 for i in range(min_len) if pytorch_new[i] == onnx_new[i])
             token_match_rate = matches / max(len(pytorch_new), len(onnx_new))
         else:
             token_match_rate = 1.0 if len(pytorch_new) == len(onnx_new) == 0 else 0.0
@@ -315,16 +309,12 @@ class MultiTurnTester:
             # Compare logits at each position, average the similarities
             min_steps = min(len(pytorch_logits), len(onnx_logits))
             similarities = [
-                cosine_similarity(pytorch_logits[i], onnx_logits[i])
-                for i in range(min_steps)
+                cosine_similarity(pytorch_logits[i], onnx_logits[i]) for i in range(min_steps)
             ]
             semantic_similarity = np.mean(similarities)
 
             # Logit differences
-            diffs = [
-                np.abs(pytorch_logits[i] - onnx_logits[i])
-                for i in range(min_steps)
-            ]
+            diffs = [np.abs(pytorch_logits[i] - onnx_logits[i]) for i in range(min_steps)]
             max_logit_diff = float(np.max([d.max() for d in diffs]))
             mean_logit_diff = float(np.mean([d.mean() for d in diffs]))
         else:
@@ -371,13 +361,11 @@ class MultiTurnTester:
         accumulated_error = 0.0
 
         for turn, prompt in enumerate(prompts, 1):
-            turn_result = self.compare_turn(
-                turn, prompt, messages_pytorch, messages_onnx
-            )
+            turn_result = self.compare_turn(turn, prompt, messages_pytorch, messages_onnx)
             result.turns.append(turn_result)
 
             # Track accumulated error
-            accumulated_error += (1.0 - turn_result.semantic_similarity)
+            accumulated_error += 1.0 - turn_result.semantic_similarity
 
             # Update message histories with user prompt and assistant responses
             messages_pytorch = messages_pytorch + [
@@ -400,22 +388,26 @@ class MultiTurnTester:
 
 def print_turn_results(result: CoherenceResult):
     """Print detailed turn-by-turn results."""
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"MULTI-TURN COHERENCE: {result.source.upper()} {result.quant_type.upper()}")
     print(f"Model: LFM2-{result.model_size}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     for turn in result.turns:
         print(f"\n--- Turn {turn.turn} ---")
         print(f"Prompt: {turn.prompt}")
-        print(f"PyTorch: {turn.pytorch_response[:100]}{'...' if len(turn.pytorch_response) > 100 else ''}")
-        print(f"ONNX:    {turn.onnx_response[:100]}{'...' if len(turn.onnx_response) > 100 else ''}")
-        print(f"Token Match: {turn.token_match_rate*100:.1f}%")
+        print(
+            f"PyTorch: {turn.pytorch_response[:100]}{'...' if len(turn.pytorch_response) > 100 else ''}"
+        )
+        print(
+            f"ONNX:    {turn.onnx_response[:100]}{'...' if len(turn.onnx_response) > 100 else ''}"
+        )
+        print(f"Token Match: {turn.token_match_rate * 100:.1f}%")
         print(f"Semantic Sim: {turn.semantic_similarity:.4f}")
         print(f"Max Logit Diff: {turn.max_logit_diff:.4f}")
 
     print("\n--- Summary ---")
-    print(f"Avg Token Match: {result.avg_token_match*100:.1f}%")
+    print(f"Avg Token Match: {result.avg_token_match * 100:.1f}%")
     print(f"Avg Semantic Sim: {result.avg_semantic_sim:.4f}")
     print(f"Accumulated Error: {result.accumulated_error:.4f}")
 
@@ -426,11 +418,13 @@ def print_summary_table(results: list[CoherenceResult], quant_type: str):
     if not quant_results:
         return
 
-    print(f"\n{'='*100}")
+    print(f"\n{'=' * 100}")
     print(f"MULTI-TURN COHERENCE SUMMARY ({quant_type.upper()})")
-    print(f"{'='*100}")
+    print(f"{'=' * 100}")
 
-    print(f"\n{'Model':<12} | {'Source':<12} | {'Avg Token%':<12} | {'Avg Semantic':<12} | {'Accum Error':<12}")
+    print(
+        f"\n{'Model':<12} | {'Source':<12} | {'Avg Token%':<12} | {'Avg Semantic':<12} | {'Accum Error':<12}"
+    )
     print("-" * 100)
 
     for size in ["350M", "700M", "1.2B", "2.6B"]:
@@ -438,7 +432,7 @@ def print_summary_table(results: list[CoherenceResult], quant_type: str):
         for r in size_results:
             print(
                 f"LFM2-{size:<6} | {r.source:<12} | "
-                f"{r.avg_token_match*100:<12.1f} | {r.avg_semantic_sim:<12.4f} | "
+                f"{r.avg_token_match * 100:<12.1f} | {r.avg_semantic_sim:<12.4f} | "
                 f"{r.accumulated_error:<12.4f}"
             )
 
@@ -495,9 +489,9 @@ def main():
     results = []
 
     for size in args.models:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"TESTING LFM2-{size}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         pytorch_path = PYTORCH_MODELS[size]
         tester = MultiTurnTester(pytorch_path, max_new_tokens=args.max_tokens)
@@ -509,14 +503,12 @@ def main():
                 onnx_path = BUILDER_Q4_MODELS[size]
                 print("\n--- Builder Q4 ---")
                 try:
-                    result = tester.test_coherence(
-                        size, onnx_path, "builder", "q4", prompts
-                    )
+                    result = tester.test_coherence(size, onnx_path, "builder", "q4", prompts)
                     results.append(result)
                     if args.verbose:
                         print_turn_results(result)
                     else:
-                        print(f"  Avg Token Match: {result.avg_token_match*100:.1f}%")
+                        print(f"  Avg Token Match: {result.avg_token_match * 100:.1f}%")
                         print(f"  Avg Semantic Sim: {result.avg_semantic_sim:.4f}")
                         print(f"  Accumulated Error: {result.accumulated_error:.4f}")
                 except Exception as e:
@@ -526,14 +518,12 @@ def main():
                 onnx_path = COMMUNITY_Q4_MODELS[size]
                 print("\n--- Community Q4 ---")
                 try:
-                    result = tester.test_coherence(
-                        size, onnx_path, "community", "q4", prompts
-                    )
+                    result = tester.test_coherence(size, onnx_path, "community", "q4", prompts)
                     results.append(result)
                     if args.verbose:
                         print_turn_results(result)
                     else:
-                        print(f"  Avg Token Match: {result.avg_token_match*100:.1f}%")
+                        print(f"  Avg Token Match: {result.avg_token_match * 100:.1f}%")
                         print(f"  Avg Semantic Sim: {result.avg_semantic_sim:.4f}")
                         print(f"  Accumulated Error: {result.accumulated_error:.4f}")
                 except Exception as e:
@@ -545,14 +535,12 @@ def main():
                 onnx_path = BUILDER_Q8_MODELS[size]
                 print("\n--- Builder Q8 ---")
                 try:
-                    result = tester.test_coherence(
-                        size, onnx_path, "builder", "q8", prompts
-                    )
+                    result = tester.test_coherence(size, onnx_path, "builder", "q8", prompts)
                     results.append(result)
                     if args.verbose:
                         print_turn_results(result)
                     else:
-                        print(f"  Avg Token Match: {result.avg_token_match*100:.1f}%")
+                        print(f"  Avg Token Match: {result.avg_token_match * 100:.1f}%")
                         print(f"  Avg Semantic Sim: {result.avg_semantic_sim:.4f}")
                         print(f"  Accumulated Error: {result.accumulated_error:.4f}")
                 except Exception as e:
@@ -562,14 +550,12 @@ def main():
                 onnx_path = COMMUNITY_Q8_MODELS[size]
                 print("\n--- Community Q8 ---")
                 try:
-                    result = tester.test_coherence(
-                        size, onnx_path, "community", "q8", prompts
-                    )
+                    result = tester.test_coherence(size, onnx_path, "community", "q8", prompts)
                     results.append(result)
                     if args.verbose:
                         print_turn_results(result)
                     else:
-                        print(f"  Avg Token Match: {result.avg_token_match*100:.1f}%")
+                        print(f"  Avg Token Match: {result.avg_token_match * 100:.1f}%")
                         print(f"  Avg Semantic Sim: {result.avg_semantic_sim:.4f}")
                         print(f"  Accumulated Error: {result.accumulated_error:.4f}")
                 except Exception as e:

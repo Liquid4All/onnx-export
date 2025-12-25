@@ -58,7 +58,7 @@ def get_pytorch_vision_embeddings(model, processor, image):
         for tile_idx in range(pixel_values.shape[0]):
             feature = vision_outputs[tile_idx]
             h, w = spatial_shapes[tile_idx].tolist()
-            feature = feature[:h * w].reshape(1, h, w, -1)
+            feature = feature[: h * w].reshape(1, h, w, -1)
             proj_out = model.model.multi_modal_projector(feature)
             proj_out = proj_out.reshape(-1, proj_out.shape[-1])
             pytorch_embeddings.append(proj_out)
@@ -71,10 +71,13 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, v
     pixel_values = inputs["pixel_values"]
     pixel_attention_mask = inputs["pixel_attention_mask"]
 
-    onnx_outputs = embed_images_sess.run(None, {
-        "pixel_values": pixel_values.numpy().astype(np.float32),
-        "patch_attention_mask": pixel_attention_mask.numpy().astype(np.int64),
-    })
+    onnx_outputs = embed_images_sess.run(
+        None,
+        {
+            "pixel_values": pixel_values.numpy().astype(np.float32),
+            "patch_attention_mask": pixel_attention_mask.numpy().astype(np.int64),
+        },
+    )
     onnx_embeddings = onnx_outputs[0]
 
     atol, rtol = get_tolerances(vision_bits)
@@ -85,17 +88,24 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, v
         min_tokens = min(pytorch_np.shape[0], onnx_tile.shape[0])
 
         if "arrays" in checks:
-            results.append(compare_arrays(
-                f"vision_tile_{tile_idx}",
-                pytorch_np[:min_tokens], onnx_tile[:min_tokens],
-                atol, rtol
-            ))
+            results.append(
+                compare_arrays(
+                    f"vision_tile_{tile_idx}",
+                    pytorch_np[:min_tokens],
+                    onnx_tile[:min_tokens],
+                    atol,
+                    rtol,
+                )
+            )
         if "correlation" in checks:
-            results.append(compare_correlation(
-                f"vision_tile_{tile_idx}_corr",
-                pytorch_np[:min_tokens], onnx_tile[:min_tokens],
-                threshold=VISION_CORRELATION_THRESHOLD,
-            ))
+            results.append(
+                compare_correlation(
+                    f"vision_tile_{tile_idx}_corr",
+                    pytorch_np[:min_tokens],
+                    onnx_tile[:min_tokens],
+                    threshold=VISION_CORRELATION_THRESHOLD,
+                )
+            )
 
     return results
 
@@ -124,6 +134,8 @@ def test_vision_encoder(
     image = Image.open(cardinal_image).convert("RGB")
 
     pytorch_embeddings, inputs = get_pytorch_vision_embeddings(model, processor, image)
-    results = verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, vision_bits)
+    results = verify_vision_tiled(
+        embed_images_sess, inputs, pytorch_embeddings, checks, vision_bits
+    )
 
     assert_results(results, logger)

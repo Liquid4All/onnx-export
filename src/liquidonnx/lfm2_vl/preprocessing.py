@@ -9,6 +9,7 @@ Supports two vision input formats:
 - Conv2d (-C): Raw image [B, 3, H, W] with spatial dimensions
 """
 
+import logging
 import math
 from dataclasses import dataclass
 
@@ -17,6 +18,8 @@ from PIL import Image
 
 from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class VLConfig:
@@ -24,6 +27,7 @@ class VLConfig:
 
     Matches PyTorch LFM2-VL configuration parameters.
     """
+
     # Vision encoder
     patch_size: int = 16
     num_channels: int = 3
@@ -49,14 +53,14 @@ class VLConfig:
     def from_hf_config(cls, config) -> "VLConfig":
         """Create VLConfig from HuggingFace config."""
         return cls(
-            patch_size=getattr(config, 'encoder_patch_size', 16),
-            downsample_factor=getattr(config, 'downsample_factor', 2),
-            min_image_tokens=getattr(config, 'min_image_tokens', 64),
-            max_image_tokens=getattr(config, 'max_image_tokens', 256),
-            tile_size=getattr(config, 'tile_size', 512),
-            min_tiles=getattr(config, 'min_tiles', 2),
-            max_tiles=getattr(config, 'max_tiles', 10),
-            use_thumbnail=getattr(config, 'use_thumbnail', True),
+            patch_size=getattr(config, "encoder_patch_size", 16),
+            downsample_factor=getattr(config, "downsample_factor", 2),
+            min_image_tokens=getattr(config, "min_image_tokens", 64),
+            max_image_tokens=getattr(config, "max_image_tokens", 256),
+            tile_size=getattr(config, "tile_size", 512),
+            min_tiles=getattr(config, "min_tiles", 2),
+            max_tiles=getattr(config, "max_tiles", 10),
+            use_thumbnail=getattr(config, "use_thumbnail", True),
         )
 
 
@@ -123,8 +127,8 @@ def smart_resize(
 
     # Pixel bounds based on token limits
     # Each output token represents (patch_size * downsample_factor)^2 pixels
-    smart_resize_min_pixels = min_image_tokens * (patch_size ** 2) * (downsample_factor ** 2)
-    smart_resize_max_pixels = max_image_tokens * (patch_size ** 2) * (downsample_factor ** 2)
+    smart_resize_min_pixels = min_image_tokens * (patch_size**2) * (downsample_factor**2)
+    smart_resize_max_pixels = max_image_tokens * (patch_size**2) * (downsample_factor**2)
 
     # Round to nearest multiple of total_factor
     h_bar = max(total_factor, round_by_factor(height, total_factor))
@@ -248,7 +252,7 @@ def preprocess_tiled(
         w, h = image.size
         if w != h:
             max_dim = max(w, h)
-            square_img = Image.new('RGB', (max_dim, max_dim), (0, 0, 0))
+            square_img = Image.new("RGB", (max_dim, max_dim), (0, 0, 0))
             paste_x = (max_dim - w) // 2
             paste_y = (max_dim - h) // 2
             square_img.paste(image, (paste_x, paste_y))
@@ -374,7 +378,9 @@ def build_inputs_embeds(
     total_patches = sum(embeds.shape[0] for embeds in image_embeds_list)
 
     if len(image_positions) != total_patches:
-        print(f"  [WARNING] Mismatch: {len(image_positions)} <image> tokens vs {total_patches} patches")
+        logger.warning(
+            f"Mismatch: {len(image_positions)} <image> tokens vs {total_patches} patches"
+        )
 
     # Replace each <image> token with corresponding patch embedding
     result = text_embeds.copy()
