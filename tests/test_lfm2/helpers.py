@@ -64,11 +64,7 @@ def get_onnx_file(onnx_dir: pathlib.Path, bits: int | None) -> pathlib.Path:
         Path to ONNX file
     """
     if bits is None:
-        # Try model.onnx first, then decoder_fp32.onnx for backwards compat
-        fp32_path = onnx_dir / "model.onnx"
-        if fp32_path.exists():
-            return fp32_path
-        return onnx_dir / "decoder_fp32.onnx"
+        return onnx_dir / "model.onnx"
     return onnx_dir / f"model_q{bits}.onnx"
 
 

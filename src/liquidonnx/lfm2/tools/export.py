@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Export LFM2 model to ONNX with optional quantization.
+Export LFM2 models to ONNX with optional quantization.
 
 Output Structure (Transformers.js compatible):
     exports/
@@ -16,20 +16,26 @@ Output Structure (Transformers.js compatible):
             └── model_q8.onnx_data
 
 Usage:
-    # Export FP32 only
-    uv run lfm2-export --model LiquidAI/LFM2-1.2B --output ./exports/LFM2-1.2B-ONNX
+    # Export single model (FP32 only)
+    uv run lfm2-export --sizes 350M
 
-    # Export and quantize to Q4
-    uv run lfm2-export --model LiquidAI/LFM2-1.2B --output ./exports/LFM2-1.2B-ONNX --quantize q4
+    # Export all models
+    uv run lfm2-export --sizes all
 
-    # Export and quantize to both Q4 and Q8
-    uv run lfm2-export --model LiquidAI/LFM2-1.2B --output ./exports/LFM2-1.2B-ONNX --quantize q4 q8
+    # Export with Q4 quantization
+    uv run lfm2-export --sizes 350M --quantize q4
 
-    # Quantize existing export only (skip FP32 export)
-    uv run lfm2-export --output ./exports/LFM2-1.2B-ONNX --skip-export --quantize q4
+    # Export with both Q4 and Q8
+    uv run lfm2-export --sizes 1.2B --quantize q4 q8
+
+    # Export with all quantizations (default when --quantize has no args)
+    uv run lfm2-export --sizes all --quantize
+
+    # Quantize existing exports (skip FP32 export)
+    uv run lfm2-export --sizes all --quantize --skip-export
 
     # Quantize with lm_head included
-    uv run lfm2-export --output ./exports/LFM2-1.2B-ONNX --skip-export --quantize q4 --no-exclude-lm-head
+    uv run lfm2-export --sizes 350M --quantize q4 --no-exclude-lm-head
 """
 
 import argparse
@@ -41,6 +47,18 @@ from liquidonnx.lfm2.quantize import get_model_size, quantize_int4, quantize_int
 
 logger = logging.getLogger(__name__)
 
+MODELS = {
+    "350M": "LiquidAI/LFM2-350M",
+    "700M": "LiquidAI/LFM2-700M",
+    "1.2B": "LiquidAI/LFM2-1.2B",
+    "2.6B": "LiquidAI/LFM2-2.6B",
+}
+
+
+def get_output_dir(size: str, output_base: pathlib.Path) -> pathlib.Path:
+    """Get output directory for a model."""
+    return output_base / "exports" / f"LFM2-{size}-ONNX"
+
 
 def do_export(model_path: str, output_path: pathlib.Path):
     """Export model to ONNX (FP32)."""
@@ -48,33 +66,28 @@ def do_export(model_path: str, output_path: pathlib.Path):
     export_model(model_path, str(output_path))
 
 
-def do_quantize(onnx_dir: pathlib.Path, quant_type: str, exclude_lm_head: bool, block_size: int):
+def do_quantize(onnx_dir: pathlib.Path, bits: int, exclude_lm_head: bool, block_size: int):
     """Quantize model to INT4 or INT8.
 
     Args:
         onnx_dir: Directory containing ONNX files
-        quant_type: "q4" or "q8"
+        bits: 4 for INT4, 8 for INT8
         exclude_lm_head: Whether to exclude lm_head from quantization
         block_size: Block size for quantization
     """
-    bits = int(quant_type.replace("q", ""))
-
-    # Find FP32 model
     input_model = onnx_dir / "model.onnx"
     if not input_model.exists():
-        input_model = onnx_dir / "decoder_fp32.onnx"
-    if not input_model.exists():
-        raise FileNotFoundError(f"No model.onnx or decoder_fp32.onnx found in {onnx_dir}")
+        raise FileNotFoundError(f"model.onnx not found in {onnx_dir}")
 
-    output_model = onnx_dir / f"model_{quant_type}.onnx"
+    output_model = onnx_dir / f"model_q{bits}.onnx"
 
     if output_model.exists():
-        logger.info(f"Skipping {quant_type} (already exists)")
+        logger.info(f"Skipping q{bits} (already exists)")
         return
 
     _, orig_mb = get_model_size(input_model)
 
-    logger.info(f"Quantizing to {quant_type.upper()}...")
+    logger.info(f"Quantizing to Q{bits}...")
     if bits == 4:
         quantize_int4(input_model, output_model, block_size, exclude_lm_head)
     else:
@@ -87,22 +100,25 @@ def do_quantize(onnx_dir: pathlib.Path, quant_type: str, exclude_lm_head: bool, 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Export LFM2 model to ONNX",
+        description="Export LFM2 models to ONNX",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
 
     # Model selection
     parser.add_argument(
-        "--model",
-        type=str,
-        help="HuggingFace model path (e.g., LiquidAI/LFM2-1.2B)",
-    )
-    parser.add_argument(
-        "--output",
-        type=pathlib.Path,
+        "--sizes",
+        nargs="+",
         required=True,
-        help="Output directory for ONNX files",
+        help="Model sizes: 350M, 700M, 1.2B, 2.6B, or 'all'",
+    )
+
+    # Output
+    parser.add_argument(
+        "--output-dir",
+        type=pathlib.Path,
+        default=pathlib.Path("."),
+        help="Output base directory (default: current directory)",
     )
 
     # Export options
@@ -116,8 +132,8 @@ def main():
     parser.add_argument(
         "--quantize",
         nargs="*",
-        metavar="QUANT",
-        help="Quantize: q4, q8, or multiple (e.g., --quantize q4 q8)",
+        metavar="BITS",
+        help="Quantize: q4, q8, or both (default if no args)",
     )
     parser.add_argument(
         "--no-exclude-lm-head",
@@ -135,52 +151,69 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
-    # Validate arguments
-    if not args.skip_export and not args.model:
-        parser.error("--model is required unless --skip-export is specified")
+    # Parse sizes
+    sizes = list(MODELS.keys()) if "all" in args.sizes else args.sizes
+    for s in sizes:
+        if s not in MODELS:
+            parser.error(f"Unknown size: {s}. Available: {', '.join(MODELS.keys())}")
 
     # Parse quantization options
-    quant_types = []
+    quant_bits = []
     if args.quantize is not None:
         if len(args.quantize) == 0:
-            quant_types = ["q4", "q8"]
+            quant_bits = [4, 8]
         else:
             for q in args.quantize:
-                q = q.lower()
-                if not q.startswith("q"):
-                    q = f"q{q}"
-                if q not in ("q4", "q8"):
+                q = q.lower().replace("q", "")
+                if q not in ("4", "8"):
                     parser.error(f"Invalid quantization: {q}. Use q4 or q8.")
-                quant_types.append(q)
+                quant_bits.append(int(q))
 
     exclude_lm_head = not args.no_exclude_lm_head
 
     # Export FP32
     if not args.skip_export:
-        do_export(args.model, args.output)
+        logger.info("=" * 60)
+        logger.info("EXPORTING MODELS (FP32)")
+        logger.info("=" * 60)
+
+        for size in sizes:
+            try:
+                do_export(MODELS[size], get_output_dir(size, args.output_dir))
+                logger.info(f"  {size}: OK")
+            except Exception as e:
+                logger.error(f"  {size}: FAILED - {e}")
 
     # Quantize
-    if quant_types:
-        onnx_dir = args.output / "onnx"
-        if not onnx_dir.exists():
-            raise FileNotFoundError(f"ONNX directory not found: {onnx_dir}")
+    for bits in quant_bits:
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info(f"QUANTIZING TO Q{bits}")
+        logger.info("=" * 60)
 
-        for quant_type in quant_types:
-            do_quantize(onnx_dir, quant_type, exclude_lm_head, args.block_size)
+        for size in sizes:
+            onnx_dir = get_output_dir(size, args.output_dir) / "onnx"
+            try:
+                do_quantize(onnx_dir, bits, exclude_lm_head, args.block_size)
+                logger.info(f"  {size}: OK")
+            except Exception as e:
+                logger.error(f"  {size}: FAILED - {e}")
 
     # Summary
-    onnx_dir = args.output / "onnx"
-    if onnx_dir.exists():
-        logger.info("")
-        logger.info("Output files:")
-        for f in sorted(onnx_dir.glob("*.onnx")):
-            size_mb = f.stat().st_size / 1e6
-            data_file = f.with_suffix(".onnx_data")
-            if data_file.exists():
-                data_mb = data_file.stat().st_size / 1e6
-                logger.info(f"  {f.name}: {size_mb:.1f} MB + {data_mb:.1f} MB data")
-            else:
-                logger.info(f"  {f.name}: {size_mb:.1f} MB")
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("OUTPUT")
+    logger.info("=" * 60)
+
+    for size in sizes:
+        out_dir = get_output_dir(size, args.output_dir)
+        if out_dir.exists():
+            onnx_dir = out_dir / "onnx"
+            files = list(onnx_dir.glob("model*.onnx"))
+            file_names = ", ".join(f.name for f in sorted(files))
+            total_size = sum(f.stat().st_size for f in out_dir.rglob("*") if f.is_file())
+            logger.info(f"  {out_dir} ({total_size / 1e9:.2f} GB)")
+            logger.info(f"    Files: {file_names}")
 
 
 if __name__ == "__main__":
