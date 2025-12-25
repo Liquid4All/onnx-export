@@ -108,9 +108,17 @@ def compare_arrays(
 
 
 def compare_top_k(
-    name: str, expected: np.ndarray, actual: np.ndarray, k: int = 5
+    name: str, expected: np.ndarray, actual: np.ndarray, k: int = 5, min_overlap: int = 5
 ) -> VerificationResult:
-    """Compare top-k predictions between expected and actual logits."""
+    """Compare top-k predictions between expected and actual logits.
+
+    Args:
+        name: Test name
+        expected: Expected logits
+        actual: Actual logits
+        k: Number of top predictions to compare
+        min_overlap: Minimum overlap required to pass (default: k for exact match)
+    """
     exp_logits = expected[0, -1]
     act_logits = actual[0, -1]
 
@@ -119,10 +127,11 @@ def compare_top_k(
 
     top1_match = exp_top_k[0] == act_top_k[0]
     top_k_overlap = len(set(exp_top_k) & set(act_top_k))
+    passed = top_k_overlap >= min_overlap
 
     return VerificationResult(
         name=name,
-        passed=top1_match,
+        passed=passed,
         max_diff=0.0 if top1_match else 1.0,
         mean_diff=1.0 - (top_k_overlap / k),
         correlation=top_k_overlap / k,

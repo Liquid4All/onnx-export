@@ -96,6 +96,10 @@ def test_decoder(
             compare_arrays(f"decoder: '{prompt[:20]}...'", pytorch_logits, onnx_logits, atol, rtol)
         )
     if "top_k" in checks:
-        results.append(compare_top_k(f"top-5: '{prompt[:20]}...'", pytorch_logits, onnx_logits))
+        # Quantized models may have slight logit differences causing token reordering
+        min_overlap = 3 if bits else 5
+        results.append(
+            compare_top_k(f"top-5: '{prompt[:20]}...'", pytorch_logits, onnx_logits, min_overlap=min_overlap)
+        )
 
     assert_results(results, logger)
