@@ -146,38 +146,6 @@ class VLModelInference:
             text_embeds, image_embeds_list, self.image_token_id, input_ids
         )
 
-    def _build_inputs_embeds(
-        self, input_ids: np.ndarray, image_embeds_list: list[np.ndarray]
-    ) -> np.ndarray:
-        """Build inputs_embeds by replacing image tokens with image embeddings (legacy)."""
-        text_embeds = self._get_text_embeddings(input_ids)[0]  # [seq_len, hidden]
-
-        # Find image token positions
-        image_positions = np.where(input_ids[0] == self.image_token_id)[0].tolist()
-
-        if len(image_positions) == 0 or len(image_embeds_list) == 0:
-            return text_embeds[np.newaxis, ...]  # [1, seq_len, hidden]
-
-        # Build combined embeddings
-        result_parts = []
-        prev_end = 0
-
-        for img_idx, image_embeds in enumerate(image_embeds_list):
-            if img_idx >= len(image_positions):
-                break
-            pos = image_positions[img_idx]
-            # Add text before this image token
-            result_parts.append(text_embeds[prev_end:pos])
-            # Add image embeddings
-            result_parts.append(image_embeds)
-            prev_end = pos + 1  # Skip the image token
-
-        # Add remaining text after last image token
-        result_parts.append(text_embeds[prev_end:])
-
-        combined = np.concatenate(result_parts, axis=0)
-        return combined[np.newaxis, ...].astype(np.float32)
-
     def _initialize_cache(self) -> dict:
         """Initialize cache tensors for decoder."""
         cache = {}
@@ -218,12 +186,17 @@ class VLModelInference:
 
         if images:
             # Build conversation with proper image content structure
+            # Images are only added to the LAST user message (current turn)
             # The processor expands each <image> into multiple tokens (one per patch)
             # plus <|image_start|> and <|image_end|> separators
             messages_with_images = []
-            for msg in messages:
-                if msg["role"] == "user":
-                    # Build content list with images first, then text
+            last_user_idx = max(
+                (i for i, msg in enumerate(messages) if msg["role"] == "user"),
+                default=-1
+            )
+            for i, msg in enumerate(messages):
+                if msg["role"] == "user" and i == last_user_idx:
+                    # Add images only to the last user message (current turn)
                     content = []
                     for img in images:
                         content.append({"type": "image", "image": img})
