@@ -1,10 +1,39 @@
 """Shared test utilities for LFM2 tests."""
 
+import logging
 import pathlib
+from dataclasses import dataclass
 
 import numpy as np
 import onnxruntime as ort
 import pytest
+
+logger = logging.getLogger(__name__)
+
+ATOL = 1e-3
+RTOL = 1e-2
+ATOL_QUANT = 0.5
+RTOL_QUANT = 0.5
+
+
+@dataclass
+class VerificationResult:
+    name: str
+    passed: bool
+    max_diff: float
+    mean_diff: float
+    correlation: float
+    details: str = ""
+
+
+def bits_to_str(bits: int | None) -> str:
+    return f"q{bits}" if bits else "fp32"
+
+
+def get_tolerances(bits: int | None) -> tuple[float, float]:
+    if bits:
+        return ATOL_QUANT, RTOL_QUANT
+    return ATOL, RTOL
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -52,3 +81,65 @@ def skip_if_missing(path: pathlib.Path, reason: str = "File not found"):
 def load_onnx_session(onnx_path: pathlib.Path) -> ort.InferenceSession:
     """Load ONNX model as inference session."""
     return ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+
+
+def compare_arrays(
+    name: str, expected: np.ndarray, actual: np.ndarray, atol: float, rtol: float
+) -> VerificationResult:
+    if expected.shape != actual.shape:
+        return VerificationResult(
+            name=name,
+            passed=False,
+            max_diff=float("inf"),
+            mean_diff=float("inf"),
+            correlation=0.0,
+            details=f"Shape mismatch: {expected.shape} vs {actual.shape}",
+        )
+
+    diff = np.abs(expected - actual)
+    max_diff = float(diff.max())
+    mean_diff = float(diff.mean())
+    correlation = float(np.corrcoef(expected.flatten(), actual.flatten())[0, 1])
+    passed = np.allclose(expected, actual, atol=atol, rtol=rtol)
+
+    return VerificationResult(
+        name=name,
+        passed=passed,
+        max_diff=max_diff,
+        mean_diff=mean_diff,
+        correlation=correlation,
+    )
+
+
+def compare_top_k(
+    name: str, expected: np.ndarray, actual: np.ndarray, k: int = 5
+) -> VerificationResult:
+    """Compare top-k predictions between expected and actual logits."""
+    exp_logits = expected[0, -1]
+    act_logits = actual[0, -1]
+
+    exp_top_k = np.argsort(exp_logits)[-k:][::-1]
+    act_top_k = np.argsort(act_logits)[-k:][::-1]
+
+    top1_match = exp_top_k[0] == act_top_k[0]
+    top_k_overlap = len(set(exp_top_k) & set(act_top_k))
+
+    return VerificationResult(
+        name=name,
+        passed=top1_match,
+        max_diff=0.0 if top1_match else 1.0,
+        mean_diff=1.0 - (top_k_overlap / k),
+        correlation=top_k_overlap / k,
+        details=f"Top-1 match: {top1_match}, Top-{k} overlap: {top_k_overlap}/{k}, "
+        f"Expected: {exp_top_k.tolist()}, Actual: {act_top_k.tolist()}",
+    )
+
+
+def assert_results(results: list[VerificationResult], log=None):
+    for r in results:
+        status = "PASS" if r.passed else "FAIL"
+        if log:
+            log.info(f"  {r.name}: {status} max_diff={r.max_diff:.6f} corr={r.correlation:.4f}")
+            if r.details:
+                log.info(f"    {r.details}")
+        assert r.passed, f"{r.name}: max_diff={r.max_diff:.6f}, corr={r.correlation:.4f}, {r.details}"
