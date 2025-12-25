@@ -19,13 +19,23 @@ Usage:
 """
 
 import argparse
+import logging
 from pathlib import Path
-from typing import List, Optional
 
 import numpy as np
 import onnxruntime as ort
 from PIL import Image
 from transformers import AutoProcessor
+
+from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
+from liquidonnx.lfm2_vl.preprocessing import (
+    build_inputs_embeds,
+    detect_vision_format,
+    preprocess_conv2d,
+    preprocess_tiled,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class VLModelInference:
@@ -39,10 +49,11 @@ class VLModelInference:
         self.embed_images_sess = None
         self.decoder_sess = None
         self.image_token_id = None
+        self.vision_format = VISION_MODE_TILED
 
     def load(self):
         """Load processor and ONNX models."""
-        print(f"Loading VL model from {self.model_path}...")
+        logger.info(f"Loading VL model from {self.model_path}...")
 
         # Find the HuggingFace model ID based on directory name
         dir_name = self.model_path.name
@@ -56,97 +67,83 @@ class VLModelInference:
             hf_model = str(self.model_path)
 
         # Load processor from HuggingFace (for image processing)
-        print(f"Loading processor from {hf_model}...")
+        logger.info(f"Loading processor from {hf_model}...")
         self.processor = AutoProcessor.from_pretrained(hf_model, trust_remote_code=True)
         self.tokenizer = self.processor.tokenizer
 
         # Get image token ID
         self.image_token_id = self.tokenizer.convert_tokens_to_ids("<image>")
-        print(f"Image token ID: {self.image_token_id}")
+        logger.debug(f"Image token ID: {self.image_token_id}")
 
         # Load ONNX models
         onnx_dir = self.model_path / "onnx"
 
-        print("Loading embed_tokens.onnx...")
+        logger.info("Loading embed_tokens.onnx...")
         self.embed_tokens_sess = ort.InferenceSession(
             str(onnx_dir / "embed_tokens.onnx"), providers=["CPUExecutionProvider"]
         )
 
-        print("Loading embed_images.onnx...")
+        logger.info("Loading embed_images.onnx...")
         self.embed_images_sess = ort.InferenceSession(
             str(onnx_dir / "embed_images.onnx"), providers=["CPUExecutionProvider"]
         )
 
-        print("Loading decoder.onnx...")
+        logger.info("Loading decoder.onnx...")
         self.decoder_sess = ort.InferenceSession(
             str(onnx_dir / "decoder.onnx"), providers=["CPUExecutionProvider"]
         )
 
-        print("Model loaded successfully!")
+        # Detect vision format from embed_images input shape
+        self.vision_format = detect_vision_format(self.embed_images_sess)
+        logger.info(f"Vision format: {self.vision_format}")
+        logger.info("Model loaded successfully!")
 
-    def _get_image_embeddings(self, images: List[Image.Image]) -> List[np.ndarray]:
-        """Get embeddings for a list of images."""
+    def _get_image_embeddings(self, images: list[Image.Image]) -> list[np.ndarray]:
+        """Get embeddings for a list of images using liquidonnx utilities."""
         embeddings = []
 
         for image in images:
-            inputs = self.processor.image_processor(images=image, return_tensors="pt")
-            pixel_values = inputs["pixel_values"].numpy().astype(np.float32)
-            patch_attention_mask = inputs["pixel_attention_mask"].numpy().astype(np.int64)
+            if self.vision_format == VISION_MODE_CONV2D:
+                # Conv2d format: use liquidonnx preprocess_conv2d
+                pixel_values, spatial_h, spatial_w = preprocess_conv2d(image)
+                outputs = self.embed_images_sess.run(
+                    None,
+                    {
+                        "pixel_values": pixel_values,
+                        "spatial_h": np.array(spatial_h, dtype=np.int64),
+                        "spatial_w": np.array(spatial_w, dtype=np.int64),
+                    },
+                )
+                img_embeds = outputs[0][0]  # [num_tokens, hidden_dim]
+            else:
+                # Tiled format: use liquidonnx preprocess_tiled
+                pixel_values, patch_attention_mask, _ = preprocess_tiled(
+                    image, self.processor, do_image_splitting=False, pad_to_square=True
+                )
+                outputs = self.embed_images_sess.run(
+                    None,
+                    {
+                        "pixel_values": pixel_values,
+                        "patch_attention_mask": patch_attention_mask,
+                    },
+                )
+                img_embeds = outputs[0][0]  # [num_tokens, hidden_dim]
 
-            outputs = self.embed_images_sess.run(
-                None,
-                {
-                    "pixel_values": pixel_values,
-                    "patch_attention_mask": patch_attention_mask,
-                },
-            )
-
-            # Output: [num_tiles, tokens_per_tile, hidden_dim]
-            # Flatten to [total_tokens, hidden_dim]
-            img_embeds = outputs[0]
-            num_tiles, tokens_per_tile, hidden = img_embeds.shape
-            embeddings.append(img_embeds.reshape(-1, hidden))
+            embeddings.append(img_embeds)
 
         return embeddings
 
     def _get_text_embeddings(self, input_ids: np.ndarray) -> np.ndarray:
         """Get text embeddings from token IDs."""
-        outputs = self.embed_tokens_sess.run(
-            None, {"input_ids": input_ids.astype(np.int64)}
-        )
+        outputs = self.embed_tokens_sess.run(None, {"input_ids": input_ids.astype(np.int64)})
         return outputs[0]  # [1, seq_len, hidden_dim]
 
-    def _build_inputs_embeds(
-        self, input_ids: np.ndarray, image_embeds_list: List[np.ndarray]
+    def _build_inputs_embeds_expanded(
+        self, input_ids: np.ndarray, image_embeds_list: list[np.ndarray]
     ) -> np.ndarray:
-        """Build inputs_embeds by replacing image tokens with image embeddings."""
+        """Build inputs_embeds for expanded token sequence using liquidonnx utility."""
         text_embeds = self._get_text_embeddings(input_ids)[0]  # [seq_len, hidden]
-
-        # Find image token positions
-        image_positions = np.where(input_ids[0] == self.image_token_id)[0].tolist()
-
-        if len(image_positions) == 0 or len(image_embeds_list) == 0:
-            return text_embeds[np.newaxis, ...]  # [1, seq_len, hidden]
-
-        # Build combined embeddings
-        result_parts = []
-        prev_end = 0
-
-        for img_idx, image_embeds in enumerate(image_embeds_list):
-            if img_idx >= len(image_positions):
-                break
-            pos = image_positions[img_idx]
-            # Add text before this image token
-            result_parts.append(text_embeds[prev_end:pos])
-            # Add image embeddings
-            result_parts.append(image_embeds)
-            prev_end = pos + 1  # Skip the image token
-
-        # Add remaining text after last image token
-        result_parts.append(text_embeds[prev_end:])
-
-        combined = np.concatenate(result_parts, axis=0)
-        return combined[np.newaxis, ...].astype(np.float32)
+        return build_inputs_embeds(text_embeds, image_embeds_list, self.image_token_id, input_ids)
 
     def _initialize_cache(self) -> dict:
         """Initialize cache tensors for decoder."""
@@ -179,49 +176,69 @@ class VLModelInference:
     def generate(
         self,
         messages: list,
-        images: Optional[List[Image.Image]] = None,
+        images: list[Image.Image] | None = None,
         max_new_tokens: int = 100,
         stream: bool = True,
     ) -> str:
         """Generate response for chat messages with optional images."""
         images = images or []
 
-        # Build conversation with image placeholders
         if images:
-            # Insert image tokens into first user message
+            # Build conversation with proper image content structure
+            # Images are only added to the LAST user message (current turn)
+            # The processor expands each <image> into multiple tokens (one per patch)
+            # plus <|image_start|> and <|image_end|> separators
+            messages_with_images = []
+            last_user_idx = max(
+                (i for i, msg in enumerate(messages) if msg["role"] == "user"), default=-1
+            )
             for i, msg in enumerate(messages):
-                if msg["role"] == "user":
-                    image_tokens = "<image>" * len(images)
-                    messages[i] = {
-                        "role": "user",
-                        "content": image_tokens + msg["content"],
-                    }
-                    break
+                if msg["role"] == "user" and i == last_user_idx:
+                    # Add images only to the last user message (current turn)
+                    content = []
+                    for img in images:
+                        content.append({"type": "image", "image": img})
+                    content.append({"type": "text", "text": msg["content"]})
+                    messages_with_images.append({"role": "user", "content": content})
+                else:
+                    messages_with_images.append(msg)
 
-        # Apply chat template
-        prompt = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+            # Apply chat template with images - this expands <image> tokens properly
+            prompt = self.processor.apply_chat_template(
+                messages_with_images, add_generation_prompt=True
+            )
 
-        # Tokenize
-        input_ids = np.array(
-            [self.tokenizer.encode(prompt, add_special_tokens=False)], dtype=np.int64
-        )
+            # Use processor to get properly expanded input_ids
+            # The processor expands each <image> into N tokens (one per patch)
+            # with <|image_start|> before and <|image_end|> after each image
+            inputs = self.processor(
+                images=images,
+                text=prompt,
+                return_tensors="pt",  # Processor requires PyTorch
+                do_image_splitting=False,  # Match our ONNX preprocessing
+            )
+            input_ids = inputs["input_ids"].numpy()  # Convert to numpy
 
-        # Get image embeddings if images provided
-        if images:
+            # Get image embeddings
             image_embeds_list = self._get_image_embeddings(images)
-            inputs_embeds = self._build_inputs_embeds(input_ids, image_embeds_list)
+
+            # Build inputs_embeds by replacing expanded <image> tokens with embeddings
+            inputs_embeds = self._build_inputs_embeds_expanded(input_ids, image_embeds_list)
         else:
+            # Text-only: use simple tokenization
+            prompt = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            input_ids = np.array(
+                [self.tokenizer.encode(prompt, add_special_tokens=False)], dtype=np.int64
+            )
             inputs_embeds = self._get_text_embeddings(input_ids)
 
         # Initialize cache
         cache = self._initialize_cache()
 
         # Check for position_ids input
-        has_position_ids = "position_ids" in {
-            inp.name for inp in self.decoder_sess.get_inputs()
-        }
+        has_position_ids = "position_ids" in {inp.name for inp in self.decoder_sess.get_inputs()}
 
         seq_len = inputs_embeds.shape[1]
         generated_tokens = []
@@ -279,16 +296,10 @@ def main():
         description="ONNX inference for LFM2-VL models (0-2 images per turn)"
     )
     parser.add_argument("--model", required=True, help="Path to ONNX model directory")
-    parser.add_argument(
-        "--images", nargs="*", default=[], help="Image paths (0-2 images)"
-    )
+    parser.add_argument("--images", nargs="*", default=[], help="Image paths (0-2 images)")
     parser.add_argument("--prompt", default=None, help="Initial prompt (optional)")
-    parser.add_argument(
-        "--max-tokens", type=int, default=100, help="Max tokens to generate"
-    )
-    parser.add_argument(
-        "--no-stream", action="store_true", help="Disable streaming output"
-    )
+    parser.add_argument("--max-tokens", type=int, default=100, help="Max tokens to generate")
+    parser.add_argument("--no-stream", action="store_true", help="Disable streaming output")
     args = parser.parse_args()
 
     if len(args.images) > 2:

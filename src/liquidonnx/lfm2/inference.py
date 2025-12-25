@@ -9,30 +9,30 @@ Usage:
 """
 
 import argparse
-import os
-from pathlib import Path
+import logging
+import pathlib
 
 import numpy as np
 import onnxruntime as ort
 from transformers import AutoTokenizer
+
+logger = logging.getLogger(__name__)
 
 
 class TextModelInference:
     """ONNX inference for LFM2 text models."""
 
     def __init__(self, model_path: str):
-        self.model_path = Path(model_path)
+        self.model_path = pathlib.Path(model_path)
         self.tokenizer = None
         self.session = None
 
     def load(self):
         """Load tokenizer and ONNX model."""
-        print(f"Loading model from {self.model_path}...")
+        logger.info(f"Loading model from {self.model_path}...")
 
         # Load tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            str(self.model_path), trust_remote_code=True
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(str(self.model_path), trust_remote_code=True)
 
         # Load ONNX model
         onnx_path = self.model_path / "onnx" / "decoder.onnx"
@@ -40,14 +40,12 @@ class TextModelInference:
             # Try model.onnx for non-split models
             onnx_path = self.model_path / "onnx" / "model.onnx"
 
-        print(f"Loading ONNX from {onnx_path}...")
-        self.session = ort.InferenceSession(
-            str(onnx_path), providers=["CPUExecutionProvider"]
-        )
+        logger.info(f"Loading ONNX from {onnx_path}...")
+        self.session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
 
         # Get model info
         self.input_names = {inp.name for inp in self.session.get_inputs()}
-        print(f"Model loaded. Inputs: {list(self.input_names)[:5]}...")
+        logger.info(f"Model loaded. Inputs: {list(self.input_names)[:5]}...")
 
     def _initialize_cache(self) -> dict:
         """Initialize KV cache tensors."""
@@ -103,7 +101,6 @@ class TextModelInference:
         output_names = [out.name for out in self.session.get_outputs()]
 
         seq_len = input_ids.shape[1]
-        attention_mask = np.ones((1, seq_len), dtype=np.int64)
         position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
 
         generated_tokens = []
@@ -159,6 +156,8 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=100, help="Max tokens to generate")
     parser.add_argument("--no-stream", action="store_true", help="Disable streaming output")
     args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
     # Load model
     model = TextModelInference(args.model)

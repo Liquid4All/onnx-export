@@ -11,12 +11,11 @@ The builder creates an optimized ONNX graph with fused operators:
 """
 
 import logging
-from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 
 import numpy as np
 import onnx
-from onnx import helper, numpy_helper, TensorProto
+from onnx import TensorProto, helper, numpy_helper
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +23,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class LFM2Config:
     """Configuration for LFM2 model."""
+
     hidden_size: int
     num_hidden_layers: int
     num_attention_heads: int
     num_key_value_heads: int
     vocab_size: int
-    layer_types: List[str]
+    layer_types: list[str]
     conv_L_cache: int = 3
     max_position_embeddings: int = 128000
     norm_eps: float = 1e-5
@@ -70,13 +70,13 @@ class LFM2Builder:
         self.attn_indices = [i for i, t in enumerate(config.layer_types) if t == "full_attention"]
 
         # Graph components
-        self.nodes: List[onnx.NodeProto] = []
-        self.inputs: List[onnx.ValueInfoProto] = []
-        self.outputs: List[onnx.ValueInfoProto] = []
-        self.initializers: List[onnx.TensorProto] = []
+        self.nodes: list[onnx.NodeProto] = []
+        self.inputs: list[onnx.ValueInfoProto] = []
+        self.outputs: list[onnx.ValueInfoProto] = []
+        self.initializers: list[onnx.TensorProto] = []
 
         # Weights storage
-        self.weights: Dict[str, np.ndarray] = {}
+        self.weights: dict[str, np.ndarray] = {}
 
         # Node counter for unique names
         self._node_count = 0
@@ -97,8 +97,15 @@ class LFM2Builder:
             tensor = tensor.astype(dtype)
         self.initializers.append(numpy_helper.from_array(tensor, name))
 
-    def make_node(self, op_type: str, inputs: List[str], outputs: List[str],
-                  name: str = None, domain: str = "", **attrs) -> str:
+    def make_node(
+        self,
+        op_type: str,
+        inputs: list[str],
+        outputs: list[str],
+        name: str = None,
+        domain: str = "",
+        **attrs,
+    ) -> str:
         """Create an ONNX node and return the first output name."""
         if name is None:
             name = self._unique_name(op_type)
@@ -116,7 +123,9 @@ class LFM2Builder:
             epsilon=self.config.norm_eps,
         )
 
-    def make_skip_layernorm(self, input_name: str, skip_name: str, weight_name: str, output_name: str) -> str:
+    def make_skip_layernorm(
+        self, input_name: str, skip_name: str, weight_name: str, output_name: str
+    ) -> str:
         """Create SkipSimplifiedLayerNormalization node (fused skip + layernorm)."""
         return self.make_node(
             "SkipSimplifiedLayerNormalization",
@@ -150,67 +159,117 @@ class LFM2Builder:
     def build_inputs(self):
         """Create model inputs."""
         # input_ids
-        self.inputs.append(helper.make_tensor_value_info(
-            "input_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
-        ))
+        self.inputs.append(
+            helper.make_tensor_value_info(
+                "input_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
+            )
+        )
 
         # attention_mask
-        self.inputs.append(helper.make_tensor_value_info(
-            "attention_mask", TensorProto.INT64, ["batch_size", "total_sequence_length"]
-        ))
+        self.inputs.append(
+            helper.make_tensor_value_info(
+                "attention_mask", TensorProto.INT64, ["batch_size", "total_sequence_length"]
+            )
+        )
 
         # position_ids
-        self.inputs.append(helper.make_tensor_value_info(
-            "position_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
-        ))
+        self.inputs.append(
+            helper.make_tensor_value_info(
+                "position_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
+            )
+        )
 
         # Conv caches
         for idx in self.conv_indices:
-            self.inputs.append(helper.make_tensor_value_info(
-                f"past_conv.{idx}", TensorProto.FLOAT,
-                ["batch_size", self.config.hidden_size, self.config.conv_L_cache]
-            ))
+            self.inputs.append(
+                helper.make_tensor_value_info(
+                    f"past_conv.{idx}",
+                    TensorProto.FLOAT,
+                    ["batch_size", self.config.hidden_size, self.config.conv_L_cache],
+                )
+            )
 
         # KV caches
         for idx in self.attn_indices:
-            self.inputs.append(helper.make_tensor_value_info(
-                f"past_key_values.{idx}.key", TensorProto.FLOAT,
-                ["batch_size", self.config.num_key_value_heads, "past_sequence_length", self.head_dim]
-            ))
-            self.inputs.append(helper.make_tensor_value_info(
-                f"past_key_values.{idx}.value", TensorProto.FLOAT,
-                ["batch_size", self.config.num_key_value_heads, "past_sequence_length", self.head_dim]
-            ))
+            self.inputs.append(
+                helper.make_tensor_value_info(
+                    f"past_key_values.{idx}.key",
+                    TensorProto.FLOAT,
+                    [
+                        "batch_size",
+                        self.config.num_key_value_heads,
+                        "past_sequence_length",
+                        self.head_dim,
+                    ],
+                )
+            )
+            self.inputs.append(
+                helper.make_tensor_value_info(
+                    f"past_key_values.{idx}.value",
+                    TensorProto.FLOAT,
+                    [
+                        "batch_size",
+                        self.config.num_key_value_heads,
+                        "past_sequence_length",
+                        self.head_dim,
+                    ],
+                )
+            )
 
     def build_outputs(self):
         """Create model outputs."""
         # Logits
-        self.outputs.append(helper.make_tensor_value_info(
-            "logits", TensorProto.FLOAT, ["batch_size", "sequence_length", self.config.vocab_size]
-        ))
+        self.outputs.append(
+            helper.make_tensor_value_info(
+                "logits",
+                TensorProto.FLOAT,
+                ["batch_size", "sequence_length", self.config.vocab_size],
+            )
+        )
 
         # Conv cache outputs
         for idx in self.conv_indices:
-            self.outputs.append(helper.make_tensor_value_info(
-                f"present_conv.{idx}", TensorProto.FLOAT,
-                ["batch_size", self.config.hidden_size, self.config.conv_L_cache]
-            ))
+            self.outputs.append(
+                helper.make_tensor_value_info(
+                    f"present_conv.{idx}",
+                    TensorProto.FLOAT,
+                    ["batch_size", self.config.hidden_size, self.config.conv_L_cache],
+                )
+            )
 
         # KV cache outputs
         for idx in self.attn_indices:
-            self.outputs.append(helper.make_tensor_value_info(
-                f"present.{idx}.key", TensorProto.FLOAT,
-                ["batch_size", self.config.num_key_value_heads, "total_sequence_length", self.head_dim]
-            ))
-            self.outputs.append(helper.make_tensor_value_info(
-                f"present.{idx}.value", TensorProto.FLOAT,
-                ["batch_size", self.config.num_key_value_heads, "total_sequence_length", self.head_dim]
-            ))
+            self.outputs.append(
+                helper.make_tensor_value_info(
+                    f"present.{idx}.key",
+                    TensorProto.FLOAT,
+                    [
+                        "batch_size",
+                        self.config.num_key_value_heads,
+                        "total_sequence_length",
+                        self.head_dim,
+                    ],
+                )
+            )
+            self.outputs.append(
+                helper.make_tensor_value_info(
+                    f"present.{idx}.value",
+                    TensorProto.FLOAT,
+                    [
+                        "batch_size",
+                        self.config.num_key_value_heads,
+                        "total_sequence_length",
+                        self.head_dim,
+                    ],
+                )
+            )
 
     def build_embedding(self) -> str:
         """Build embedding layer, return output name."""
         self.add_initializer("model.embed_tokens.weight", self.weights["model.embed_tokens.weight"])
-        return self.make_node("Gather", ["model.embed_tokens.weight", "input_ids"], ["embed_output"], axis=0)
+        return self.make_node(
+            "Gather", ["model.embed_tokens.weight", "input_ids"], ["embed_output"], axis=0
+        )
 
     def build_rope_cache(self):
         """Build RoPE cos/sin caches."""
@@ -232,20 +291,23 @@ class LFM2Builder:
         self.add_initializer("const_1", np.array([1], dtype=np.int64))
 
         # seqlens_k = sum of attention_mask per batch - 1
-        self.make_node("ReduceSum", ["attention_mask", "const_1"],
-                       ["/attn_mask/reduce_sum"], keepdims=0)
-        self.make_node("Sub", ["/attn_mask/reduce_sum", "const_1"],
-                       ["/attn_mask/seqlens_k_i64"])
-        self.make_node("Cast", ["/attn_mask/seqlens_k_i64"],
-                       ["/attn_mask/seqlens_k"], to=TensorProto.INT32)
+        self.make_node(
+            "ReduceSum", ["attention_mask", "const_1"], ["/attn_mask/reduce_sum"], keepdims=0
+        )
+        self.make_node("Sub", ["/attn_mask/reduce_sum", "const_1"], ["/attn_mask/seqlens_k_i64"])
+        self.make_node(
+            "Cast", ["/attn_mask/seqlens_k_i64"], ["/attn_mask/seqlens_k"], to=TensorProto.INT32
+        )
 
         # total_seq_len = shape[1] of attention_mask
         self.add_initializer("const_1_scalar", np.array(1, dtype=np.int64))
         self.make_node("Shape", ["attention_mask"], ["/attn_mask/shape"])
-        self.make_node("Gather", ["/attn_mask/shape", "const_1_scalar"],
-                       ["/attn_mask/total_seq_i64"], axis=0)
-        self.make_node("Cast", ["/attn_mask/total_seq_i64"],
-                       ["/attn_mask/total_seq"], to=TensorProto.INT32)
+        self.make_node(
+            "Gather", ["/attn_mask/shape", "const_1_scalar"], ["/attn_mask/total_seq_i64"], axis=0
+        )
+        self.make_node(
+            "Cast", ["/attn_mask/total_seq_i64"], ["/attn_mask/total_seq"], to=TensorProto.INT32
+        )
 
     def build_conv_layer(self, layer_idx: int, hidden_state: str) -> str:
         """Build a conv/SSM layer."""
@@ -253,29 +315,34 @@ class LFM2Builder:
         L = self.config.conv_L_cache
 
         # Load weights (using actual HF weight names)
-        self.add_initializer(f"{prefix}.operator_norm.weight",
-                             self.weights[f"{prefix}.operator_norm.weight"])
-        self.add_initializer(f"{prefix}.conv.in_proj.weight",
-                             self.weights[f"{prefix}.conv.in_proj.weight"].T)
-        self.add_initializer(f"{prefix}.conv.weight",
-                             self.weights[f"{prefix}.conv.conv.weight"])
-        self.add_initializer(f"{prefix}.conv.out_proj.weight",
-                             self.weights[f"{prefix}.conv.out_proj.weight"].T)
-        self.add_initializer(f"{prefix}.ffn_norm.weight",
-                             self.weights[f"{prefix}.ffn_norm.weight"])
-        self.add_initializer(f"{prefix}.feed_forward.w1.weight",
-                             self.weights[f"{prefix}.feed_forward.w1.weight"].T)
-        self.add_initializer(f"{prefix}.feed_forward.w3.weight",
-                             self.weights[f"{prefix}.feed_forward.w3.weight"].T)
-        self.add_initializer(f"{prefix}.feed_forward.w2.weight",
-                             self.weights[f"{prefix}.feed_forward.w2.weight"].T)
+        self.add_initializer(
+            f"{prefix}.operator_norm.weight", self.weights[f"{prefix}.operator_norm.weight"]
+        )
+        self.add_initializer(
+            f"{prefix}.conv.in_proj.weight", self.weights[f"{prefix}.conv.in_proj.weight"].T
+        )
+        self.add_initializer(f"{prefix}.conv.weight", self.weights[f"{prefix}.conv.conv.weight"])
+        self.add_initializer(
+            f"{prefix}.conv.out_proj.weight", self.weights[f"{prefix}.conv.out_proj.weight"].T
+        )
+        self.add_initializer(f"{prefix}.ffn_norm.weight", self.weights[f"{prefix}.ffn_norm.weight"])
+        self.add_initializer(
+            f"{prefix}.feed_forward.w1.weight", self.weights[f"{prefix}.feed_forward.w1.weight"].T
+        )
+        self.add_initializer(
+            f"{prefix}.feed_forward.w3.weight", self.weights[f"{prefix}.feed_forward.w3.weight"].T
+        )
+        self.add_initializer(
+            f"{prefix}.feed_forward.w2.weight", self.weights[f"{prefix}.feed_forward.w2.weight"].T
+        )
 
         residual = hidden_state
         H = self.config.hidden_size
 
         # Operator LayerNorm
-        normed = self.make_layernorm(hidden_state, f"{prefix}.operator_norm.weight",
-                                      f"{prefix}/op_norm")
+        normed = self.make_layernorm(
+            hidden_state, f"{prefix}.operator_norm.weight", f"{prefix}/op_norm"
+        )
 
         # In projection: [B, S, H] -> [B, S, 3H]
         in_proj = self.make_matmul(normed, f"{prefix}.conv.in_proj.weight", f"{prefix}/in_proj")
@@ -285,44 +352,79 @@ class LFM2Builder:
 
         # Split into B, C, x (each [B, H, S])
         self.add_initializer(f"{prefix}/split_sizes", np.array([H, H, H], dtype=np.int64))
-        self.make_node("Split", [in_proj_t, f"{prefix}/split_sizes"],
-                       [f"{prefix}/B", f"{prefix}/C", f"{prefix}/x"], axis=1)
+        self.make_node(
+            "Split",
+            [in_proj_t, f"{prefix}/split_sizes"],
+            [f"{prefix}/B", f"{prefix}/C", f"{prefix}/x"],
+            axis=1,
+        )
 
         # Bx = B * x (no sigmoid, just multiply)
         Bx = self.make_mul(f"{prefix}/B", f"{prefix}/x", f"{prefix}/Bx")
 
         # Concat with past conv cache: [B, H, L] + [B, H, S] -> [B, H, L+S]
-        conv_input = self.make_node("Concat", [f"past_conv.{layer_idx}", Bx],
-                                    [f"{prefix}/conv_input"], axis=2)
+        conv_input = self.make_node(
+            "Concat", [f"past_conv.{layer_idx}", Bx], [f"{prefix}/conv_input"], axis=2
+        )
 
         # Conv1D (depthwise): kernel_shape = 3 (matches weight shape [H, 1, 3])
-        conv_out_full = self.make_node("Conv", [conv_input, f"{prefix}.conv.weight"],
-                                       [f"{prefix}/conv_out_full"],
-                                       kernel_shape=[3], group=H)
+        conv_out_full = self.make_node(
+            "Conv",
+            [conv_input, f"{prefix}.conv.weight"],
+            [f"{prefix}/conv_out_full"],
+            kernel_shape=[3],
+            group=H,
+        )
 
         # Slice conv output to match sequence length (take last S elements)
         # Get shape of Bx to determine sequence length dynamically
         self.make_node("Shape", [Bx], [f"{prefix}/bx_shape"])
         self.add_initializer(f"{prefix}/const_2_scalar", np.array(2, dtype=np.int64))
-        self.make_node("Gather", [f"{prefix}/bx_shape", f"{prefix}/const_2_scalar"],
-                       [f"{prefix}/seq_len"], axis=0)
+        self.make_node(
+            "Gather",
+            [f"{prefix}/bx_shape", f"{prefix}/const_2_scalar"],
+            [f"{prefix}/seq_len"],
+            axis=0,
+        )
         self.add_initializer(f"{prefix}/const_neg1", np.array(-1, dtype=np.int64))
-        self.make_node("Mul", [f"{prefix}/seq_len", f"{prefix}/const_neg1"],
-                       [f"{prefix}/neg_seq_len"])
+        self.make_node(
+            "Mul", [f"{prefix}/seq_len", f"{prefix}/const_neg1"], [f"{prefix}/neg_seq_len"]
+        )
         self.add_initializer(f"{prefix}/const_0_1d", np.array([0], dtype=np.int64))
-        self.make_node("Unsqueeze", [f"{prefix}/neg_seq_len", f"{prefix}/const_0_1d"],
-                       [f"{prefix}/slice_start"])
-        self.add_initializer(f"{prefix}/slice_end_max", np.array([9223372036854775807], dtype=np.int64))
+        self.make_node(
+            "Unsqueeze",
+            [f"{prefix}/neg_seq_len", f"{prefix}/const_0_1d"],
+            [f"{prefix}/slice_start"],
+        )
+        self.add_initializer(
+            f"{prefix}/slice_end_max", np.array([9223372036854775807], dtype=np.int64)
+        )
         self.add_initializer(f"{prefix}/slice_axis_2", np.array([2], dtype=np.int64))
-        self.make_node("Slice", [conv_out_full, f"{prefix}/slice_start", f"{prefix}/slice_end_max", f"{prefix}/slice_axis_2"],
-                       [f"{prefix}/conv_out"])
+        self.make_node(
+            "Slice",
+            [
+                conv_out_full,
+                f"{prefix}/slice_start",
+                f"{prefix}/slice_end_max",
+                f"{prefix}/slice_axis_2",
+            ],
+            [f"{prefix}/conv_out"],
+        )
 
         # Extract new cache (last L elements of conv_input)
         self.add_initializer(f"{prefix}/cache_slice_starts", np.array([-L], dtype=np.int64))
         self.add_initializer(f"{prefix}/cache_slice_ends", np.array([2147483647], dtype=np.int64))
         self.add_initializer(f"{prefix}/cache_slice_axes", np.array([2], dtype=np.int64))
-        self.make_node("Slice", [conv_input, f"{prefix}/cache_slice_starts", f"{prefix}/cache_slice_ends", f"{prefix}/cache_slice_axes"],
-                       [f"present_conv.{layer_idx}"])
+        self.make_node(
+            "Slice",
+            [
+                conv_input,
+                f"{prefix}/cache_slice_starts",
+                f"{prefix}/cache_slice_ends",
+                f"{prefix}/cache_slice_axes",
+            ],
+            [f"present_conv.{layer_idx}"],
+        )
 
         # y = C * conv_out (element-wise multiply in [B, H, S] space)
         y = self.make_mul(f"{prefix}/C", f"{prefix}/conv_out", f"{prefix}/y")
@@ -350,34 +452,47 @@ class LFM2Builder:
         hd = self.head_dim
 
         # Load weights (using actual HF weight names)
-        self.add_initializer(f"{prefix}.operator_norm.weight",
-                             self.weights[f"{prefix}.operator_norm.weight"])
-        self.add_initializer(f"{prefix}.self_attn.q_proj.weight",
-                             self.weights[f"{prefix}.self_attn.q_proj.weight"].T)
-        self.add_initializer(f"{prefix}.self_attn.k_proj.weight",
-                             self.weights[f"{prefix}.self_attn.k_proj.weight"].T)
-        self.add_initializer(f"{prefix}.self_attn.v_proj.weight",
-                             self.weights[f"{prefix}.self_attn.v_proj.weight"].T)
-        self.add_initializer(f"{prefix}.self_attn.q_layernorm.weight",
-                             self.weights[f"{prefix}.self_attn.q_layernorm.weight"])
-        self.add_initializer(f"{prefix}.self_attn.k_layernorm.weight",
-                             self.weights[f"{prefix}.self_attn.k_layernorm.weight"])
-        self.add_initializer(f"{prefix}.self_attn.out_proj.weight",
-                             self.weights[f"{prefix}.self_attn.out_proj.weight"].T)
-        self.add_initializer(f"{prefix}.ffn_norm.weight",
-                             self.weights[f"{prefix}.ffn_norm.weight"])
-        self.add_initializer(f"{prefix}.feed_forward.w1.weight",
-                             self.weights[f"{prefix}.feed_forward.w1.weight"].T)
-        self.add_initializer(f"{prefix}.feed_forward.w3.weight",
-                             self.weights[f"{prefix}.feed_forward.w3.weight"].T)
-        self.add_initializer(f"{prefix}.feed_forward.w2.weight",
-                             self.weights[f"{prefix}.feed_forward.w2.weight"].T)
+        self.add_initializer(
+            f"{prefix}.operator_norm.weight", self.weights[f"{prefix}.operator_norm.weight"]
+        )
+        self.add_initializer(
+            f"{prefix}.self_attn.q_proj.weight", self.weights[f"{prefix}.self_attn.q_proj.weight"].T
+        )
+        self.add_initializer(
+            f"{prefix}.self_attn.k_proj.weight", self.weights[f"{prefix}.self_attn.k_proj.weight"].T
+        )
+        self.add_initializer(
+            f"{prefix}.self_attn.v_proj.weight", self.weights[f"{prefix}.self_attn.v_proj.weight"].T
+        )
+        self.add_initializer(
+            f"{prefix}.self_attn.q_layernorm.weight",
+            self.weights[f"{prefix}.self_attn.q_layernorm.weight"],
+        )
+        self.add_initializer(
+            f"{prefix}.self_attn.k_layernorm.weight",
+            self.weights[f"{prefix}.self_attn.k_layernorm.weight"],
+        )
+        self.add_initializer(
+            f"{prefix}.self_attn.out_proj.weight",
+            self.weights[f"{prefix}.self_attn.out_proj.weight"].T,
+        )
+        self.add_initializer(f"{prefix}.ffn_norm.weight", self.weights[f"{prefix}.ffn_norm.weight"])
+        self.add_initializer(
+            f"{prefix}.feed_forward.w1.weight", self.weights[f"{prefix}.feed_forward.w1.weight"].T
+        )
+        self.add_initializer(
+            f"{prefix}.feed_forward.w3.weight", self.weights[f"{prefix}.feed_forward.w3.weight"].T
+        )
+        self.add_initializer(
+            f"{prefix}.feed_forward.w2.weight", self.weights[f"{prefix}.feed_forward.w2.weight"].T
+        )
 
         residual = hidden_state
 
         # Operator LayerNorm
-        normed = self.make_layernorm(hidden_state, f"{prefix}.operator_norm.weight",
-                                      f"{prefix}/op_norm")
+        normed = self.make_layernorm(
+            hidden_state, f"{prefix}.operator_norm.weight", f"{prefix}/op_norm"
+        )
 
         # Q, K, V projections
         # Q: [B, S, H] -> [B, S, nh*hd] = [B, S, 2048]
@@ -390,43 +505,79 @@ class LFM2Builder:
         # Q norm: Reshape to [B, -1, head_dim] for per-head norm, then back to [B, -1, hidden_size]
         # This flattens batch*seq*heads into the middle dimension
         self.add_initializer(f"{prefix}/q_reshape_for_norm", np.array([0, -1, hd], dtype=np.int64))
-        q_for_norm = self.make_node("Reshape", [q, f"{prefix}/q_reshape_for_norm"], [f"{prefix}/q_for_norm"])
-        q_normed = self.make_layernorm(q_for_norm, f"{prefix}.self_attn.q_layernorm.weight", f"{prefix}/q_normed")
+        q_for_norm = self.make_node(
+            "Reshape", [q, f"{prefix}/q_reshape_for_norm"], [f"{prefix}/q_for_norm"]
+        )
+        q_normed = self.make_layernorm(
+            q_for_norm, f"{prefix}.self_attn.q_layernorm.weight", f"{prefix}/q_normed"
+        )
         self.add_initializer(f"{prefix}/q_reshape_back", np.array([0, -1, H], dtype=np.int64))
         q_3d = self.make_node("Reshape", [q_normed, f"{prefix}/q_reshape_back"], [f"{prefix}/q_3d"])
 
         # K norm: Reshape to [B, -1, head_dim] for per-head norm, then back to [B, -1, kv_hidden_size]
         kv_hidden = nkv * hd
         self.add_initializer(f"{prefix}/k_reshape_for_norm", np.array([0, -1, hd], dtype=np.int64))
-        k_for_norm = self.make_node("Reshape", [k, f"{prefix}/k_reshape_for_norm"], [f"{prefix}/k_for_norm"])
-        k_normed = self.make_layernorm(k_for_norm, f"{prefix}.self_attn.k_layernorm.weight", f"{prefix}/k_normed")
-        self.add_initializer(f"{prefix}/k_reshape_back", np.array([0, -1, kv_hidden], dtype=np.int64))
+        k_for_norm = self.make_node(
+            "Reshape", [k, f"{prefix}/k_reshape_for_norm"], [f"{prefix}/k_for_norm"]
+        )
+        k_normed = self.make_layernorm(
+            k_for_norm, f"{prefix}.self_attn.k_layernorm.weight", f"{prefix}/k_normed"
+        )
+        self.add_initializer(
+            f"{prefix}/k_reshape_back", np.array([0, -1, kv_hidden], dtype=np.int64)
+        )
         k_3d = self.make_node("Reshape", [k_normed, f"{prefix}/k_reshape_back"], [f"{prefix}/k_3d"])
 
         # RoPE - use num_heads=0 and rotary_embedding_dim=0 to let operator infer
-        q_rope = self.make_node("RotaryEmbedding",
-                                [q_3d, "position_ids", "cos_cache", "sin_cache"],
-                                [f"{prefix}/q_rope"],
-                                domain="com.microsoft", interleaved=0, num_heads=0, rotary_embedding_dim=0)
-        k_rope = self.make_node("RotaryEmbedding",
-                                [k_3d, "position_ids", "cos_cache", "sin_cache"],
-                                [f"{prefix}/k_rope"],
-                                domain="com.microsoft", interleaved=0, num_heads=0, rotary_embedding_dim=0)
+        q_rope = self.make_node(
+            "RotaryEmbedding",
+            [q_3d, "position_ids", "cos_cache", "sin_cache"],
+            [f"{prefix}/q_rope"],
+            domain="com.microsoft",
+            interleaved=0,
+            num_heads=0,
+            rotary_embedding_dim=0,
+        )
+        k_rope = self.make_node(
+            "RotaryEmbedding",
+            [k_3d, "position_ids", "cos_cache", "sin_cache"],
+            [f"{prefix}/k_rope"],
+            domain="com.microsoft",
+            interleaved=0,
+            num_heads=0,
+            rotary_embedding_dim=0,
+        )
 
         # GroupQueryAttention (all inputs are 3D: [B, S, heads*hd])
-        scale = 1.0 / (hd ** 0.5)  # 0.125 for head_dim=64
-        self.make_node("GroupQueryAttention",
-                       [q_rope, k_rope, v,
-                        f"past_key_values.{layer_idx}.key", f"past_key_values.{layer_idx}.value",
-                        "/attn_mask/seqlens_k", "/attn_mask/total_seq",
-                        "", ""],  # cos/sin cache (empty, we apply rotary before)
-                       [f"{prefix}/attn_out", f"present.{layer_idx}.key", f"present.{layer_idx}.value"],
-                       domain="com.microsoft",
-                       num_heads=nh, kv_num_heads=nkv, scale=scale,
-                       local_window_size=-1, softcap=0.0, do_rotary=0, rotary_interleaved=0)
+        scale = 1.0 / (hd**0.5)  # 0.125 for head_dim=64
+        self.make_node(
+            "GroupQueryAttention",
+            [
+                q_rope,
+                k_rope,
+                v,
+                f"past_key_values.{layer_idx}.key",
+                f"past_key_values.{layer_idx}.value",
+                "/attn_mask/seqlens_k",
+                "/attn_mask/total_seq",
+                "",
+                "",
+            ],  # cos/sin cache (empty, we apply rotary before)
+            [f"{prefix}/attn_out", f"present.{layer_idx}.key", f"present.{layer_idx}.value"],
+            domain="com.microsoft",
+            num_heads=nh,
+            kv_num_heads=nkv,
+            scale=scale,
+            local_window_size=-1,
+            softcap=0.0,
+            do_rotary=0,
+            rotary_interleaved=0,
+        )
 
         # Output projection (attn_out is [B, S, H] from GQA)
-        o_proj = self.make_matmul(f"{prefix}/attn_out", f"{prefix}.self_attn.out_proj.weight", f"{prefix}/o_proj")
+        o_proj = self.make_matmul(
+            f"{prefix}/attn_out", f"{prefix}.self_attn.out_proj.weight", f"{prefix}/o_proj"
+        )
 
         # Residual
         hidden_state = self.make_add(residual, o_proj, f"{prefix}/residual1")
@@ -443,8 +594,9 @@ class LFM2Builder:
         residual = hidden_state
 
         # FFN LayerNorm
-        normed = self.make_layernorm(hidden_state, f"{prefix}.ffn_norm.weight",
-                                      f"{prefix}/ffn_norm")
+        normed = self.make_layernorm(
+            hidden_state, f"{prefix}.ffn_norm.weight", f"{prefix}/ffn_norm"
+        )
 
         # Gate (w1) and Up (w3)
         gate = self.make_matmul(normed, f"{prefix}.feed_forward.w1.weight", f"{prefix}/mlp_gate")
@@ -466,22 +618,25 @@ class LFM2Builder:
         """Build LM head."""
         # Final LayerNorm using SkipSimplifiedLayerNormalization (fused op)
         # Pass hidden_state as both input and skip for better numerical stability
-        self.add_initializer("model.embedding_norm.weight",
-                             self.weights["model.embedding_norm.weight"])
-        normed = self.make_skip_layernorm(hidden_state, hidden_state,
-                                          "model.embedding_norm.weight", "final_norm")
+        self.add_initializer(
+            "model.embedding_norm.weight", self.weights["model.embedding_norm.weight"]
+        )
+        normed = self.make_skip_layernorm(
+            hidden_state, hidden_state, "model.embedding_norm.weight", "final_norm"
+        )
 
         # LM head with tied embeddings - use Transpose to share weights
         # This reuses model.embed_tokens.weight instead of storing a separate copy
-        self.make_node("Transpose", ["model.embed_tokens.weight"], ["lm_head.weight_transposed"],
-                       perm=[1, 0])
+        self.make_node(
+            "Transpose", ["model.embed_tokens.weight"], ["lm_head.weight_transposed"], perm=[1, 0]
+        )
 
         return self.make_matmul(normed, "lm_head.weight_transposed", "logits")
 
     def load_weights(self, model_path: str):
         """Load weights from HuggingFace model."""
-        from transformers import AutoModelForCausalLM
         import torch
+        from transformers import AutoModelForCausalLM
 
         logger.info(f"Loading weights from {model_path}...")
         model = AutoModelForCausalLM.from_pretrained(
@@ -551,6 +706,7 @@ class LFM2Builder:
 def export_model(model_path: str, output_dir: str):
     """Export LFM2 model to ONNX."""
     import os
+
     from transformers import AutoConfig, AutoTokenizer
 
     # Load config
@@ -573,8 +729,13 @@ def export_model(model_path: str, output_dir: str):
     if os.path.exists(external_data_path):
         os.remove(external_data_path)
 
-    onnx.save_model(model, output_path, save_as_external_data=True,
-                    all_tensors_to_one_file=True, location="model.onnx_data")
+    onnx.save_model(
+        model,
+        output_path,
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="model.onnx_data",
+    )
 
     logger.info(f"Model saved to {output_path}")
 
@@ -585,12 +746,13 @@ def export_model(model_path: str, output_dir: str):
 
     # Create generation_config.json (required by Transformers.js)
     import json
+
     gen_config = {
         "_from_model_config": True,
         "bos_token_id": config.bos_token_id,
         "eos_token_id": config.eos_token_id,
-        "pad_token_id": getattr(config, 'pad_token_id', 0),
-        "transformers_version": "4.54.0"
+        "pad_token_id": getattr(config, "pad_token_id", 0),
+        "transformers_version": "4.54.0",
     }
     gen_config_path = os.path.join(output_dir, "generation_config.json")
     with open(gen_config_path, "w") as f:
@@ -598,11 +760,11 @@ def export_model(model_path: str, output_dir: str):
 
     # Add transformers.js_config to config.json (for external data support)
     config_path = os.path.join(output_dir, "config.json")
-    with open(config_path, "r") as f:
+    with open(config_path) as f:
         cfg = json.load(f)
     cfg["transformers.js_config"] = {
         "kv_cache_dtype": {"fp32": "float32"},
-        "use_external_data_format": True
+        "use_external_data_format": True,
     }
     with open(config_path, "w") as f:
         json.dump(cfg, f, indent=2)
@@ -619,7 +781,7 @@ def export_model(model_path: str, output_dir: str):
 
         # Ensure it's also in tokenizer_config.json
         if os.path.exists(tokenizer_config_path):
-            with open(tokenizer_config_path, "r") as f:
+            with open(tokenizer_config_path) as f:
                 tok_cfg = json.load(f)
             if "chat_template" not in tok_cfg:
                 tok_cfg["chat_template"] = tokenizer.chat_template
@@ -633,26 +795,3 @@ def export_model(model_path: str, output_dir: str):
     logger.info(f"Model size: {size_mb:.2f} MB + {data_size_gb:.2f} GB data")
 
     return output_path
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Export LFM2 to ONNX")
-    parser.add_argument("--model", type=str, required=True, help="Model path")
-    parser.add_argument("--output", type=str, required=True, help="Output directory")
-    parser.add_argument("--verify", action="store_true", help="Verify against PyTorch after export")
-    parser.add_argument("--community", type=str, help="Community ONNX path for comparison")
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
-    export_model(args.model, args.output)
-
-    if args.verify:
-        from verify import NumericalVerifier
-        verifier = NumericalVerifier(args.model)
-        verifier.verify_against_pytorch(args.output)
-        if args.community:
-            verifier.verify_against_community(args.output, args.community)
-        verifier.test_generation(args.output)
-        verifier.print_report()
