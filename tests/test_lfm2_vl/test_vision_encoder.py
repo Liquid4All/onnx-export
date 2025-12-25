@@ -11,21 +11,14 @@ import pathlib
 import numpy as np
 import pytest
 import torch
+from helpers import skip_if_missing
 from PIL import Image
-from test_lfm2_vl.helpers import (
-    assert_results,
-    bits_to_str,
-    compare_arrays,
-    compare_correlation,
-    get_onnx_file,
-    get_tolerances,
-    get_vl_onnx_dir,
-    load_onnx_session,
-    pad_to_square,
-    skip_if_missing,
-)
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
+from liquidonnx.lfm2_vl.inference import get_onnx_dir, get_onnx_file, load_onnx_session
+from liquidonnx.lfm2_vl.preprocessing import pad_to_square
+from liquidonnx.quantize import bits_to_str
+from liquidonnx.verify import check_results, compare_arrays, compare_correlation, get_tolerances
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +117,7 @@ def test_vision_encoder(
     size, model, processor = pytorch_model
     logger.info(f"Testing vision encoder {size}/tiled/{bits_to_str(vision_bits)}")
 
-    onnx_dir = get_vl_onnx_dir(exports_dir, size, VISION_MODE_TILED)
+    onnx_dir = get_onnx_dir(exports_dir, size, VISION_MODE_TILED)
     skip_if_missing(onnx_dir, "Export not found")
 
     embed_images_file = get_onnx_file(onnx_dir, "embed_images", vision_bits)
@@ -138,4 +131,4 @@ def test_vision_encoder(
         embed_images_sess, inputs, pytorch_embeddings, checks, vision_bits
     )
 
-    assert_results(results, logger)
+    check_results(results, logger)

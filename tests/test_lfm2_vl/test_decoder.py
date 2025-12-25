@@ -6,19 +6,12 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from test_lfm2_vl.helpers import (
-    assert_results,
-    bits_to_str,
-    compare_arrays,
-    compare_top_k,
-    get_onnx_file,
-    get_tolerances,
-    get_vl_onnx_dir,
-    load_onnx_session,
-    skip_if_missing,
-)
+from helpers import skip_if_missing
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
+from liquidonnx.lfm2_vl.inference import get_onnx_dir, get_onnx_file, load_onnx_session
+from liquidonnx.quantize import bits_to_str
+from liquidonnx.verify import check_results, compare_arrays, compare_top_k, get_tolerances
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +38,7 @@ def test_decoder(
     size, model, processor = pytorch_model
     logger.info(f"Testing {size}/{bits_to_str(decoder_bits)}: '{prompt}'")
 
-    onnx_dir = get_vl_onnx_dir(exports_dir, size, VISION_MODE_TILED)
+    onnx_dir = get_onnx_dir(exports_dir, size, VISION_MODE_TILED)
     skip_if_missing(onnx_dir, "Export not found")
 
     decoder_file = get_onnx_file(onnx_dir, "decoder", decoder_bits)
@@ -99,4 +92,4 @@ def test_decoder(
     if "top_k" in checks:
         results.append(compare_top_k(f"top-5: '{prompt[:20]}...'", pytorch_logits, onnx_logits))
 
-    assert_results(results, logger)
+    check_results(results, logger)

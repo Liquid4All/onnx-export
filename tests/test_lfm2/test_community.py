@@ -18,12 +18,9 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from test_lfm2.helpers import (
-    get_onnx_dir,
-    get_onnx_file,
-    load_onnx_session,
-    skip_if_missing,
-)
+from helpers import skip_if_missing
+
+from liquidonnx.lfm2.inference import get_onnx_dir, get_onnx_file, load_onnx_session
 
 logger = logging.getLogger(__name__)
 
@@ -184,9 +181,9 @@ def test_community_comparison(
     )
 
     # Determine winner
-    if local_metrics['max_diff'] < community_metrics['max_diff']:
+    if local_metrics["max_diff"] < community_metrics["max_diff"]:
         winner = "LOCAL"
-    elif community_metrics['max_diff'] < local_metrics['max_diff']:
+    elif community_metrics["max_diff"] < local_metrics["max_diff"]:
         winner = "COMMUNITY"
     else:
         winner = "TIE"
@@ -195,9 +192,9 @@ def test_community_comparison(
     # Assert both produce reasonable results (top-1 match with PyTorch)
     min_overlap = 4 if bits is None else 3
 
-    assert local_metrics['top5_overlap'] >= min_overlap, (
+    assert local_metrics["top5_overlap"] >= min_overlap, (
         f"Local top-5 overlap too low: {local_metrics['top5_overlap']}/5"
     )
-    assert community_metrics['top5_overlap'] >= min_overlap, (
+    assert community_metrics["top5_overlap"] >= min_overlap, (
         f"Community top-5 overlap too low: {community_metrics['top5_overlap']}/5"
     )

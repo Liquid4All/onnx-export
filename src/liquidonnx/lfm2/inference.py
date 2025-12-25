@@ -19,6 +19,28 @@ from transformers import AutoTokenizer
 logger = logging.getLogger(__name__)
 
 
+def get_onnx_dir(exports_dir: pathlib.Path, size: str) -> pathlib.Path:
+    """Get ONNX directory for a model size."""
+    return exports_dir / f"LFM2-{size}-ONNX" / "onnx"
+
+
+def get_onnx_file(onnx_dir: pathlib.Path, bits: int | None) -> pathlib.Path:
+    """Get ONNX model file for given quantization.
+
+    Args:
+        onnx_dir: Directory containing ONNX files
+        bits: None for fp32, 4 for q4, 8 for q8
+    """
+    if bits is None:
+        return onnx_dir / "model.onnx"
+    return onnx_dir / f"model_q{bits}.onnx"
+
+
+def load_onnx_session(onnx_path: pathlib.Path) -> ort.InferenceSession:
+    """Load ONNX model as inference session."""
+    return ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+
+
 class TextModelInference:
     """ONNX inference for LFM2 text models."""
 

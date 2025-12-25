@@ -38,6 +38,33 @@ from liquidonnx.lfm2_vl.preprocessing import (
 logger = logging.getLogger(__name__)
 
 
+def get_onnx_dir(exports_dir: Path, size: str, vision_mode: str) -> Path:
+    """Get ONNX directory for a VL model size and vision mode."""
+    return exports_dir / f"LFM2-VL-{size}-ONNX-{vision_mode}"
+
+
+def get_onnx_file(onnx_dir: Path, name: str, bits: int | None) -> Path:
+    """Get ONNX model file for given component and quantization.
+
+    Args:
+        onnx_dir: Directory containing ONNX files
+        name: Component name (embed_tokens, embed_images, decoder)
+        bits: None for fp32, 4 for q4, 8 for q8
+    """
+    if bits:
+        return onnx_dir / "onnx" / f"{name}_q{bits}.onnx"
+    return onnx_dir / "onnx" / f"{name}_fp32.onnx"
+
+
+def load_onnx_session(onnx_dir: Path, filename: str) -> ort.InferenceSession:
+    """Load ONNX model as inference session."""
+    path = onnx_dir / "onnx" / filename
+    if not path.exists():
+        raise FileNotFoundError(f"{filename} not found in {onnx_dir / 'onnx'}")
+    logger.info(f"Loading {filename}...")
+    return ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+
+
 class VLModelInference:
     """ONNX inference for LFM2-VL models."""
 
@@ -118,7 +145,7 @@ class VLModelInference:
             else:
                 # Tiled format: use liquidonnx preprocess_tiled
                 pixel_values, patch_attention_mask, _ = preprocess_tiled(
-                    image, self.processor, do_image_splitting=False, pad_to_square=True
+                    image, self.processor, do_image_splitting=False, do_pad_to_square=True
                 )
                 outputs = self.embed_images_sess.run(
                     None,

@@ -21,6 +21,30 @@ from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 logger = logging.getLogger(__name__)
 
 
+def pad_to_square(image: Image.Image) -> Image.Image:
+    """Pad image to square with black borders, centered."""
+    w, h = image.size
+    if w == h:
+        return image
+    max_dim = max(w, h)
+    square_img = Image.new("RGB", (max_dim, max_dim), (0, 0, 0))
+    paste_x = (max_dim - w) // 2
+    paste_y = (max_dim - h) // 2
+    square_img.paste(image, (paste_x, paste_y))
+    return square_img
+
+
+def get_image_token_id(tokenizer) -> int:
+    """Get the image token ID from tokenizer."""
+    for token_name in ["<image>", "<|image|>", "[IMG]"]:
+        token_id = tokenizer.convert_tokens_to_ids(token_name)
+        if token_id != tokenizer.unk_token_id:
+            return token_id
+    if hasattr(tokenizer, "image_token_id"):
+        return tokenizer.image_token_id
+    raise ValueError("Could not find image token ID")
+
+
 @dataclass
 class VLConfig:
     """Configuration for VL model inference.
@@ -228,7 +252,7 @@ def preprocess_tiled(
     image: Image.Image,
     processor,
     do_image_splitting: bool = False,
-    pad_to_square: bool = True,
+    do_pad_to_square: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Preprocess image for tiled format ONNX model.
 
@@ -238,8 +262,8 @@ def preprocess_tiled(
         image: PIL Image to preprocess
         processor: HuggingFace processor with image_processor
         do_image_splitting: Whether to split large images into tiles
-        pad_to_square: If True, pad non-square images to square first
-                      (recommended for ONNX models that assume square input)
+        do_pad_to_square: If True, pad non-square images to square first
+                          (recommended for ONNX models that assume square input)
 
     Returns:
         (pixel_values, patch_attention_mask, spatial_shapes) where:
@@ -247,16 +271,8 @@ def preprocess_tiled(
         - patch_attention_mask: [num_tiles, num_patches] int64 array
         - spatial_shapes: [num_tiles, 2] int64 array with (H, W) per tile
     """
-    # Optionally pad to square for ONNX compatibility
-    if pad_to_square:
-        w, h = image.size
-        if w != h:
-            max_dim = max(w, h)
-            square_img = Image.new("RGB", (max_dim, max_dim), (0, 0, 0))
-            paste_x = (max_dim - w) // 2
-            paste_y = (max_dim - h) // 2
-            square_img.paste(image, (paste_x, paste_y))
-            image = square_img
+    if do_pad_to_square:
+        image = pad_to_square(image)
 
     # Use processor's image_processor for patch extraction
     inputs = processor.image_processor(
@@ -279,7 +295,7 @@ def get_image_embeddings(
     processor=None,
     config: VLConfig | None = None,
     do_image_splitting: bool = False,
-    pad_to_square: bool = True,
+    do_pad_to_square: bool = True,
 ) -> list[np.ndarray]:
     """Get image embeddings from ONNX vision encoder.
 
@@ -292,7 +308,7 @@ def get_image_embeddings(
         processor: HuggingFace processor (required for tiled format)
         config: VLConfig for preprocessing parameters
         do_image_splitting: Whether to split large images into tiles
-        pad_to_square: For tiled format, whether to pad to square
+        do_pad_to_square: For tiled format, whether to pad to square
 
     Returns:
         List of embeddings, one per image. Each is [num_tokens, hidden_dim].
@@ -330,7 +346,7 @@ def get_image_embeddings(
                 image,
                 processor,
                 do_image_splitting=do_image_splitting,
-                pad_to_square=pad_to_square,
+                do_pad_to_square=do_pad_to_square,
             )
 
             outputs = session.run(

@@ -2,20 +2,14 @@
 
 import gc
 import logging
-import pathlib
 
 import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-logger = logging.getLogger(__name__)
+from liquidonnx.lfm2 import MODELS
 
-MODELS = {
-    "350M": "LiquidAI/LFM2-350M",
-    "700M": "LiquidAI/LFM2-700M",
-    "1.2B": "LiquidAI/LFM2-1.2B",
-    "2.6B": "LiquidAI/LFM2-2.6B",
-}
+logger = logging.getLogger(__name__)
 
 
 def load_pytorch_model(model_path: str) -> tuple:
@@ -45,9 +39,3 @@ def pytorch_model(request):
     del model
     del tokenizer
     gc.collect()
-
-
-@pytest.fixture(scope="session")
-def exports_dir() -> pathlib.Path:
-    """Base directory for ONNX exports."""
-    return pathlib.Path(__file__).parent.parent.parent / "exports"

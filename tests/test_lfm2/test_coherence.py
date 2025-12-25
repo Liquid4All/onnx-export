@@ -15,14 +15,11 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from test_lfm2.conftest import MODELS
-from test_lfm2.helpers import (
-    cosine_similarity,
-    get_onnx_dir,
-    get_onnx_file,
-    load_onnx_session,
-    skip_if_missing,
-)
+from helpers import skip_if_missing
+
+from liquidonnx.lfm2 import MODELS
+from liquidonnx.lfm2.inference import get_onnx_dir, get_onnx_file, load_onnx_session
+from liquidonnx.verify import cosine_similarity
 
 logger = logging.getLogger(__name__)
 

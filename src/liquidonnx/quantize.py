@@ -1,4 +1,9 @@
-"""INT4/INT8 Quantization for LFM2-VL ONNX models."""
+"""
+INT4/INT8 Quantization for ONNX models.
+
+Provides quantize_model() for converting FP32 ONNX models to INT4/INT8
+using MatMulNBits quantization.
+"""
 
 import logging
 import pathlib
@@ -12,25 +17,38 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
 logger = logging.getLogger(__name__)
 
 
+def bits_to_str(bits: int | None) -> str:
+    """Convert quantization bits to string representation."""
+    return f"q{bits}" if bits else "fp32"
+
+
 def find_lm_head_node(model) -> str | None:
     """Find the lm_head MatMul node name."""
     for node in model.graph.node:
         if node.op_type == "MatMul":
-            # Check if any input contains lm_head weight
             for inp in node.input:
                 if "lm_head" in inp.lower():
                     return node.name
     return None
 
 
+def get_model_size(path: pathlib.Path) -> tuple[float, float]:
+    """Return (model_mb, data_mb)."""
+    model_size = path.stat().st_size / 1e6 if path.exists() else 0
+    data_path = path.with_suffix(".onnx_data")
+    data_size = data_path.stat().st_size / 1e6 if data_path.exists() else 0
+    return model_size, data_size
+
+
 def quantize_model(
     model_path: pathlib.Path,
     output_path: pathlib.Path,
+    *,
     bits: int = 4,
     block_size: int = 32,
     exclude_lm_head: bool = True,
 ) -> pathlib.Path:
-    """Quantize a single ONNX model to INT4 or INT8.
+    """Quantize ONNX model to INT4 or INT8 using MatMulNBits.
 
     By default, lm_head is kept in FP32 (matches community approach).
     Use exclude_lm_head=False to quantize it as well.
@@ -38,12 +56,10 @@ def quantize_model(
     logger.info(f"Loading {model_path}...")
     model = onnx.load(str(model_path))
 
-    # Load external data if present
     external_data = model_path.with_suffix(".onnx_data")
     if external_data.exists():
         onnx.load_external_data_for_model(model, str(model_path.parent))
 
-    # Find nodes to exclude (lm_head for decoder)
     nodes_to_exclude = None
     if exclude_lm_head:
         lm_head_node = find_lm_head_node(model)
@@ -68,7 +84,7 @@ def quantize_model(
             block_size=block_size,
             is_symmetric=True,
             accuracy_level=4,
-            bits=8,
+            bits=bits,
         )
         quantizer = MatMulNBitsQuantizer(
             model,
@@ -86,7 +102,6 @@ def quantize_model(
 
     quantized_model = quantizer.model.model
 
-    # Remove any existing external data file
     external_data_path = output_path.parent / (output_path.stem + ".onnx_data")
     if external_data_path.exists():
         external_data_path.unlink()
@@ -98,14 +113,7 @@ def quantize_model(
         all_tensors_to_one_file=True,
         location=output_path.stem + ".onnx_data",
         size_threshold=1024,
+        convert_attribute=False,
     )
 
     return output_path
-
-
-def get_model_size(path: pathlib.Path) -> tuple[float, float]:
-    """Return (model_mb, data_mb)."""
-    model_size = path.stat().st_size / 1e6 if path.exists() else 0
-    data_path = path.with_suffix(".onnx_data")
-    data_size = data_path.stat().st_size / 1e6 if data_path.exists() else 0
-    return model_size, data_size

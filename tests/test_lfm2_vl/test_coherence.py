@@ -15,22 +15,18 @@ import pathlib
 import numpy as np
 import pytest
 import torch
+from helpers import skip_if_missing
 from PIL import Image
-from test_lfm2_vl.helpers import (
-    cosine_similarity,
-    get_image_token_id,
-    get_onnx_file,
-    get_vl_onnx_dir,
-    load_onnx_session,
-    pad_to_square,
-    skip_if_missing,
-)
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D, VISION_MODE_TILED, VISION_MODES
+from liquidonnx.lfm2_vl.inference import get_onnx_dir, get_onnx_file, load_onnx_session
 from liquidonnx.lfm2_vl.preprocessing import (
     detect_vision_format,
+    get_image_token_id,
+    pad_to_square,
     preprocess_conv2d,
 )
+from liquidonnx.verify import cosine_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -346,7 +342,7 @@ def test_coherence(
 ):
     size, model, processor = pytorch_model
 
-    onnx_dir = get_vl_onnx_dir(exports_dir, size, vision_mode)
+    onnx_dir = get_onnx_dir(exports_dir, size, vision_mode)
     skip_if_missing(onnx_dir, "Export not found")
 
     decoder_file = get_onnx_file(onnx_dir, "decoder", decoder_bits)
