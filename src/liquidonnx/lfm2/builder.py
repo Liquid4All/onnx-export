@@ -16,9 +16,6 @@ Layer Types:
     - Conv layers: Gated short convolution with depthwise conv1d
     - Attention layers: Grouped Query Attention with RoPE and Q/K normalization
 
-References:
-    - PyTorch: transformers.models.lfm2.modeling_lfm2
-    - HuggingFace: LiquidAI/LFM2-*
 """
 
 import logging

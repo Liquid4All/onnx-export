@@ -11,6 +11,7 @@ Output Structure (Transformers.js compatible):
     └── LFM2-VL-{size}-ONNX-{tiled|conv2d}/
         ├── config.json
         ├── tokenizer.json
+        ├── tokenizer_config.json
         └── onnx/
             ├── embed_tokens.onnx
             ├── embed_images.onnx

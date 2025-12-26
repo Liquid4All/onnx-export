@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 QUANT_CONFIGS = [
     pytest.param(None, id="fp32"),
     pytest.param(4, id="q4"),
+    pytest.param(8, id="q8"),
 ]
 
 PROMPTS = ["Hello, how are", "The sky is", "1 + 1 ="]
