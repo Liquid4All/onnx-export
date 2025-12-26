@@ -1,4 +1,10 @@
-"""Verify decoder ONNX export against PyTorch reference."""
+"""
+Verify decoder ONNX export against PyTorch reference.
+
+Run with:
+    uv run pytest tests/test_lfm2_vl/test_decoder.py -v
+    uv run pytest tests/test_lfm2_vl/test_decoder.py -v -k "450M and q4"
+"""
 
 import logging
 import pathlib

@@ -1,8 +1,13 @@
-"""Verify vision encoder ONNX export against PyTorch reference.
+"""
+Verify vision encoder ONNX export against PyTorch reference.
 
 Note: Only tests tiled format. Conv2d format uses different preprocessing
 (our preprocess_conv2d vs HuggingFace processor) which causes numerical
 differences. Coherence tests verify conv2d works end-to-end.
+
+Run with:
+    uv run pytest tests/test_lfm2_vl/test_vision_encoder.py -v
+    uv run pytest tests/test_lfm2_vl/test_vision_encoder.py -v -k "450M and q4"
 """
 
 import logging

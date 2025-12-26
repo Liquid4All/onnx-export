@@ -1,4 +1,10 @@
-"""Verify embed_tokens ONNX export against PyTorch reference."""
+"""
+Verify embed_tokens ONNX export against PyTorch reference.
+
+Run with:
+    uv run pytest tests/test_lfm2_vl/test_embed_tokens.py -v
+    uv run pytest tests/test_lfm2_vl/test_embed_tokens.py -v -k "450M"
+"""
 
 import logging
 import pathlib

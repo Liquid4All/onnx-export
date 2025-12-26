@@ -44,7 +44,7 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(dot / (norm_a * norm_b))
 
 
-def compare_logits_similarity(expected: list, actual: list) -> float:
+def compare_logits_similarity(expected: np.ndarray, actual: np.ndarray) -> float:
     """Compare sequences of logits, returning mean cosine similarity."""
     if len(expected) == 0 or len(actual) == 0:
         return 1.0
