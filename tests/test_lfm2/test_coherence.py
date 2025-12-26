@@ -20,7 +20,7 @@ from helpers import skip_if_missing
 from liquidonnx.lfm2 import MODELS
 from liquidonnx.lfm2.generate import get_onnx_dir
 from liquidonnx.session import get_onnx_file, load_onnx_session
-from liquidonnx.verify import cosine_similarity
+from liquidonnx.verify import compare_logits_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -141,15 +141,6 @@ def generate_onnx(
     return generated, np.stack(all_logits) if all_logits else np.array([])
 
 
-def compare_logits(pytorch_logits: np.ndarray, onnx_logits: np.ndarray) -> float:
-    """Compare logits and return average cosine similarity."""
-    if len(pytorch_logits) == 0 or len(onnx_logits) == 0:
-        return 1.0
-    min_steps = min(len(pytorch_logits), len(onnx_logits))
-    similarities = [cosine_similarity(pytorch_logits[i], onnx_logits[i]) for i in range(min_steps)]
-    return float(np.mean(similarities))
-
-
 def run_multi_turn_coherence(
     model,
     tokenizer,
@@ -185,8 +176,7 @@ def run_multi_turn_coherence(
             onnx_session, tokenizer, onnx_input, MAX_NEW_TOKENS
         )
 
-        # Compare logits
-        similarity = compare_logits(pytorch_logits, onnx_logits)
+        similarity = compare_logits_similarity(pytorch_logits, onnx_logits)
         similarities.append(similarity)
 
         # Decode responses

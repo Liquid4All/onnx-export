@@ -38,7 +38,7 @@ import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper
 
-from liquidonnx.lfm2 import LFM2Builder, LFM2Config
+from liquidonnx.lfm2.builder import LFM2Builder, LFM2Config
 from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 
 logger = logging.getLogger(__name__)
