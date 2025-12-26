@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 PROMPTS = ["Hello, how are", "The image shows", "I can see"]
 
-DECODER_CONFIGS = [
+QUANT_CONFIGS = [
     pytest.param(None, ["arrays", "top_k"], id="fp32"),
     pytest.param(4, ["top_k"], id="q4"),
     pytest.param(8, ["arrays", "top_k"], id="q8"),
@@ -27,7 +27,7 @@ DECODER_CONFIGS = [
 
 # pytorch_model outermost so same model runs consecutively (memory optimization)
 @pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
-@pytest.mark.parametrize("decoder_bits,checks", DECODER_CONFIGS)
+@pytest.mark.parametrize("decoder_bits,checks", QUANT_CONFIGS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_decoder(
     exports_dir: pathlib.Path,
