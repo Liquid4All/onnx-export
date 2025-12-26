@@ -26,7 +26,7 @@ from liquidonnx.lfm2_vl.preprocessing import (
     pad_to_square,
     preprocess_conv2d,
 )
-from liquidonnx.session import get_onnx_file, load_onnx_session
+from liquidonnx.session import get_onnx_file, initialize_cache, load_onnx_session, update_cache
 from liquidonnx.verify import compare_logits_similarity
 
 logger = logging.getLogger(__name__)
@@ -199,15 +199,7 @@ def generate_onnx(
     seq_len = inputs_embeds.shape[1]
     input_names = {inp.name for inp in decoder_sess.get_inputs()}
     has_position_ids = "position_ids" in input_names
-
-    # Initialize caches
-    cache = {}
-    for inp in decoder_sess.get_inputs():
-        if inp.name not in ["inputs_embeds", "attention_mask", "position_ids"]:
-            shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-            cache[inp.name] = np.zeros(shape, dtype=np.float32)
-
-    outputs_info = decoder_sess.get_outputs()
+    cache = initialize_cache(decoder_sess)
     all_logits = []
     generated_tokens = []
     cur_len = seq_len
@@ -231,18 +223,7 @@ def generate_onnx(
         result = decoder_sess.run(None, feed)
         logits = result[0][0, -1]
         all_logits.append(logits)
-
-        # Update caches
-        for i, out_info in enumerate(outputs_info[1:], 1):
-            out_name = out_info.name
-            if "present_conv" in out_name:
-                cache_name = out_name.replace("present_conv", "past_conv")
-            elif "present." in out_name:
-                cache_name = out_name.replace("present.", "past_key_values.")
-            else:
-                continue
-            if cache_name in cache:
-                cache[cache_name] = result[i]
+        update_cache(cache, result, decoder_sess.get_outputs())
 
         next_token = int(np.argmax(logits))
         generated_tokens.append(next_token)

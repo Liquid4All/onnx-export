@@ -19,7 +19,7 @@ from helpers import skip_if_missing
 
 from liquidonnx.lfm2 import MODELS
 from liquidonnx.lfm2.generate import get_onnx_dir
-from liquidonnx.session import get_onnx_file, load_onnx_session
+from liquidonnx.session import get_onnx_file, initialize_cache, load_onnx_session, update_cache
 from liquidonnx.verify import compare_logits_similarity
 
 logger = logging.getLogger(__name__)
@@ -89,15 +89,7 @@ def generate_onnx(
 
     input_names = {inp.name for inp in session.get_inputs()}
     has_position_ids = "position_ids" in input_names
-
-    # Initialize caches
-    cache = {}
-    for inp in session.get_inputs():
-        if inp.name not in ["input_ids", "attention_mask", "position_ids"]:
-            shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-            cache[inp.name] = np.zeros(shape, dtype=np.float32)
-
-    outputs_info = session.get_outputs()
+    cache = initialize_cache(session)
 
     for step in range(max_new_tokens):
         cur_len = len(generated)
@@ -119,18 +111,7 @@ def generate_onnx(
         result = session.run(None, feed)
         logits = result[0][0, -1]
         all_logits.append(logits)
-
-        # Update caches
-        for i, out_info in enumerate(outputs_info[1:], 1):
-            out_name = out_info.name
-            if "present_conv" in out_name:
-                cache_name = out_name.replace("present_conv", "past_conv")
-            elif "present." in out_name:
-                cache_name = out_name.replace("present.", "past_key_values.")
-            else:
-                continue
-            if cache_name in cache:
-                cache[cache_name] = result[i]
+        update_cache(cache, result, session.get_outputs())
 
         next_token = int(np.argmax(logits))
         generated.append(next_token)
