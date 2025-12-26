@@ -39,11 +39,16 @@ Usage:
 """
 
 import argparse
+import json
 import logging
+import os
 import pathlib
 
+import onnx
+from transformers import AutoConfig, AutoTokenizer
+
 from liquidonnx.lfm2 import MODELS
-from liquidonnx.lfm2.builder import export_model
+from liquidonnx.lfm2.builder import LFM2Builder, LFM2Config
 from liquidonnx.quantize import get_model_size, quantize_model
 
 logger = logging.getLogger(__name__)
@@ -54,10 +59,97 @@ def get_output_dir(size: str, output_base: pathlib.Path) -> pathlib.Path:
     return output_base / "exports" / f"LFM2-{size}-ONNX"
 
 
-def do_export(model_path: str, output_path: pathlib.Path):
-    """Export model to ONNX (FP32)."""
-    logger.info(f"Exporting {model_path} to {output_path}...")
-    export_model(model_path, str(output_path))
+def export_model(model_path: str, output_dir: str):
+    """Export LFM2 model to ONNX.
+
+    Creates output structure:
+        output_dir/
+        ├── config.json
+        ├── tokenizer.json
+        ├── generation_config.json
+        ├── chat_template.jinja
+        └── onnx/
+            ├── model.onnx
+            └── model.onnx_data
+    """
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    lfm2_config = LFM2Config.from_hf_config(config)
+
+    builder = LFM2Builder(lfm2_config)
+    model = builder.build(model_path)
+
+    os.makedirs(output_dir, exist_ok=True)
+    onnx_dir = os.path.join(output_dir, "onnx")
+    os.makedirs(onnx_dir, exist_ok=True)
+
+    output_path = os.path.join(onnx_dir, "model.onnx")
+
+    # Remove existing external data file to avoid appending
+    external_data_path = os.path.join(onnx_dir, "model.onnx_data")
+    if os.path.exists(external_data_path):
+        os.remove(external_data_path)
+
+    onnx.save_model(
+        model,
+        output_path,
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="model.onnx_data",
+    )
+
+    logger.info(f"Model saved to {output_path}")
+
+    # Copy tokenizer and config
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    tokenizer.save_pretrained(output_dir)
+    config.save_pretrained(output_dir)
+
+    # Create generation_config.json (required by Transformers.js)
+    gen_config = {
+        "_from_model_config": True,
+        "bos_token_id": config.bos_token_id,
+        "eos_token_id": config.eos_token_id,
+        "pad_token_id": getattr(config, "pad_token_id", 0),
+        "transformers_version": "4.54.0",
+    }
+    gen_config_path = os.path.join(output_dir, "generation_config.json")
+    with open(gen_config_path, "w") as f:
+        json.dump(gen_config, f, indent=2)
+
+    # Add transformers.js_config to config.json (for external data support)
+    config_path = os.path.join(output_dir, "config.json")
+    with open(config_path) as f:
+        cfg = json.load(f)
+    cfg["transformers.js_config"] = {
+        "kv_cache_dtype": {"fp32": "float32"},
+        "use_external_data_format": True,
+    }
+    with open(config_path, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+    # Save chat_template if available
+    tokenizer_config_path = os.path.join(output_dir, "tokenizer_config.json")
+    chat_template_path = os.path.join(output_dir, "chat_template.jinja")
+
+    if tokenizer.chat_template:
+        with open(chat_template_path, "w") as f:
+            f.write(tokenizer.chat_template)
+
+        if os.path.exists(tokenizer_config_path):
+            with open(tokenizer_config_path) as f:
+                tok_cfg = json.load(f)
+            if "chat_template" not in tok_cfg:
+                tok_cfg["chat_template"] = tokenizer.chat_template
+                with open(tokenizer_config_path, "w") as f:
+                    json.dump(tok_cfg, f, indent=2)
+
+    # Print summary
+    size_mb = os.path.getsize(output_path) / 1e6
+    data_path = os.path.join(onnx_dir, "model.onnx_data")
+    data_size_gb = os.path.getsize(data_path) / 1e9 if os.path.exists(data_path) else 0
+    logger.info(f"Model size: {size_mb:.2f} MB + {data_size_gb:.2f} GB data")
+
+    return output_path
 
 
 def do_quantize(onnx_dir: pathlib.Path, bits: int, exclude_lm_head: bool, block_size: int):
@@ -171,8 +263,10 @@ def main():
         logger.info("=" * 60)
 
         for size in sizes:
+            output_path = get_output_dir(size, args.output_dir)
+            logger.info(f"Exporting {MODELS[size]} to {output_path}...")
             try:
-                do_export(MODELS[size], get_output_dir(size, args.output_dir))
+                export_model(MODELS[size], str(output_path))
                 logger.info(f"  {size}: OK")
             except Exception as e:
                 logger.error(f"  {size}: FAILED - {e}")

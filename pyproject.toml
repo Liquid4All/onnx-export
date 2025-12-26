@@ -22,12 +22,12 @@ dev = [
 
 [project.scripts]
 # LFM2 text model tools
-lfm2-export = "liquidonnx.lfm2.tools.export:main"
+lfm2-export = "liquidonnx.lfm2.export:main"
 lfm2-infer = "liquidonnx.lfm2.generate:main"
 lfm2-bench = "liquidonnx.lfm2.benchmark:main"
 
 # LFM2-VL vision-language model tools
-lfm2-vl-export = "liquidonnx.lfm2_vl.tools.export:main"
+lfm2-vl-export = "liquidonnx.lfm2_vl.export:main"
 lfm2-vl-infer = "liquidonnx.lfm2_vl.generate:main"
 
 [build-system]

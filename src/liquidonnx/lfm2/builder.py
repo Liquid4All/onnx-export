@@ -8,6 +8,17 @@ The builder creates an optimized ONNX graph with fused operators:
 - SimplifiedLayerNormalization (com.microsoft)
 - RotaryEmbedding (com.microsoft)
 - GroupQueryAttention (com.microsoft)
+
+Architecture Overview:
+    input_ids → Embedding → [Conv/Attention Layers] → LayerNorm → LM Head → logits
+
+Layer Types:
+    - Conv layers: Gated short convolution with depthwise conv1d
+    - Attention layers: Grouped Query Attention with RoPE and Q/K normalization
+
+References:
+    - PyTorch: transformers.models.lfm2.modeling_lfm2
+    - HuggingFace: LiquidAI/LFM2-*
 """
 
 import logging
@@ -18,6 +29,10 @@ import onnx
 from onnx import TensorProto, helper, numpy_helper
 
 logger = logging.getLogger(__name__)
+
+# Constants for ONNX slice operations
+# Large value for ONNX Slice "end" parameter (means "slice to end")
+SLICE_END = np.array([np.iinfo(np.int64).max], dtype=np.int64)
 
 
 @dataclass
@@ -155,6 +170,117 @@ class LFM2Builder:
         """Create SiLU activation (x * sigmoid(x))."""
         sigmoid_out = self.make_sigmoid(input_name, f"{output_name}_sigmoid")
         return self.make_mul(input_name, sigmoid_out, output_name)
+
+    def make_linear(
+        self, input_name: str, weight_key: str, output_prefix: str, transpose: bool = True
+    ) -> str:
+        """Create linear projection (MatMul with weight).
+
+        Args:
+            input_name: Input tensor name
+            weight_key: Key in self.weights dict
+            output_prefix: Prefix for output tensor name
+            transpose: Whether to transpose weight (True for [out, in] -> [in, out])
+
+        Returns:
+            Output tensor name
+        """
+        weight = self.weights[weight_key]
+        if transpose:
+            weight = weight.T
+        weight_name = weight_key.replace(".", "_")
+        self.add_initializer(weight_name, weight)
+        return self.make_matmul(input_name, weight_name, f"{output_prefix}/linear")
+
+    def make_slice_last_n(
+        self, input_name: str, n_elements: str, output_name: str, axis: int = 2
+    ) -> str:
+        """Slice last N elements along axis (dynamic N).
+
+        Args:
+            input_name: Input tensor name
+            n_elements: Name of scalar tensor containing N
+            output_name: Output tensor name
+            axis: Axis to slice along
+
+        Returns:
+            Output tensor name
+        """
+        prefix = f"{output_name}_slice"
+        # Negate n to get start position from end
+        self.add_initializer(f"{prefix}/neg1", np.array(-1, dtype=np.int64))
+        neg_n = self.make_node("Mul", [n_elements, f"{prefix}/neg1"], [f"{prefix}/neg_n"])
+        # Unsqueeze for slice
+        self.add_initializer(f"{prefix}/axes0", np.array([0], dtype=np.int64))
+        start = self.make_node("Unsqueeze", [neg_n, f"{prefix}/axes0"], [f"{prefix}/start"])
+        # Slice to end
+        self.add_initializer(f"{prefix}/end", SLICE_END.copy())
+        self.add_initializer(f"{prefix}/axis", np.array([axis], dtype=np.int64))
+        return self.make_node(
+            "Slice", [input_name, start, f"{prefix}/end", f"{prefix}/axis"], [output_name]
+        )
+
+    def prepare_layer_weights(self, layer_idx: int, layer_type: str):
+        """Prepare and register weights for a layer.
+
+        Handles weight transposition and naming for MatMul operations.
+        Call this before building the layer graph.
+        """
+        prefix = f"model.layers.{layer_idx}"
+
+        # Common weights
+        self.add_initializer(
+            f"{prefix}.operator_norm.weight", self.weights[f"{prefix}.operator_norm.weight"]
+        )
+        self.add_initializer(f"{prefix}.ffn_norm.weight", self.weights[f"{prefix}.ffn_norm.weight"])
+
+        # MLP weights (transposed for MatMul)
+        self.add_initializer(
+            f"{prefix}.feed_forward.w1.weight", self.weights[f"{prefix}.feed_forward.w1.weight"].T
+        )
+        self.add_initializer(
+            f"{prefix}.feed_forward.w3.weight", self.weights[f"{prefix}.feed_forward.w3.weight"].T
+        )
+        self.add_initializer(
+            f"{prefix}.feed_forward.w2.weight", self.weights[f"{prefix}.feed_forward.w2.weight"].T
+        )
+
+        if layer_type == "conv":
+            self.add_initializer(
+                f"{prefix}.conv.in_proj.weight", self.weights[f"{prefix}.conv.in_proj.weight"].T
+            )
+            self.add_initializer(
+                f"{prefix}.conv.weight", self.weights[f"{prefix}.conv.conv.weight"]
+            )
+            self.add_initializer(
+                f"{prefix}.conv.out_proj.weight", self.weights[f"{prefix}.conv.out_proj.weight"].T
+            )
+        else:
+            # Attention weights (transposed for MatMul)
+            self.add_initializer(
+                f"{prefix}.self_attn.q_proj.weight",
+                self.weights[f"{prefix}.self_attn.q_proj.weight"].T,
+            )
+            self.add_initializer(
+                f"{prefix}.self_attn.k_proj.weight",
+                self.weights[f"{prefix}.self_attn.k_proj.weight"].T,
+            )
+            self.add_initializer(
+                f"{prefix}.self_attn.v_proj.weight",
+                self.weights[f"{prefix}.self_attn.v_proj.weight"].T,
+            )
+            self.add_initializer(
+                f"{prefix}.self_attn.q_layernorm.weight",
+                self.weights[f"{prefix}.self_attn.q_layernorm.weight"],
+            )
+            self.add_initializer(
+                f"{prefix}.self_attn.k_layernorm.weight",
+                self.weights[f"{prefix}.self_attn.k_layernorm.weight"],
+            )
+            self.add_initializer(
+                f"{prefix}.self_attn.out_proj.weight",
+                self.weights[f"{prefix}.self_attn.out_proj.weight"].T,
+            )
 
     def build_inputs(self):
         """Create model inputs."""
@@ -310,46 +436,54 @@ class LFM2Builder:
         )
 
     def build_conv_layer(self, layer_idx: int, hidden_state: str) -> str:
-        """Build a conv/SSM layer."""
+        """Build a conv/SSM layer.
+
+        Graph structure (matches PyTorch Lfm2ShortConv):
+            hidden_state
+                ↓
+            LayerNorm (operator_norm)
+                ↓
+            Linear (in_proj) → [B, S, 3H]
+                ↓
+            Transpose → [B, 3H, S]
+                ↓
+            Split → B[B,H,S], C[B,H,S], x[B,H,S]
+                ↓
+            Bx = B * x  (gating, no sigmoid)
+                ↓
+            Concat(past_cache, Bx) → [B, H, L+S]
+                ↓
+            Conv1D (depthwise, kernel=3, groups=H)
+                ↓
+            Slice (last S elements) → conv_out
+                ↓
+            y = C * conv_out  (output gating)
+                ↓
+            Transpose → [B, S, H]
+                ↓
+            Linear (out_proj)
+                ↓
+            Add (residual)
+                ↓
+            MLP block
+
+        Cache: last L elements of concat input → present_conv.{layer_idx}
+        """
         prefix = f"model.layers.{layer_idx}"
         L = self.config.conv_L_cache
-
-        # Load weights (using actual HF weight names)
-        self.add_initializer(
-            f"{prefix}.operator_norm.weight", self.weights[f"{prefix}.operator_norm.weight"]
-        )
-        self.add_initializer(
-            f"{prefix}.conv.in_proj.weight", self.weights[f"{prefix}.conv.in_proj.weight"].T
-        )
-        self.add_initializer(f"{prefix}.conv.weight", self.weights[f"{prefix}.conv.conv.weight"])
-        self.add_initializer(
-            f"{prefix}.conv.out_proj.weight", self.weights[f"{prefix}.conv.out_proj.weight"].T
-        )
-        self.add_initializer(f"{prefix}.ffn_norm.weight", self.weights[f"{prefix}.ffn_norm.weight"])
-        self.add_initializer(
-            f"{prefix}.feed_forward.w1.weight", self.weights[f"{prefix}.feed_forward.w1.weight"].T
-        )
-        self.add_initializer(
-            f"{prefix}.feed_forward.w3.weight", self.weights[f"{prefix}.feed_forward.w3.weight"].T
-        )
-        self.add_initializer(
-            f"{prefix}.feed_forward.w2.weight", self.weights[f"{prefix}.feed_forward.w2.weight"].T
-        )
-
-        residual = hidden_state
         H = self.config.hidden_size
+        residual = hidden_state
 
-        # Operator LayerNorm
+        # === Operator LayerNorm ===
         normed = self.make_layernorm(
             hidden_state, f"{prefix}.operator_norm.weight", f"{prefix}/op_norm"
         )
 
-        # In projection: [B, S, H] -> [B, S, 3H]
+        # === In projection + Split ===
+        # in_proj: [B, S, H] → [B, S, 3H]
         in_proj = self.make_matmul(normed, f"{prefix}.conv.in_proj.weight", f"{prefix}/in_proj")
-
-        # Transpose for Split: [B, S, 3H] -> [B, 3H, S]
+        # Transpose: [B, S, 3H] → [B, 3H, S]
         in_proj_t = self.make_node("Transpose", [in_proj], [f"{prefix}/in_proj_t"], perm=[0, 2, 1])
-
         # Split into B, C, x (each [B, H, S])
         self.add_initializer(f"{prefix}/split_sizes", np.array([H, H, H], dtype=np.int64))
         self.make_node(
@@ -359,210 +493,163 @@ class LFM2Builder:
             axis=1,
         )
 
-        # Bx = B * x (no sigmoid, just multiply)
+        # === Gated convolution ===
+        # Bx = B * x (input gating)
         Bx = self.make_mul(f"{prefix}/B", f"{prefix}/x", f"{prefix}/Bx")
-
-        # Concat with past conv cache: [B, H, L] + [B, H, S] -> [B, H, L+S]
+        # Concat with cache: [B, H, L] + [B, H, S] → [B, H, L+S]
         conv_input = self.make_node(
             "Concat", [f"past_conv.{layer_idx}", Bx], [f"{prefix}/conv_input"], axis=2
         )
-
-        # Conv1D (depthwise): kernel_shape = 3 (matches weight shape [H, 1, 3])
+        # Depthwise Conv1D (kernel=3)
         conv_out_full = self.make_node(
             "Conv",
             [conv_input, f"{prefix}.conv.weight"],
             [f"{prefix}/conv_out_full"],
-            kernel_shape=[3],
+            kernel_shape=[L],
             group=H,
         )
 
-        # Slice conv output to match sequence length (take last S elements)
-        # Get shape of Bx to determine sequence length dynamically
+        # === Dynamic slice for conv output ===
+        # Get sequence length from Bx shape
         self.make_node("Shape", [Bx], [f"{prefix}/bx_shape"])
-        self.add_initializer(f"{prefix}/const_2_scalar", np.array(2, dtype=np.int64))
+        self.add_initializer(f"{prefix}/axis2_idx", np.array(2, dtype=np.int64))
         self.make_node(
-            "Gather",
-            [f"{prefix}/bx_shape", f"{prefix}/const_2_scalar"],
-            [f"{prefix}/seq_len"],
-            axis=0,
+            "Gather", [f"{prefix}/bx_shape", f"{prefix}/axis2_idx"], [f"{prefix}/seq_len"], axis=0
         )
-        self.add_initializer(f"{prefix}/const_neg1", np.array(-1, dtype=np.int64))
-        self.make_node(
-            "Mul", [f"{prefix}/seq_len", f"{prefix}/const_neg1"], [f"{prefix}/neg_seq_len"]
-        )
-        self.add_initializer(f"{prefix}/const_0_1d", np.array([0], dtype=np.int64))
-        self.make_node(
-            "Unsqueeze",
-            [f"{prefix}/neg_seq_len", f"{prefix}/const_0_1d"],
-            [f"{prefix}/slice_start"],
-        )
-        self.add_initializer(
-            f"{prefix}/slice_end_max", np.array([9223372036854775807], dtype=np.int64)
-        )
-        self.add_initializer(f"{prefix}/slice_axis_2", np.array([2], dtype=np.int64))
-        self.make_node(
-            "Slice",
-            [
-                conv_out_full,
-                f"{prefix}/slice_start",
-                f"{prefix}/slice_end_max",
-                f"{prefix}/slice_axis_2",
-            ],
-            [f"{prefix}/conv_out"],
-        )
+        # Slice last S elements
+        self.make_slice_last_n(conv_out_full, f"{prefix}/seq_len", f"{prefix}/conv_out", axis=2)
 
-        # Extract new cache (last L elements of conv_input)
-        self.add_initializer(f"{prefix}/cache_slice_starts", np.array([-L], dtype=np.int64))
-        self.add_initializer(f"{prefix}/cache_slice_ends", np.array([2147483647], dtype=np.int64))
-        self.add_initializer(f"{prefix}/cache_slice_axes", np.array([2], dtype=np.int64))
+        # === Cache update ===
+        # Extract last L elements for next iteration
+        self.add_initializer(f"{prefix}/cache_start", np.array([-L], dtype=np.int64))
+        self.add_initializer(f"{prefix}/cache_end", SLICE_END.copy())
+        self.add_initializer(f"{prefix}/cache_axis", np.array([2], dtype=np.int64))
         self.make_node(
             "Slice",
-            [
-                conv_input,
-                f"{prefix}/cache_slice_starts",
-                f"{prefix}/cache_slice_ends",
-                f"{prefix}/cache_slice_axes",
-            ],
+            [conv_input, f"{prefix}/cache_start", f"{prefix}/cache_end", f"{prefix}/cache_axis"],
             [f"present_conv.{layer_idx}"],
         )
 
-        # y = C * conv_out (element-wise multiply in [B, H, S] space)
+        # === Output gating and projection ===
+        # y = C * conv_out
         y = self.make_mul(f"{prefix}/C", f"{prefix}/conv_out", f"{prefix}/y")
-
-        # Transpose back: [B, H, S] -> [B, S, H]
+        # Transpose: [B, H, S] → [B, S, H]
         y_t = self.make_node("Transpose", [y], [f"{prefix}/y_t"], perm=[0, 2, 1])
-
-        # Out projection
+        # out_proj: [B, S, H] → [B, S, H]
         out_proj = self.make_matmul(y_t, f"{prefix}.conv.out_proj.weight", f"{prefix}/out_proj")
 
-        # Residual
+        # === Residual + MLP ===
         hidden_state = self.make_add(residual, out_proj, f"{prefix}/residual1")
-
-        # MLP
-        hidden_state = self.build_mlp(layer_idx, hidden_state)
-
-        return hidden_state
+        return self.build_mlp(layer_idx, hidden_state)
 
     def build_attention_layer(self, layer_idx: int, hidden_state: str) -> str:
-        """Build an attention layer with GQA."""
+        """Build an attention layer with Grouped Query Attention.
+
+        Graph structure (matches PyTorch Lfm2Attention):
+            hidden_state
+                ↓
+            LayerNorm (operator_norm)
+                ↓
+            ┌─────────────────────────────────────┐
+            │  Q/K/V Projections                  │
+            │  Q: [B,S,H] → [B,S,nh*hd]           │
+            │  K: [B,S,H] → [B,S,nkv*hd]          │
+            │  V: [B,S,H] → [B,S,nkv*hd]          │
+            └─────────────────────────────────────┘
+                ↓
+            ┌─────────────────────────────────────┐
+            │  Q/K LayerNorm (per-head)           │
+            │  Reshape → [B,-1,hd] → Norm →       │
+            │  Reshape → [B,-1,proj_dim]          │
+            └─────────────────────────────────────┘
+                ↓
+            RotaryEmbedding (Q, K only)
+                ↓
+            GroupQueryAttention
+              - Inputs: Q, K, V, past_key, past_value, seqlens_k, total_seq
+              - Outputs: attn_out, present_key, present_value
+                ↓
+            Linear (out_proj)
+                ↓
+            Add (residual)
+                ↓
+            MLP block
+
+        Uses Microsoft fused operators:
+            - RotaryEmbedding: Applies RoPE to Q/K
+            - GroupQueryAttention: Fused attention with KV cache
+        """
         prefix = f"model.layers.{layer_idx}"
         H = self.config.hidden_size
         nh = self.config.num_attention_heads
         nkv = self.config.num_key_value_heads
         hd = self.head_dim
-
-        # Load weights (using actual HF weight names)
-        self.add_initializer(
-            f"{prefix}.operator_norm.weight", self.weights[f"{prefix}.operator_norm.weight"]
-        )
-        self.add_initializer(
-            f"{prefix}.self_attn.q_proj.weight", self.weights[f"{prefix}.self_attn.q_proj.weight"].T
-        )
-        self.add_initializer(
-            f"{prefix}.self_attn.k_proj.weight", self.weights[f"{prefix}.self_attn.k_proj.weight"].T
-        )
-        self.add_initializer(
-            f"{prefix}.self_attn.v_proj.weight", self.weights[f"{prefix}.self_attn.v_proj.weight"].T
-        )
-        self.add_initializer(
-            f"{prefix}.self_attn.q_layernorm.weight",
-            self.weights[f"{prefix}.self_attn.q_layernorm.weight"],
-        )
-        self.add_initializer(
-            f"{prefix}.self_attn.k_layernorm.weight",
-            self.weights[f"{prefix}.self_attn.k_layernorm.weight"],
-        )
-        self.add_initializer(
-            f"{prefix}.self_attn.out_proj.weight",
-            self.weights[f"{prefix}.self_attn.out_proj.weight"].T,
-        )
-        self.add_initializer(f"{prefix}.ffn_norm.weight", self.weights[f"{prefix}.ffn_norm.weight"])
-        self.add_initializer(
-            f"{prefix}.feed_forward.w1.weight", self.weights[f"{prefix}.feed_forward.w1.weight"].T
-        )
-        self.add_initializer(
-            f"{prefix}.feed_forward.w3.weight", self.weights[f"{prefix}.feed_forward.w3.weight"].T
-        )
-        self.add_initializer(
-            f"{prefix}.feed_forward.w2.weight", self.weights[f"{prefix}.feed_forward.w2.weight"].T
-        )
-
+        kv_hidden = nkv * hd
         residual = hidden_state
 
-        # Operator LayerNorm
+        # === Operator LayerNorm ===
         normed = self.make_layernorm(
             hidden_state, f"{prefix}.operator_norm.weight", f"{prefix}/op_norm"
         )
 
-        # Q, K, V projections
-        # Q: [B, S, H] -> [B, S, nh*hd] = [B, S, 2048]
-        # K: [B, S, H] -> [B, S, nkv*hd] = [B, S, 512]
-        # V: [B, S, H] -> [B, S, nkv*hd] = [B, S, 512]
+        # === Q/K/V Projections ===
         q = self.make_matmul(normed, f"{prefix}.self_attn.q_proj.weight", f"{prefix}/q")
         k = self.make_matmul(normed, f"{prefix}.self_attn.k_proj.weight", f"{prefix}/k")
         v = self.make_matmul(normed, f"{prefix}.self_attn.v_proj.weight", f"{prefix}/v")
 
-        # Q norm: Reshape to [B, -1, head_dim] for per-head norm, then back to [B, -1, hidden_size]
-        # This flattens batch*seq*heads into the middle dimension
-        self.add_initializer(f"{prefix}/q_reshape_for_norm", np.array([0, -1, hd], dtype=np.int64))
+        # === Q/K LayerNorm (per-head normalization) ===
+        # Reshape to [B, -1, head_dim] for per-head norm
+        self.add_initializer(f"{prefix}/reshape_for_norm", np.array([0, -1, hd], dtype=np.int64))
+        self.add_initializer(f"{prefix}/q_reshape_back", np.array([0, -1, H], dtype=np.int64))
+        self.add_initializer(f"{prefix}/k_reshape_back", np.array([0, -1, kv_hidden], dtype=np.int64))
+
+        # Q norm
         q_for_norm = self.make_node(
-            "Reshape", [q, f"{prefix}/q_reshape_for_norm"], [f"{prefix}/q_for_norm"]
+            "Reshape", [q, f"{prefix}/reshape_for_norm"], [f"{prefix}/q_for_norm"]
         )
         q_normed = self.make_layernorm(
             q_for_norm, f"{prefix}.self_attn.q_layernorm.weight", f"{prefix}/q_normed"
         )
-        self.add_initializer(f"{prefix}/q_reshape_back", np.array([0, -1, H], dtype=np.int64))
         q_3d = self.make_node("Reshape", [q_normed, f"{prefix}/q_reshape_back"], [f"{prefix}/q_3d"])
 
-        # K norm: Reshape to [B, -1, head_dim] for per-head norm, then back to [B, -1, kv_hidden_size]
-        kv_hidden = nkv * hd
-        self.add_initializer(f"{prefix}/k_reshape_for_norm", np.array([0, -1, hd], dtype=np.int64))
+        # K norm
         k_for_norm = self.make_node(
-            "Reshape", [k, f"{prefix}/k_reshape_for_norm"], [f"{prefix}/k_for_norm"]
+            "Reshape", [k, f"{prefix}/reshape_for_norm"], [f"{prefix}/k_for_norm"]
         )
         k_normed = self.make_layernorm(
             k_for_norm, f"{prefix}.self_attn.k_layernorm.weight", f"{prefix}/k_normed"
         )
-        self.add_initializer(
-            f"{prefix}/k_reshape_back", np.array([0, -1, kv_hidden], dtype=np.int64)
-        )
         k_3d = self.make_node("Reshape", [k_normed, f"{prefix}/k_reshape_back"], [f"{prefix}/k_3d"])
 
-        # RoPE - use num_heads=0 and rotary_embedding_dim=0 to let operator infer
+        # === RoPE (Rotary Position Embedding) ===
+        # num_heads=0, rotary_embedding_dim=0 lets operator infer from tensor shapes
+        rope_attrs = {"domain": "com.microsoft", "interleaved": 0, "num_heads": 0, "rotary_embedding_dim": 0}
         q_rope = self.make_node(
             "RotaryEmbedding",
             [q_3d, "position_ids", "cos_cache", "sin_cache"],
             [f"{prefix}/q_rope"],
-            domain="com.microsoft",
-            interleaved=0,
-            num_heads=0,
-            rotary_embedding_dim=0,
+            **rope_attrs,
         )
         k_rope = self.make_node(
             "RotaryEmbedding",
             [k_3d, "position_ids", "cos_cache", "sin_cache"],
             [f"{prefix}/k_rope"],
-            domain="com.microsoft",
-            interleaved=0,
-            num_heads=0,
-            rotary_embedding_dim=0,
+            **rope_attrs,
         )
 
-        # GroupQueryAttention (all inputs are 3D: [B, S, heads*hd])
-        scale = 1.0 / (hd**0.5)  # 0.125 for head_dim=64
+        # === GroupQueryAttention ===
+        scale = 1.0 / (hd**0.5)
         self.make_node(
             "GroupQueryAttention",
             [
-                q_rope,
-                k_rope,
-                v,
+                q_rope, k_rope, v,
                 f"past_key_values.{layer_idx}.key",
                 f"past_key_values.{layer_idx}.value",
                 "/attn_mask/seqlens_k",
                 "/attn_mask/total_seq",
-                "",
-                "",
-            ],  # cos/sin cache (empty, we apply rotary before)
+                "",  # cos_cache (unused, RoPE applied above)
+                "",  # sin_cache (unused, RoPE applied above)
+            ],
             [f"{prefix}/attn_out", f"present.{layer_idx}.key", f"present.{layer_idx}.value"],
             domain="com.microsoft",
             num_heads=nh,
@@ -574,21 +661,34 @@ class LFM2Builder:
             rotary_interleaved=0,
         )
 
-        # Output projection (attn_out is [B, S, H] from GQA)
+        # === Output projection + Residual + MLP ===
         o_proj = self.make_matmul(
             f"{prefix}/attn_out", f"{prefix}.self_attn.out_proj.weight", f"{prefix}/o_proj"
         )
-
-        # Residual
         hidden_state = self.make_add(residual, o_proj, f"{prefix}/residual1")
-
-        # MLP
-        hidden_state = self.build_mlp(layer_idx, hidden_state)
-
-        return hidden_state
+        return self.build_mlp(layer_idx, hidden_state)
 
     def build_mlp(self, layer_idx: int, hidden_state: str) -> str:
-        """Build MLP block."""
+        """Build MLP block (SwiGLU activation).
+
+        Graph structure (matches PyTorch Lfm2MLP):
+            hidden_state
+                ↓
+            LayerNorm (ffn_norm)
+                ↓
+            ┌───────────┬───────────┐
+            │ Linear w1 │ Linear w3 │
+            │ (gate)    │ (up)      │
+            └─────┬─────┴─────┬─────┘
+                  ↓           ↓
+                SiLU         │
+                  ↓           │
+                  └─────*─────┘
+                        ↓
+                    Linear w2 (down)
+                        ↓
+                    Add (residual)
+        """
         prefix = f"model.layers.{layer_idx}"
 
         residual = hidden_state
@@ -651,26 +751,40 @@ class LFM2Builder:
         logger.info(f"Loaded {len(self.weights)} weights")
 
     def build(self, model_path: str) -> onnx.ModelProto:
-        """Build the complete ONNX model."""
+        """Build the complete ONNX model.
+
+        Build phases:
+            1. Load weights from HuggingFace model
+            2. Create graph inputs/outputs
+            3. Build RoPE cache and attention mask preprocessing
+            4. Build embedding layer
+            5. For each layer: prepare weights, then build graph
+            6. Build LM head with tied weights
+            7. Create final ONNX model
+        """
         logger.info("Building LFM2 ONNX model...")
 
-        # Load weights
+        # Phase 1: Load weights
         self.load_weights(model_path)
 
-        # Build graph structure
+        # Phase 2-3: Build graph structure
         self.build_inputs()
         self.build_outputs()
         self.build_rope_cache()
         self.build_attention_mask_subgraph()
 
-        # Embedding
+        # Phase 4: Embedding
         hidden_state = self.build_embedding()
 
-        # Layers
+        # Phase 5: Layers (prepare weights, then build graph)
         for layer_idx in range(self.config.num_hidden_layers):
             layer_type = self.config.layer_types[layer_idx]
             logger.info(f"Building layer {layer_idx} ({layer_type})...")
 
+            # Prepare weights for this layer (handles transposition)
+            self.prepare_layer_weights(layer_idx, layer_type)
+
+            # Build layer graph
             if layer_type == "conv":
                 hidden_state = self.build_conv_layer(layer_idx, hidden_state)
             else:
@@ -701,97 +815,3 @@ class LFM2Builder:
 
         logger.info(f"Model built: {len(self.nodes)} nodes")
         return model
-
-
-def export_model(model_path: str, output_dir: str):
-    """Export LFM2 model to ONNX."""
-    import os
-
-    from transformers import AutoConfig, AutoTokenizer
-
-    # Load config
-    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    lfm2_config = LFM2Config.from_hf_config(config)
-
-    # Build model
-    builder = LFM2Builder(lfm2_config)
-    model = builder.build(model_path)
-
-    # Save model
-    os.makedirs(output_dir, exist_ok=True)
-    onnx_dir = os.path.join(output_dir, "onnx")
-    os.makedirs(onnx_dir, exist_ok=True)
-
-    output_path = os.path.join(onnx_dir, "model.onnx")
-
-    # Remove existing external data file to avoid appending
-    external_data_path = os.path.join(onnx_dir, "model.onnx_data")
-    if os.path.exists(external_data_path):
-        os.remove(external_data_path)
-
-    onnx.save_model(
-        model,
-        output_path,
-        save_as_external_data=True,
-        all_tensors_to_one_file=True,
-        location="model.onnx_data",
-    )
-
-    logger.info(f"Model saved to {output_path}")
-
-    # Copy tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    tokenizer.save_pretrained(output_dir)
-    config.save_pretrained(output_dir)
-
-    # Create generation_config.json (required by Transformers.js)
-    import json
-
-    gen_config = {
-        "_from_model_config": True,
-        "bos_token_id": config.bos_token_id,
-        "eos_token_id": config.eos_token_id,
-        "pad_token_id": getattr(config, "pad_token_id", 0),
-        "transformers_version": "4.54.0",
-    }
-    gen_config_path = os.path.join(output_dir, "generation_config.json")
-    with open(gen_config_path, "w") as f:
-        json.dump(gen_config, f, indent=2)
-
-    # Add transformers.js_config to config.json (for external data support)
-    config_path = os.path.join(output_dir, "config.json")
-    with open(config_path) as f:
-        cfg = json.load(f)
-    cfg["transformers.js_config"] = {
-        "kv_cache_dtype": {"fp32": "float32"},
-        "use_external_data_format": True,
-    }
-    with open(config_path, "w") as f:
-        json.dump(cfg, f, indent=2)
-
-    # Copy chat_template from tokenizer if available, and save to both
-    # tokenizer_config.json and chat_template.jinja
-    tokenizer_config_path = os.path.join(output_dir, "tokenizer_config.json")
-    chat_template_path = os.path.join(output_dir, "chat_template.jinja")
-
-    if tokenizer.chat_template:
-        # Save chat_template.jinja
-        with open(chat_template_path, "w") as f:
-            f.write(tokenizer.chat_template)
-
-        # Ensure it's also in tokenizer_config.json
-        if os.path.exists(tokenizer_config_path):
-            with open(tokenizer_config_path) as f:
-                tok_cfg = json.load(f)
-            if "chat_template" not in tok_cfg:
-                tok_cfg["chat_template"] = tokenizer.chat_template
-                with open(tokenizer_config_path, "w") as f:
-                    json.dump(tok_cfg, f, indent=2)
-
-    # Print summary
-    size_mb = os.path.getsize(output_path) / 1e6
-    data_path = os.path.join(onnx_dir, "model.onnx_data")
-    data_size_gb = os.path.getsize(data_path) / 1e9 if os.path.exists(data_path) else 0
-    logger.info(f"Model size: {size_mb:.2f} MB + {data_size_gb:.2f} GB data")
-
-    return output_path
