@@ -5,8 +5,8 @@ Tests whether ONNX models maintain coherent multi-turn conversations
 compared to PyTorch reference.
 
 Run with:
-    pytest tests/test_lfm2/test_coherence.py -v
-    pytest tests/test_lfm2/test_coherence.py -v -k "1.2B and q4"
+    uv run pytest tests/test_lfm2/test_coherence.py -v
+    uv run pytest tests/test_lfm2/test_coherence.py -v -k "1.2B and q4"
 """
 
 import logging

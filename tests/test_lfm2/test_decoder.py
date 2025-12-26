@@ -4,8 +4,8 @@ Verify decoder ONNX export against PyTorch reference.
 Tests single-step logit comparison between PyTorch and ONNX models.
 
 Run with:
-    pytest tests/test_lfm2/test_decoder.py -v
-    pytest tests/test_lfm2/test_decoder.py -v -k "350M and q4"
+    uv run pytest tests/test_lfm2/test_decoder.py -v
+    uv run pytest tests/test_lfm2/test_decoder.py -v -k "350M and q4"
 """
 
 import logging

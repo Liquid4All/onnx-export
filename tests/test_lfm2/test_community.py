@@ -4,8 +4,8 @@ Compare local ONNX exports against onnx-community versions.
 Both are compared against PyTorch reference to show which is closer.
 
 Run with:
-    pytest tests/test_lfm2/test_community.py -v
-    pytest tests/test_lfm2/test_community.py -v -k "350M and q4"
+    uv run pytest tests/test_lfm2/test_community.py -v
+    uv run pytest tests/test_lfm2/test_community.py -v -k "350M and q4"
 
 Set ONNX_COMMUNITY_DIR environment variable to the directory containing community models:
     export ONNX_COMMUNITY_DIR=/path/to/onnx-community
@@ -17,7 +17,7 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from helpers import skip_if_missing
+from helpers import get_community_onnx_dir, get_community_onnx_file, skip_if_missing
 
 from liquidonnx.lfm2 import MODELS
 from liquidonnx.lfm2.generate import get_onnx_dir
@@ -32,18 +32,6 @@ QUANT_CONFIGS = [
 ]
 
 PROMPTS = ["Hello, how are", "The sky is", "1 + 1 ="]
-
-
-def get_community_onnx_dir(community_dir: pathlib.Path, size: str) -> pathlib.Path:
-    """Get onnx-community model directory."""
-    return community_dir / f"LFM2-{size}-ONNX" / "onnx"
-
-
-def get_community_onnx_file(onnx_dir: pathlib.Path, bits: int | None) -> pathlib.Path:
-    """Get onnx-community model file."""
-    if bits is None:
-        return onnx_dir / "model.onnx"
-    return onnx_dir / f"model_q{bits}.onnx"
 
 
 def compute_metrics(expected: np.ndarray, actual: np.ndarray) -> dict:

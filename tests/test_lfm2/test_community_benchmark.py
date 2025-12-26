@@ -4,8 +4,8 @@ Benchmark comparison: local ONNX exports vs onnx-community versions.
 Compares performance metrics: load time, prefill time, tokens/second.
 
 Run with:
-    pytest tests/test_lfm2/test_benchmark.py -v -s
-    pytest tests/test_lfm2/test_benchmark.py -v -s -k "350M"
+    uv run pytest tests/test_lfm2/test_community_benchmark.py -v -s
+    uv run pytest tests/test_lfm2/test_community_benchmark.py -v -s -k "350M"
 
 Set ONNX_COMMUNITY_DIR environment variable to the directory containing community models:
     export ONNX_COMMUNITY_DIR=/path/to/onnx-community
@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pytest
-from helpers import skip_if_missing
+from helpers import get_community_onnx_dir, get_community_onnx_file, skip_if_missing
 from transformers import AutoTokenizer
 
 from liquidonnx.lfm2 import MODELS
@@ -53,14 +53,6 @@ class BenchmarkResult:
 def tokenizer():
     """Load tokenizer."""
     return AutoTokenizer.from_pretrained("LiquidAI/LFM2-350M", trust_remote_code=True)
-
-
-def get_community_onnx_dir(community_dir: pathlib.Path, size: str) -> pathlib.Path:
-    return community_dir / f"LFM2-{size}-ONNX" / "onnx"
-
-
-def get_community_onnx_file(onnx_dir: pathlib.Path, bits: int) -> pathlib.Path:
-    return onnx_dir / f"model_q{bits}.onnx"
 
 
 def run_benchmark(

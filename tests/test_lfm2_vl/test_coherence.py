@@ -5,8 +5,8 @@ Tests whether ONNX models maintain coherent multi-turn conversations
 with image context compared to PyTorch reference.
 
 Run with:
-    pytest tests/test_lfm2_vl/test_coherence.py -v
-    pytest tests/test_lfm2_vl/test_coherence.py -v -k "450M and tiled"
+    uv run pytest tests/test_lfm2_vl/test_coherence.py -v
+    uv run pytest tests/test_lfm2_vl/test_coherence.py -v -k "450M and tiled"
 """
 
 import logging
