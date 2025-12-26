@@ -66,6 +66,7 @@ def export_model(model_path: str, output_dir: str):
         output_dir/
         ├── config.json
         ├── tokenizer.json
+        ├── tokenizer_config.json
         ├── generation_config.json
         ├── chat_template.jinja
         └── onnx/
