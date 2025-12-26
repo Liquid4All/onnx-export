@@ -36,9 +36,10 @@ from dataclasses import dataclass
 
 import numpy as np
 import onnx
-from onnx import TensorProto, helper, numpy_helper
+from onnx import TensorProto, helper
 
-from liquidonnx.lfm2.builder import LFM2Builder, LFM2Config
+from liquidonnx.builder_base import ONNXBuilderBase
+from liquidonnx.lfm2.builder import LFM2Config
 from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 
 logger = logging.getLogger(__name__)
@@ -100,7 +101,7 @@ class LFM2VLConfig:
         )
 
 
-class VisionEmbedBuilder:
+class VisionEmbedBuilder(ONNXBuilderBase):
     """
     Fused vision encoder + projector builder for ONNX export.
 
@@ -108,7 +109,28 @@ class VisionEmbedBuilder:
     - SigLIP2 vision encoder (patch embedding + transformer layers)
     - MLP projector with pixel unshuffle
 
-    Output: image embeddings in text embedding space
+    Graph structure:
+        pixel_values [B, N, 768] or [B, 3, H, W]
+            ↓
+        ┌─────────────────────────────────────┐
+        │  Patch Embedding                    │
+        │  + Position Embedding (bilinear)    │
+        └─────────────────────────────────────┘
+            ↓
+        ┌─────────────────────────────────────┐
+        │  N × Transformer Encoder Layers     │
+        │  (Self-Attention + MLP)             │
+        └─────────────────────────────────────┘
+            ↓
+        Post LayerNorm
+            ↓
+        ┌─────────────────────────────────────┐
+        │  Projector                          │
+        │  Pixel Unshuffle (2x2 -> 4x)        │
+        │  + LayerNorm + MLP                  │
+        └─────────────────────────────────────┘
+            ↓
+        image_embeddings [B, N/4, text_hidden]
 
     Supports two input formats:
     - "tiled": [batch, num_patches, 768] pre-extracted patches (HuggingFace style)
@@ -121,6 +143,7 @@ class VisionEmbedBuilder:
             config: Model configuration
             vision_input_format: "tiled" for [B, N, 768] or "conv2d" for [B, 3, H, W]
         """
+        super().__init__()
         self.config = config
         self.vision_config = config.vision_config
         self.head_dim = config.vision_config.hidden_size // config.vision_config.num_attention_heads
@@ -132,63 +155,17 @@ class VisionEmbedBuilder:
         self.proj_hidden = config.projector_hidden_size
         self.downsample = config.downsample_factor
 
-        # Graph components
-        self.nodes: list[onnx.NodeProto] = []
-        self.inputs: list[onnx.ValueInfoProto] = []
-        self.outputs: list[onnx.ValueInfoProto] = []
-        self.initializers: list[onnx.TensorProto] = []
-
-        # Weights storage
-        self.weights: dict[str, np.ndarray] = {}
-
-        # Node counter
-        self._node_count = 0
-
-    def _unique_name(self, prefix: str) -> str:
-        self._node_count += 1
-        return f"{prefix}_{self._node_count}"
-
-    def add_initializer(self, name: str, tensor: np.ndarray, dtype=None):
-        """Add weight tensor as graph initializer."""
-        if dtype is None:
-            if tensor.dtype not in [np.int32, np.int64]:
-                tensor = tensor.astype(np.float32)
-        else:
-            tensor = tensor.astype(dtype)
-        self.initializers.append(numpy_helper.from_array(tensor, name))
-
-    def make_node(
-        self,
-        op_type: str,
-        inputs: list[str],
-        outputs: list[str],
-        name: str = None,
-        domain: str = "",
-        **attrs,
-    ) -> str:
-        """Create an ONNX node and return the first output name."""
-        if name is None:
-            name = self._unique_name(op_type)
-
-        node = helper.make_node(op_type, inputs, outputs, name=name, domain=domain, **attrs)
-        self.nodes.append(node)
-        return outputs[0] if outputs else None
-
-    def make_layernorm(
+    def make_vision_layernorm(
         self, input_name: str, weight_name: str, bias_name: str, output_name: str
     ) -> str:
-        """Create LayerNormalization node."""
-        return self.make_node(
-            "LayerNormalization",
-            inputs=[input_name, weight_name, bias_name],
-            outputs=[output_name],
+        """Create LayerNormalization node with vision encoder epsilon."""
+        return self.make_layernorm(
+            input_name,
+            weight_name,
+            bias_name,
+            output_name,
             epsilon=self.vision_config.layer_norm_eps,
         )
-
-    def make_gelu(self, input_name: str, output_name: str) -> str:
-        """Create GELU activation (approximate tanh version)."""
-        # Use standard ONNX Gelu (opset 20+) which supports approximate attribute
-        return self.make_node("Gelu", [input_name], [output_name], approximate="tanh")
 
     def build_inputs(self):
         """Create model inputs based on vision_input_format."""
@@ -254,13 +231,32 @@ class VisionEmbedBuilder:
     def build_patch_embedding(self) -> str:
         """Build patch embedding layer with position embeddings.
 
-        Supports two modes:
-        - Tiled: Input [B, N, 768], uses Linear projection
-        - Conv2d: Input [B, 3, H, W], uses Conv2d(kernel=16, stride=16)
+        Graph structure:
+            pixel_values
+                ↓
+            ┌─────────────────────────────────────┐
+            │  Patch Projection                   │
+            │  Conv2d: [B,3,H,W] → Conv2d(16,16)  │
+            │  Tiled:  [B,N,768] → Linear         │
+            └─────────────────────────────────────┘
+                ↓
+            patch_embeds [B, N, hidden]
+                ↓
+            ┌─────────────────────────────────────┐
+            │  Position Embeddings                │
+            │  Bilinear interpolation 16x16 → HxW │
+            │  Tile across batch                  │
+            └─────────────────────────────────────┘
+                ↓
+            pos_embeds [B, N, hidden]
+                ↓
+            Add (patch_embeds + pos_embeds)
+                ↓
+            patch_embeddings [B, N, hidden]
 
-        Position embeddings are bilinearly interpolated from 16x16 to match input spatial size.
-
-        Output: [batch, num_patches, hidden_size]
+        Position embeddings are stored as 16x16 learned embeddings and bilinearly
+        interpolated to match the input spatial size (sqrt(N) x sqrt(N) for tiled,
+        H/P x W/P for conv2d where P=patch_size).
         """
         prefix = "vision_model.embeddings.patch_embedding"
         H = self.vision_config.hidden_size
@@ -444,7 +440,37 @@ class VisionEmbedBuilder:
         return self.make_node("Add", [patch_embeds, pos_emb_tiled], ["patch_embeddings"])
 
     def build_encoder_layer(self, layer_idx: int, hidden_state: str) -> str:
-        """Build a single transformer encoder layer."""
+        """Build a single SigLIP2 transformer encoder layer.
+
+        Graph structure:
+            hidden_state
+                ↓
+            LayerNorm1
+                ↓
+            ┌─────────────────────────────────────┐
+            │  Self-Attention                     │
+            │  Q, K, V projections                │
+            │  Reshape [B, N, nh, hd]             │
+            │  Transpose [B, nh, N, hd]           │
+            │  Scaled Dot-Product Attention       │
+            │  Output projection                  │
+            └─────────────────────────────────────┘
+                ↓
+            Add (residual)
+                ↓
+            LayerNorm2
+                ↓
+            ┌─────────────────────────────────────┐
+            │  MLP (GELU activation)              │
+            │  fc1: hidden → intermediate         │
+            │  GELU                               │
+            │  fc2: intermediate → hidden         │
+            └─────────────────────────────────────┘
+                ↓
+            Add (residual)
+                ↓
+            output
+        """
         prefix = f"vision_model.encoder.layers.{layer_idx}"
         H = self.vision_config.hidden_size
         nh = self.vision_config.num_attention_heads
@@ -503,7 +529,7 @@ class VisionEmbedBuilder:
         residual = hidden_state
 
         # Layer norm 1
-        normed = self.make_layernorm(
+        normed = self.make_vision_layernorm(
             hidden_state,
             f"{prefix}.layer_norm1.weight",
             f"{prefix}.layer_norm1.bias",
@@ -580,7 +606,7 @@ class VisionEmbedBuilder:
 
         # Layer norm 2
         residual2 = hidden_state
-        normed2 = self.make_layernorm(
+        normed2 = self.make_vision_layernorm(
             hidden_state,
             f"{prefix}.layer_norm2.weight",
             f"{prefix}.layer_norm2.bias",
@@ -610,7 +636,7 @@ class VisionEmbedBuilder:
         self.add_initializer(
             "vision_model.post_layernorm.bias", self.weights["vision_model.post_layernorm.bias"]
         )
-        return self.make_layernorm(
+        return self.make_vision_layernorm(
             hidden_state,
             "vision_model.post_layernorm.weight",
             "vision_model.post_layernorm.bias",
@@ -620,15 +646,39 @@ class VisionEmbedBuilder:
     def build_projector(self, vision_embeddings: str) -> str:
         """Build the MLP projector with pixel unshuffle.
 
-        PyTorch projector (modeling_lfm2_vl.py Lfm2VlMultiModalProjector):
-        1. pixel_unshuffle: (B, H, W, C) -> (B, H/2, W/2, C*4)
-           Note: PyTorch code uses confusing variable names (width=H, height=W)
-           but the actual operations match standard row-major convention.
-        2. layer_norm
-        3. linear_1 + gelu + linear_2
+        Graph structure:
+            vision_embeddings [B, N, C]
+                ↓
+            ┌─────────────────────────────────────┐
+            │  Reshape to 4D                      │
+            │  [B, N, C] → [B, H, W, C]           │
+            │  (H = W = sqrt(N) for square)       │
+            └─────────────────────────────────────┘
+                ↓
+            ┌─────────────────────────────────────┐
+            │  Pixel Unshuffle (2x2 → 4x channel) │
+            │  [B, H, W, C] → [B, H/2, W/2, C*4]  │
+            │                                     │
+            │  Steps:                             │
+            │  1. reshape [B,H,W/2,C*2]           │
+            │  2. transpose [B,W/2,H,C*2]         │
+            │  3. reshape [B,W/2,H/2,C*4]         │
+            │  4. transpose [B,H/2,W/2,C*4]       │
+            └─────────────────────────────────────┘
+                ↓
+            Flatten [B, N/4, C*4]
+                ↓
+            LayerNorm
+                ↓
+            Linear (C*4 → proj_hidden) + GELU
+                ↓
+            Linear (proj_hidden → text_hidden)
+                ↓
+            image_embeddings [B, N/4, text_hidden]
 
-        Our vision_embeddings is (B, N, C) where N = H*W (row-major order).
-        We reshape to 4D, apply pixel_unshuffle ops, then flatten back.
+        The pixel unshuffle operation reduces spatial resolution by 2x while
+        increasing channel dimension by 4x, matching the PyTorch implementation
+        in Lfm2VlMultiModalProjector.pixel_unshuffle().
         """
         ds = self.downsample
         C = self.vision_hidden  # 768
@@ -894,61 +944,42 @@ class VisionEmbedBuilder:
         logger.info("Building projector...")
         self.build_projector(vision_embeddings)
 
-        # Create graph
-        graph = helper.make_graph(
-            self.nodes,
-            "embed_images",
-            self.inputs,
-            self.outputs,
-            self.initializers,
-        )
-
-        # Create model
-        model = helper.make_model(
-            graph,
-            opset_imports=[
-                helper.make_opsetid("", 21),
-                helper.make_opsetid("com.microsoft", 1),
-            ],
-            ir_version=9,
-        )
-        model.producer_name = "lfm2-vl-builder"
-
+        model = self.build_graph("embed_images", producer_name="lfm2-vl-builder")
         logger.info(f"Vision + projector model built: {len(self.nodes)} nodes")
         return model
 
 
-class EmbedTokensBuilder:
+class EmbedTokensBuilder(ONNXBuilderBase):
     """
     Simple token embedding builder for ONNX export.
 
     Creates an ONNX graph that maps input_ids to embeddings via Gather.
     This allows the decoder to take inputs_embeds, enabling clean
     text/image embedding fusion.
+
+    Graph structure:
+        input_ids [B, S]
+            ↓
+        Gather (weight, axis=0)
+            ↓
+        inputs_embeds [B, S, hidden_size]
     """
 
     def __init__(self, config: LFM2VLConfig):
+        super().__init__()
         self.config = config
         self.hidden_size = config.text_config.hidden_size
         self.vocab_size = config.text_config.vocab_size
-
-        # Graph components
-        self.nodes: list[onnx.NodeProto] = []
-        self.inputs: list[onnx.ValueInfoProto] = []
-        self.outputs: list[onnx.ValueInfoProto] = []
-        self.initializers: list[onnx.TensorProto] = []
-
-        # Weights
         self.embed_weight: np.ndarray | None = None
 
     def load_weights(self, weights: dict[str, np.ndarray]):
-        """Load embedding weights."""
-        # Try different possible prefixes
-        for prefix in [
+        """Load embedding weights from model weights dict."""
+        prefixes = [
             "model.language_model.embed_tokens.weight",
             "language_model.embed_tokens.weight",
             "model.embed_tokens.weight",
-        ]:
+        ]
+        for prefix in prefixes:
             if prefix in weights:
                 self.embed_weight = weights[prefix].astype(np.float32)
                 logger.info(f"Loaded embed_tokens weight: {self.embed_weight.shape}")
@@ -976,322 +1007,13 @@ class EmbedTokensBuilder:
             )
         )
 
-        # Add embedding weight as initializer
-        self.initializers.append(numpy_helper.from_array(self.embed_weight, "weight"))
+        # Add embedding weight and create Gather node
+        self.add_initializer("weight", self.embed_weight)
+        self.make_gather("weight", "input_ids", "inputs_embeds", axis=0)
 
-        # Single Gather node: inputs_embeds = Gather(weight, input_ids, axis=0)
-        node = helper.make_node(
-            "Gather",
-            inputs=["weight", "input_ids"],
-            outputs=["inputs_embeds"],
-            name="embed_tokens",
-            axis=0,
-        )
-        self.nodes.append(node)
-
-        # Create graph
-        graph = helper.make_graph(
-            self.nodes,
-            "embed_tokens",
-            self.inputs,
-            self.outputs,
-            self.initializers,
-        )
-
-        # Create model
-        model = helper.make_model(
-            graph,
-            opset_imports=[helper.make_opsetid("", 21)],
-            ir_version=9,
-        )
-        model.producer_name = "lfm2-vl-builder"
-
+        model = self.build_graph("embed_tokens", ms_domain=False, producer_name="lfm2-vl-builder")
         logger.info(
             f"embed_tokens built: {len(self.nodes)} nodes, "
             f"vocab_size={self.vocab_size}, hidden_size={self.hidden_size}"
         )
         return model
-
-
-def export_vl_model(model_path: str, output_dir: str, vision_input_format: str = VISION_MODE_TILED):
-    """Export LFM2-VL model to ONNX (embed_tokens + embed_images + decoder).
-
-    Args:
-        model_path: HuggingFace model path
-        output_dir: Output directory for ONNX files
-        vision_input_format: "tiled" for [B, N, 768] or "conv2d" for [B, 3, H, W]
-    """
-    import json
-    import os
-
-    import torch
-    from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
-
-    logger.info(f"Vision input format: {vision_input_format}")
-
-    # Load config
-    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    vl_config = LFM2VLConfig.from_hf_config(config)
-
-    # Load model weights
-    logger.info(f"Loading weights from {model_path}...")
-    model = AutoModelForImageTextToText.from_pretrained(
-        model_path, torch_dtype=torch.float32, trust_remote_code=True
-    )
-
-    weights = {}
-    for name, param in model.named_parameters():
-        weights[name] = param.detach().numpy()
-        logger.debug(f"Loaded: {name} {param.shape}")
-
-    logger.info(f"Loaded {len(weights)} total weights")
-
-    del model
-    import gc
-
-    gc.collect()
-
-    # Create output directories
-    os.makedirs(output_dir, exist_ok=True)
-    onnx_dir = os.path.join(output_dir, "onnx")
-    os.makedirs(onnx_dir, exist_ok=True)
-
-    # =========================================================================
-    # 1. Export embed_tokens (token embedding lookup)
-    # =========================================================================
-    logger.info("Exporting embed_tokens...")
-    embed_tokens_builder = EmbedTokensBuilder(vl_config)
-    embed_tokens_builder.load_weights(weights)
-    embed_tokens_model = embed_tokens_builder.build()
-
-    embed_tokens_path = os.path.join(onnx_dir, "embed_tokens.onnx")
-    # embed_tokens is small enough to not need external data
-    onnx.save_model(embed_tokens_model, embed_tokens_path)
-    logger.info(f"embed_tokens saved to {embed_tokens_path}")
-    del embed_tokens_model
-    del embed_tokens_builder
-
-    # =========================================================================
-    # 2. Export embed_images (vision encoder + projector)
-    # =========================================================================
-    logger.info(
-        f"Exporting embed_images (vision encoder + projector) [{vision_input_format} mode]..."
-    )
-    vision_builder = VisionEmbedBuilder(vl_config, vision_input_format=vision_input_format)
-    vision_builder.load_weights(weights)
-    vision_model = vision_builder.build()
-
-    vision_path = os.path.join(onnx_dir, "embed_images.onnx")
-    vision_data_path = os.path.join(onnx_dir, "embed_images.onnx_data")
-    if os.path.exists(vision_data_path):
-        os.remove(vision_data_path)
-    onnx.save_model(
-        vision_model,
-        vision_path,
-        save_as_external_data=True,
-        all_tensors_to_one_file=True,
-        location="embed_images.onnx_data",
-        size_threshold=1024,
-    )
-    logger.info(f"embed_images saved to {vision_path}")
-
-    # Free memory before decoder export
-    del vision_model
-    del vision_builder
-    gc.collect()
-
-    # =========================================================================
-    # 3. Export decoder (takes inputs_embeds, not input_ids)
-    # =========================================================================
-    logger.info("Exporting decoder (with inputs_embeds input)...")
-
-    # Use LFM2Builder but modify inputs to use inputs_embeds
-    text_builder = LFM2Builder(vl_config.text_config)
-
-    # Filter text model weights (they have "model.language_model." prefix in VL model)
-    for name, weight in weights.items():
-        if name.startswith("model.language_model."):
-            new_name = name.replace("model.language_model.", "model.")
-            text_builder.weights[new_name] = weight
-        elif name.startswith("language_model."):
-            new_name = name.replace("language_model.", "model.")
-            text_builder.weights[new_name] = weight
-
-    # Clear original weights to free memory
-    weights.clear()
-    gc.collect()
-
-    # Build custom inputs: inputs_embeds instead of input_ids
-    H = vl_config.text_config.hidden_size
-
-    # inputs_embeds: pre-computed embeddings (text + image fused)
-    text_builder.inputs.append(
-        helper.make_tensor_value_info(
-            "inputs_embeds", TensorProto.FLOAT, ["batch_size", "sequence_length", H]
-        )
-    )
-
-    # attention_mask
-    text_builder.inputs.append(
-        helper.make_tensor_value_info(
-            "attention_mask", TensorProto.INT64, ["batch_size", "total_sequence_length"]
-        )
-    )
-
-    # position_ids
-    text_builder.inputs.append(
-        helper.make_tensor_value_info(
-            "position_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
-        )
-    )
-
-    # Conv caches
-    for idx in text_builder.conv_indices:
-        text_builder.inputs.append(
-            helper.make_tensor_value_info(
-                f"past_conv.{idx}",
-                TensorProto.FLOAT,
-                ["batch_size", H, vl_config.text_config.conv_L_cache],
-            )
-        )
-
-    # KV caches
-    for idx in text_builder.attn_indices:
-        text_builder.inputs.append(
-            helper.make_tensor_value_info(
-                f"past_key_values.{idx}.key",
-                TensorProto.FLOAT,
-                [
-                    "batch_size",
-                    vl_config.text_config.num_key_value_heads,
-                    "past_sequence_length",
-                    text_builder.head_dim,
-                ],
-            )
-        )
-        text_builder.inputs.append(
-            helper.make_tensor_value_info(
-                f"past_key_values.{idx}.value",
-                TensorProto.FLOAT,
-                [
-                    "batch_size",
-                    vl_config.text_config.num_key_value_heads,
-                    "past_sequence_length",
-                    text_builder.head_dim,
-                ],
-            )
-        )
-
-    # Build outputs
-    text_builder.build_outputs()
-
-    # Build RoPE and attention mask preprocessing
-    text_builder.build_rope_cache()
-    text_builder.build_attention_mask_subgraph()
-
-    # Skip build_embedding() - use inputs_embeds directly as hidden_state
-    # But we still need embed_tokens weight for lm_head (tied weights)
-    text_builder.add_initializer(
-        "model.embed_tokens.weight", text_builder.weights["model.embed_tokens.weight"]
-    )
-    hidden_state = "inputs_embeds"
-
-    # Build all layers
-    for layer_idx in range(vl_config.text_config.num_hidden_layers):
-        layer_type = vl_config.text_config.layer_types[layer_idx]
-        logger.info(f"Building text layer {layer_idx} ({layer_type})...")
-
-        if layer_type == "conv":
-            hidden_state = text_builder.build_conv_layer(layer_idx, hidden_state)
-        else:
-            hidden_state = text_builder.build_attention_layer(layer_idx, hidden_state)
-
-    text_builder.build_lm_head(hidden_state)
-
-    # Clear weights dict to free memory before graph creation
-    text_builder.weights.clear()
-    gc.collect()
-
-    logger.info("Building decoder graph...")
-    text_graph = helper.make_graph(
-        text_builder.nodes,
-        "decoder",
-        text_builder.inputs,
-        text_builder.outputs,
-        text_builder.initializers,
-    )
-
-    text_model = helper.make_model(
-        text_graph,
-        opset_imports=[
-            helper.make_opsetid("", 21),
-            helper.make_opsetid("com.microsoft", 1),
-        ],
-        ir_version=9,
-    )
-    text_model.producer_name = "lfm2-vl-builder"
-
-    # Clear references to free memory
-    text_builder.nodes.clear()
-    text_builder.initializers.clear()
-    gc.collect()
-
-    decoder_path = os.path.join(onnx_dir, "decoder.onnx")
-    decoder_data_path = os.path.join(onnx_dir, "decoder.onnx_data")
-    if os.path.exists(decoder_data_path):
-        os.remove(decoder_data_path)
-
-    logger.info("Saving decoder (this may take a while for large models)...")
-    onnx.save_model(
-        text_model,
-        decoder_path,
-        save_as_external_data=True,
-        all_tensors_to_one_file=True,
-        location="decoder.onnx_data",
-        size_threshold=1024,
-    )  # Move tensors > 1KB to external file
-    logger.info(f"decoder saved to {decoder_path}")
-
-    del text_model
-    gc.collect()
-
-    # Copy tokenizer and config
-    try:
-        processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-        processor.save_pretrained(output_dir)
-    except Exception as e:
-        logger.warning(f"Could not save processor: {e}")
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        tokenizer.save_pretrained(output_dir)
-
-    config.save_pretrained(output_dir)
-
-    # Create generation_config.json
-    gen_config = {
-        "_from_model_config": True,
-        "bos_token_id": config.text_config.bos_token_id
-        if hasattr(config.text_config, "bos_token_id")
-        else 1,
-        "eos_token_id": config.text_config.eos_token_id
-        if hasattr(config.text_config, "eos_token_id")
-        else 7,
-        "pad_token_id": 0,
-        "transformers_version": "4.57.0",
-    }
-    gen_config_path = os.path.join(output_dir, "generation_config.json")
-    with open(gen_config_path, "w") as f:
-        json.dump(gen_config, f, indent=2)
-
-    # Print summary
-    total_size = 0
-    for f in os.listdir(onnx_dir):
-        fpath = os.path.join(onnx_dir, f)
-        if os.path.isfile(fpath):
-            size = os.path.getsize(fpath)
-            total_size += size
-            logger.info(f"  {f}: {size / 1e6:.1f} MB")
-
-    logger.info(f"Total ONNX size: {total_size / 1e9:.2f} GB")
-    logger.info(f"Output directory: {output_dir}")
-
-    return output_dir

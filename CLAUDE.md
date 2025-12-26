@@ -8,6 +8,7 @@
 ## Style
 * Use `logger` instead of `print` for output
 * Use f-strings for formatting
+* Prefer `pathlib` over `os.path` for path operations
 * Don't include comments that just restate the code
 * Don't re-throw or silence errors unless documented
 

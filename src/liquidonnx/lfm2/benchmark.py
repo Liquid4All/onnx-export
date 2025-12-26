@@ -10,10 +10,9 @@ Usage:
 
 import argparse
 import logging
-import os
+import pathlib
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 
@@ -56,19 +55,20 @@ class ONNXBenchmark:
         import onnxruntime as ort
 
         # Resolve path
-        if onnx_path.endswith(".onnx"):
+        onnx_path = pathlib.Path(onnx_path)
+        if onnx_path.suffix == ".onnx":
             model_file = onnx_path
         else:
-            model_file = os.path.join(onnx_path, "onnx", "model.onnx")
-            if not os.path.exists(model_file):
-                model_file = os.path.join(onnx_path, "model.onnx")
+            model_file = onnx_path / "onnx" / "model.onnx"
+            if not model_file.exists():
+                model_file = onnx_path / "model.onnx"
 
-        if not os.path.exists(model_file):
+        if not model_file.exists():
             raise FileNotFoundError(f"ONNX model not found: {model_file}")
 
         logger.info(f"Loading ONNX model: {model_file}")
         start = time.perf_counter()
-        sess = ort.InferenceSession(model_file, providers=["CPUExecutionProvider"])
+        sess = ort.InferenceSession(str(model_file), providers=["CPUExecutionProvider"])
         load_time = time.perf_counter() - start
 
         return sess, load_time, model_file
@@ -151,7 +151,7 @@ class ONNXBenchmark:
         sess, load_time, model_file = self.load_onnx_model(onnx_path)
 
         # Get file size
-        file_size_mb = get_total_model_size_mb(Path(model_file))
+        file_size_mb = get_total_model_size_mb(model_file)
 
         # Prepare inputs
         input_ids = self.tokenizer.encode(prompt)

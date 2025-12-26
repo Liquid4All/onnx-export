@@ -28,6 +28,7 @@ from liquidonnx.session import get_onnx_file, initialize_cache, update_cache
 logger = logging.getLogger(__name__)
 
 QUANT_CONFIGS = [
+    pytest.param(None, id="fp32"),
     pytest.param(4, id="q4"),
     pytest.param(8, id="q8"),
 ]
