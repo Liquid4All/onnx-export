@@ -42,17 +42,11 @@ import argparse
 import logging
 import pathlib
 
-from liquidonnx.lfm2.export import export_model
-from liquidonnx.lfm2.quantize import get_model_size, quantize_int4, quantize_int8
+from liquidonnx.lfm2 import MODELS
+from liquidonnx.lfm2.builder import export_model
+from liquidonnx.quantize import get_model_size, quantize_model
 
 logger = logging.getLogger(__name__)
-
-MODELS = {
-    "350M": "LiquidAI/LFM2-350M",
-    "700M": "LiquidAI/LFM2-700M",
-    "1.2B": "LiquidAI/LFM2-1.2B",
-    "2.6B": "LiquidAI/LFM2-2.6B",
-}
 
 
 def get_output_dir(size: str, output_base: pathlib.Path) -> pathlib.Path:
@@ -88,10 +82,9 @@ def do_quantize(onnx_dir: pathlib.Path, bits: int, exclude_lm_head: bool, block_
     _, orig_mb = get_model_size(input_model)
 
     logger.info(f"Quantizing to Q{bits}...")
-    if bits == 4:
-        quantize_int4(input_model, output_model, block_size, exclude_lm_head)
-    else:
-        quantize_int8(input_model, output_model, block_size, exclude_lm_head)
+    quantize_model(
+        input_model, output_model, bits=bits, block_size=block_size, exclude_lm_head=exclude_lm_head
+    )
 
     _, quant_mb = get_model_size(output_model)
     if orig_mb > 0:

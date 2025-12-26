@@ -4,30 +4,27 @@ Compare local ONNX exports against onnx-community versions.
 Both are compared against PyTorch reference to show which is closer.
 
 Run with:
-    pytest tests/test_lfm2/test_community.py -v
-    pytest tests/test_lfm2/test_community.py -v -k "350M and q4"
+    uv run pytest tests/test_lfm2/test_community.py -v
+    uv run pytest tests/test_lfm2/test_community.py -v -k "350M and q4"
 
 Set ONNX_COMMUNITY_DIR environment variable to the directory containing community models:
     export ONNX_COMMUNITY_DIR=/path/to/onnx-community
 """
 
 import logging
-import os
 import pathlib
 
 import numpy as np
 import pytest
 import torch
-from test_lfm2.helpers import (
-    get_onnx_dir,
-    get_onnx_file,
-    load_onnx_session,
-    skip_if_missing,
-)
+from helpers import get_community_onnx_dir, get_community_onnx_file, skip_if_missing
+
+from liquidonnx.lfm2 import MODELS
+from liquidonnx.lfm2.generate import get_onnx_dir
+from liquidonnx.quantize import bits_to_str
+from liquidonnx.session import get_onnx_file, load_onnx_session
 
 logger = logging.getLogger(__name__)
-
-SIZES = ["350M", "700M", "1.2B", "2.6B"]
 
 QUANT_CONFIGS = [
     pytest.param(None, id="fp32"),
@@ -35,31 +32,6 @@ QUANT_CONFIGS = [
 ]
 
 PROMPTS = ["Hello, how are", "The sky is", "1 + 1 ="]
-
-
-@pytest.fixture(scope="session")
-def community_dir() -> pathlib.Path:
-    """Base directory for onnx-community models."""
-    env_dir = os.environ.get("ONNX_COMMUNITY_DIR")
-    if env_dir:
-        return pathlib.Path(env_dir)
-    return pathlib.Path.home() / "workplace" / "models" / "onnx-community"
-
-
-def get_community_onnx_dir(community_dir: pathlib.Path, size: str) -> pathlib.Path:
-    """Get onnx-community model directory."""
-    return community_dir / f"LFM2-{size}-ONNX" / "onnx"
-
-
-def get_community_onnx_file(onnx_dir: pathlib.Path, bits: int | None) -> pathlib.Path:
-    """Get onnx-community model file."""
-    if bits is None:
-        return onnx_dir / "model.onnx"
-    return onnx_dir / f"model_q{bits}.onnx"
-
-
-def bits_to_str(bits: int | None) -> str:
-    return f"q{bits}" if bits else "fp32"
 
 
 def compute_metrics(expected: np.ndarray, actual: np.ndarray) -> dict:
@@ -85,7 +57,7 @@ def compute_metrics(expected: np.ndarray, actual: np.ndarray) -> dict:
     }
 
 
-@pytest.mark.parametrize("pytorch_model", SIZES, indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
 @pytest.mark.parametrize("bits", QUANT_CONFIGS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_community_comparison(
@@ -184,9 +156,9 @@ def test_community_comparison(
     )
 
     # Determine winner
-    if local_metrics['max_diff'] < community_metrics['max_diff']:
+    if local_metrics["max_diff"] < community_metrics["max_diff"]:
         winner = "LOCAL"
-    elif community_metrics['max_diff'] < local_metrics['max_diff']:
+    elif community_metrics["max_diff"] < local_metrics["max_diff"]:
         winner = "COMMUNITY"
     else:
         winner = "TIE"
@@ -195,9 +167,9 @@ def test_community_comparison(
     # Assert both produce reasonable results (top-1 match with PyTorch)
     min_overlap = 4 if bits is None else 3
 
-    assert local_metrics['top5_overlap'] >= min_overlap, (
+    assert local_metrics["top5_overlap"] >= min_overlap, (
         f"Local top-5 overlap too low: {local_metrics['top5_overlap']}/5"
     )
-    assert community_metrics['top5_overlap'] >= min_overlap, (
+    assert community_metrics["top5_overlap"] >= min_overlap, (
         f"Community top-5 overlap too low: {community_metrics['top5_overlap']}/5"
     )

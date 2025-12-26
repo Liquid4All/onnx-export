@@ -5,8 +5,8 @@ Tests whether ONNX models maintain coherent multi-turn conversations
 with image context compared to PyTorch reference.
 
 Run with:
-    pytest tests/test_lfm2_vl/test_coherence.py -v
-    pytest tests/test_lfm2_vl/test_coherence.py -v -k "450M and tiled"
+    uv run pytest tests/test_lfm2_vl/test_coherence.py -v
+    uv run pytest tests/test_lfm2_vl/test_coherence.py -v -k "450M and tiled"
 """
 
 import logging
@@ -15,22 +15,19 @@ import pathlib
 import numpy as np
 import pytest
 import torch
+from helpers import skip_if_missing
 from PIL import Image
-from test_lfm2_vl.helpers import (
-    cosine_similarity,
-    get_image_token_id,
-    get_onnx_file,
-    get_vl_onnx_dir,
-    load_onnx_session,
-    pad_to_square,
-    skip_if_missing,
-)
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D, VISION_MODE_TILED, VISION_MODES
+from liquidonnx.lfm2_vl.generate import get_onnx_dir
 from liquidonnx.lfm2_vl.preprocessing import (
     detect_vision_format,
+    get_image_token_id,
+    pad_to_square,
     preprocess_conv2d,
 )
+from liquidonnx.session import get_onnx_file, initialize_cache, load_onnx_session, update_cache
+from liquidonnx.verify import compare_logits_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -202,15 +199,7 @@ def generate_onnx(
     seq_len = inputs_embeds.shape[1]
     input_names = {inp.name for inp in decoder_sess.get_inputs()}
     has_position_ids = "position_ids" in input_names
-
-    # Initialize caches
-    cache = {}
-    for inp in decoder_sess.get_inputs():
-        if inp.name not in ["inputs_embeds", "attention_mask", "position_ids"]:
-            shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-            cache[inp.name] = np.zeros(shape, dtype=np.float32)
-
-    outputs_info = decoder_sess.get_outputs()
+    cache = initialize_cache(decoder_sess)
     all_logits = []
     generated_tokens = []
     cur_len = seq_len
@@ -234,18 +223,7 @@ def generate_onnx(
         result = decoder_sess.run(None, feed)
         logits = result[0][0, -1]
         all_logits.append(logits)
-
-        # Update caches
-        for i, out_info in enumerate(outputs_info[1:], 1):
-            out_name = out_info.name
-            if "present_conv" in out_name:
-                cache_name = out_name.replace("present_conv", "past_conv")
-            elif "present." in out_name:
-                cache_name = out_name.replace("present.", "past_key_values.")
-            else:
-                continue
-            if cache_name in cache:
-                cache[cache_name] = result[i]
+        update_cache(cache, result, decoder_sess.get_outputs())
 
         next_token = int(np.argmax(logits))
         generated_tokens.append(next_token)
@@ -256,14 +234,6 @@ def generate_onnx(
 
     text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
     return generated_tokens, np.stack(all_logits) if all_logits else np.array([]), text
-
-
-def compare_logits(pytorch_logits, onnx_logits) -> float:
-    if len(pytorch_logits) == 0 or len(onnx_logits) == 0:
-        return 1.0
-    min_steps = min(len(pytorch_logits), len(onnx_logits))
-    similarities = [cosine_similarity(pytorch_logits[i], onnx_logits[i]) for i in range(min_steps)]
-    return float(np.mean(similarities))
 
 
 def run_multi_turn_coherence(
@@ -313,7 +283,7 @@ def run_multi_turn_coherence(
             MAX_NEW_TOKENS,
         )
 
-        similarity = compare_logits(pt_logits, ox_logits)
+        similarity = compare_logits_similarity(pt_logits, ox_logits)
         similarities.append(similarity)
 
         logger.info(f"  Turn {turn}: similarity={similarity:.4f}")
@@ -346,16 +316,16 @@ def test_coherence(
 ):
     size, model, processor = pytorch_model
 
-    onnx_dir = get_vl_onnx_dir(exports_dir, size, vision_mode)
+    onnx_dir = get_onnx_dir(exports_dir, size, vision_mode)
     skip_if_missing(onnx_dir, "Export not found")
 
-    decoder_file = get_onnx_file(onnx_dir, "decoder", decoder_bits)
-    embed_images_file = get_onnx_file(onnx_dir, "embed_images", vision_bits)
+    decoder_file = get_onnx_file(onnx_dir, decoder_bits, "decoder")
+    embed_images_file = get_onnx_file(onnx_dir, vision_bits, "embed_images")
     skip_if_missing(decoder_file, "Decoder not found")
     skip_if_missing(embed_images_file, "Vision encoder not found")
-    embed_tokens_sess = load_onnx_session(onnx_dir, "embed_tokens.onnx")
-    embed_images_sess = load_onnx_session(onnx_dir, embed_images_file.name)
-    decoder_sess = load_onnx_session(onnx_dir, decoder_file.name)
+    embed_tokens_sess = load_onnx_session(onnx_dir / "embed_tokens.onnx")
+    embed_images_sess = load_onnx_session(embed_images_file)
+    decoder_sess = load_onnx_session(decoder_file)
 
     if scenario == "single":
         images = [Image.open(cardinal_image).convert("RGB")]

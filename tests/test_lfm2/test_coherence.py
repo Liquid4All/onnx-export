@@ -5,8 +5,8 @@ Tests whether ONNX models maintain coherent multi-turn conversations
 compared to PyTorch reference.
 
 Run with:
-    pytest tests/test_lfm2/test_coherence.py -v
-    pytest tests/test_lfm2/test_coherence.py -v -k "1.2B and q4"
+    uv run pytest tests/test_lfm2/test_coherence.py -v
+    uv run pytest tests/test_lfm2/test_coherence.py -v -k "1.2B and q4"
 """
 
 import logging
@@ -15,14 +15,12 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from test_lfm2.conftest import MODELS
-from test_lfm2.helpers import (
-    cosine_similarity,
-    get_onnx_dir,
-    get_onnx_file,
-    load_onnx_session,
-    skip_if_missing,
-)
+from helpers import skip_if_missing
+
+from liquidonnx.lfm2 import MODELS
+from liquidonnx.lfm2.generate import get_onnx_dir
+from liquidonnx.session import get_onnx_file, initialize_cache, load_onnx_session, update_cache
+from liquidonnx.verify import compare_logits_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -91,15 +89,7 @@ def generate_onnx(
 
     input_names = {inp.name for inp in session.get_inputs()}
     has_position_ids = "position_ids" in input_names
-
-    # Initialize caches
-    cache = {}
-    for inp in session.get_inputs():
-        if inp.name not in ["input_ids", "attention_mask", "position_ids"]:
-            shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-            cache[inp.name] = np.zeros(shape, dtype=np.float32)
-
-    outputs_info = session.get_outputs()
+    cache = initialize_cache(session)
 
     for step in range(max_new_tokens):
         cur_len = len(generated)
@@ -121,18 +111,7 @@ def generate_onnx(
         result = session.run(None, feed)
         logits = result[0][0, -1]
         all_logits.append(logits)
-
-        # Update caches
-        for i, out_info in enumerate(outputs_info[1:], 1):
-            out_name = out_info.name
-            if "present_conv" in out_name:
-                cache_name = out_name.replace("present_conv", "past_conv")
-            elif "present." in out_name:
-                cache_name = out_name.replace("present.", "past_key_values.")
-            else:
-                continue
-            if cache_name in cache:
-                cache[cache_name] = result[i]
+        update_cache(cache, result, session.get_outputs())
 
         next_token = int(np.argmax(logits))
         generated.append(next_token)
@@ -141,15 +120,6 @@ def generate_onnx(
             break
 
     return generated, np.stack(all_logits) if all_logits else np.array([])
-
-
-def compare_logits(pytorch_logits: np.ndarray, onnx_logits: np.ndarray) -> float:
-    """Compare logits and return average cosine similarity."""
-    if len(pytorch_logits) == 0 or len(onnx_logits) == 0:
-        return 1.0
-    min_steps = min(len(pytorch_logits), len(onnx_logits))
-    similarities = [cosine_similarity(pytorch_logits[i], onnx_logits[i]) for i in range(min_steps)]
-    return float(np.mean(similarities))
 
 
 def run_multi_turn_coherence(
@@ -187,8 +157,7 @@ def run_multi_turn_coherence(
             onnx_session, tokenizer, onnx_input, MAX_NEW_TOKENS
         )
 
-        # Compare logits
-        similarity = compare_logits(pytorch_logits, onnx_logits)
+        similarity = compare_logits_similarity(pytorch_logits, onnx_logits)
         similarities.append(similarity)
 
         # Decode responses

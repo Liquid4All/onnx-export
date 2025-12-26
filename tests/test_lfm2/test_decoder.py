@@ -4,8 +4,8 @@ Verify decoder ONNX export against PyTorch reference.
 Tests single-step logit comparison between PyTorch and ONNX models.
 
 Run with:
-    pytest tests/test_lfm2/test_decoder.py -v
-    pytest tests/test_lfm2/test_decoder.py -v -k "350M and q4"
+    uv run pytest tests/test_lfm2/test_decoder.py -v
+    uv run pytest tests/test_lfm2/test_decoder.py -v -k "350M and q4"
 """
 
 import logging
@@ -14,18 +14,13 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from test_lfm2.conftest import MODELS
-from test_lfm2.helpers import (
-    assert_results,
-    bits_to_str,
-    compare_arrays,
-    compare_top_k,
-    get_onnx_dir,
-    get_onnx_file,
-    get_tolerances,
-    load_onnx_session,
-    skip_if_missing,
-)
+from helpers import skip_if_missing
+
+from liquidonnx.lfm2 import MODELS
+from liquidonnx.lfm2.generate import get_onnx_dir
+from liquidonnx.quantize import bits_to_str
+from liquidonnx.session import get_onnx_file, load_onnx_session
+from liquidonnx.verify import check_results, compare_arrays, compare_top_k, get_tolerances
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +29,7 @@ PROMPTS = ["Hello, how are", "The sky is", "1 + 1 ="]
 QUANT_CONFIGS = [
     pytest.param(None, ["arrays", "top_k"], id="fp32"),
     pytest.param(4, ["top_k"], id="q4"),
+    # no arrays check: combined model.onnx quantizes embeddings, causing higher error
     pytest.param(8, ["top_k"], id="q8"),
 ]
 
@@ -99,7 +95,9 @@ def test_decoder(
         # Quantized models may have slight logit differences causing token reordering
         min_overlap = 3 if bits else 5
         results.append(
-            compare_top_k(f"top-5: '{prompt[:20]}...'", pytorch_logits, onnx_logits, min_overlap=min_overlap)
+            compare_top_k(
+                f"top-5: '{prompt[:20]}...'", pytorch_logits, onnx_logits, min_overlap=min_overlap
+            )
         )
 
-    assert_results(results, logger)
+    check_results(results, logger)

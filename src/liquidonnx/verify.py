@@ -1,14 +1,13 @@
-"""Shared test utilities for LFM2 tests."""
+"""
+Model output verification utilities.
 
-import logging
-import pathlib
+Provides functions for comparing model outputs between reference (PyTorch)
+and exported (ONNX) models, with tolerance handling for quantized models.
+"""
+
 from dataclasses import dataclass
 
 import numpy as np
-import onnxruntime as ort
-import pytest
-
-logger = logging.getLogger(__name__)
 
 ATOL = 1e-3
 RTOL = 1e-2
@@ -26,18 +25,15 @@ class VerificationResult:
     details: str = ""
 
 
-def bits_to_str(bits: int | None) -> str:
-    return f"q{bits}" if bits else "fp32"
-
-
 def get_tolerances(bits: int | None) -> tuple[float, float]:
+    """Get (atol, rtol) based on quantization level."""
     if bits:
         return ATOL_QUANT, RTOL_QUANT
     return ATOL, RTOL
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """Compute cosine similarity between two vectors."""
+    """Compute cosine similarity between two arrays."""
     a_flat = a.flatten()
     b_flat = b.flatten()
     dot = np.dot(a_flat, b_flat)
@@ -48,40 +44,19 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(dot / (norm_a * norm_b))
 
 
-def get_onnx_dir(exports_dir: pathlib.Path, size: str) -> pathlib.Path:
-    """Get ONNX directory for a model size."""
-    return exports_dir / f"LFM2-{size}-ONNX" / "onnx"
-
-
-def get_onnx_file(onnx_dir: pathlib.Path, bits: int | None) -> pathlib.Path:
-    """Get ONNX model file for given quantization.
-
-    Args:
-        onnx_dir: Directory containing ONNX files
-        bits: None for fp32, 4 for q4, 8 for q8
-
-    Returns:
-        Path to ONNX file
-    """
-    if bits is None:
-        return onnx_dir / "model.onnx"
-    return onnx_dir / f"model_q{bits}.onnx"
-
-
-def skip_if_missing(path: pathlib.Path, reason: str = "File not found"):
-    """Skip test if path doesn't exist."""
-    if not path.exists():
-        pytest.skip(f"{reason}: {path}")
-
-
-def load_onnx_session(onnx_path: pathlib.Path) -> ort.InferenceSession:
-    """Load ONNX model as inference session."""
-    return ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+def compare_logits_similarity(expected: np.ndarray, actual: np.ndarray) -> float:
+    """Compare sequences of logits, returning mean cosine similarity."""
+    if len(expected) == 0 or len(actual) == 0:
+        return 1.0
+    min_steps = min(len(expected), len(actual))
+    similarities = [cosine_similarity(expected[i], actual[i]) for i in range(min_steps)]
+    return float(np.mean(similarities))
 
 
 def compare_arrays(
     name: str, expected: np.ndarray, actual: np.ndarray, atol: float, rtol: float
 ) -> VerificationResult:
+    """Compare two arrays with tolerance checking."""
     if expected.shape != actual.shape:
         return VerificationResult(
             name=name,
@@ -108,7 +83,11 @@ def compare_arrays(
 
 
 def compare_top_k(
-    name: str, expected: np.ndarray, actual: np.ndarray, k: int = 5, min_overlap: int = 5
+    name: str,
+    expected: np.ndarray,
+    actual: np.ndarray,
+    k: int = 5,
+    min_overlap: int | None = None,
 ) -> VerificationResult:
     """Compare top-k predictions between expected and actual logits.
 
@@ -117,7 +96,7 @@ def compare_top_k(
         expected: Expected logits
         actual: Actual logits
         k: Number of top predictions to compare
-        min_overlap: Minimum overlap required to pass (default: k for exact match)
+        min_overlap: Minimum overlap required to pass (default: requires top-1 match)
     """
     exp_logits = expected[0, -1]
     act_logits = actual[0, -1]
@@ -127,7 +106,11 @@ def compare_top_k(
 
     top1_match = exp_top_k[0] == act_top_k[0]
     top_k_overlap = len(set(exp_top_k) & set(act_top_k))
-    passed = top_k_overlap >= min_overlap
+
+    if min_overlap is not None:
+        passed = top_k_overlap >= min_overlap
+    else:
+        passed = top1_match
 
     return VerificationResult(
         name=name,
@@ -140,11 +123,51 @@ def compare_top_k(
     )
 
 
-def assert_results(results: list[VerificationResult], log=None):
+def compare_correlation(
+    name: str, expected: np.ndarray, actual: np.ndarray, threshold: float
+) -> VerificationResult:
+    """Check correlation between arrays (for quantized models)."""
+    if expected.shape != actual.shape:
+        return VerificationResult(
+            name=name,
+            passed=False,
+            max_diff=float("inf"),
+            mean_diff=float("inf"),
+            correlation=0.0,
+            details=f"Shape mismatch: {expected.shape} vs {actual.shape}",
+        )
+
+    diff = np.abs(expected - actual)
+    max_diff = float(diff.max())
+    mean_diff = float(diff.mean())
+    correlation = float(np.corrcoef(expected.flatten(), actual.flatten())[0, 1])
+    passed = correlation >= threshold
+
+    return VerificationResult(
+        name=name,
+        passed=passed,
+        max_diff=max_diff,
+        mean_diff=mean_diff,
+        correlation=correlation,
+        details=f"threshold={threshold}",
+    )
+
+
+class VerificationError(AssertionError):
+    """Raised when verification fails."""
+
+    pass
+
+
+def check_results(results: list[VerificationResult], log=None):
+    """Check all verification results, raise VerificationError if any failed."""
     for r in results:
         status = "PASS" if r.passed else "FAIL"
         if log:
             log.info(f"  {r.name}: {status} max_diff={r.max_diff:.6f} corr={r.correlation:.4f}")
             if r.details:
                 log.info(f"    {r.details}")
-        assert r.passed, f"{r.name}: max_diff={r.max_diff:.6f}, corr={r.correlation:.4f}, {r.details}"
+        if not r.passed:
+            raise VerificationError(
+                f"{r.name}: max_diff={r.max_diff:.6f}, corr={r.correlation:.4f}, {r.details}"
+            )

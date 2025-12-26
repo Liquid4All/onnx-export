@@ -29,6 +29,18 @@ def load_pytorch_model(model_path: str) -> tuple:
 
 
 @pytest.fixture(scope="module")
+def model_processor(request):
+    """Load processor for model size. Use with indirect=True.
+
+    Lighter alternative to pytorch_model when full model isn't needed.
+    Returns (size, processor) tuple.
+    """
+    size = request.param
+    processor = AutoProcessor.from_pretrained(MODELS[size], trust_remote_code=True)
+    return size, processor
+
+
+@pytest.fixture(scope="module")
 def pytorch_model(request):
     """Load PyTorch model for current test group. Use with indirect=True.
 

@@ -1,4 +1,10 @@
-"""Verify decoder ONNX export against PyTorch reference."""
+"""
+Verify decoder ONNX export against PyTorch reference.
+
+Run with:
+    uv run pytest tests/test_lfm2_vl/test_decoder.py -v
+    uv run pytest tests/test_lfm2_vl/test_decoder.py -v -k "450M and q4"
+"""
 
 import logging
 import pathlib
@@ -6,34 +12,29 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from test_lfm2_vl.helpers import (
-    assert_results,
-    bits_to_str,
-    compare_arrays,
-    compare_top_k,
-    get_onnx_file,
-    get_tolerances,
-    get_vl_onnx_dir,
-    load_onnx_session,
-    skip_if_missing,
-)
+from helpers import skip_if_missing
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
+from liquidonnx.lfm2_vl.generate import get_onnx_dir
+from liquidonnx.quantize import bits_to_str
+from liquidonnx.session import get_onnx_file, load_onnx_session
+from liquidonnx.verify import check_results, compare_arrays, compare_top_k, get_tolerances
 
 logger = logging.getLogger(__name__)
 
 PROMPTS = ["Hello, how are", "The image shows", "I can see"]
 
-DECODER_CONFIGS = [
+QUANT_CONFIGS = [
     pytest.param(None, ["arrays", "top_k"], id="fp32"),
     pytest.param(4, ["top_k"], id="q4"),
+    # arrays check ok: embed_tokens.onnx stays fp32, reducing quantization error
     pytest.param(8, ["arrays", "top_k"], id="q8"),
 ]
 
 
 # pytorch_model outermost so same model runs consecutively (memory optimization)
 @pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
-@pytest.mark.parametrize("decoder_bits,checks", DECODER_CONFIGS)
+@pytest.mark.parametrize("decoder_bits,checks", QUANT_CONFIGS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_decoder(
     exports_dir: pathlib.Path,
@@ -45,13 +46,13 @@ def test_decoder(
     size, model, processor = pytorch_model
     logger.info(f"Testing {size}/{bits_to_str(decoder_bits)}: '{prompt}'")
 
-    onnx_dir = get_vl_onnx_dir(exports_dir, size, VISION_MODE_TILED)
+    onnx_dir = get_onnx_dir(exports_dir, size, VISION_MODE_TILED)
     skip_if_missing(onnx_dir, "Export not found")
 
-    decoder_file = get_onnx_file(onnx_dir, "decoder", decoder_bits)
+    decoder_file = get_onnx_file(onnx_dir, decoder_bits, "decoder")
     skip_if_missing(decoder_file, "Decoder not found")
-    embed_tokens_sess = load_onnx_session(onnx_dir, "embed_tokens.onnx")
-    decoder_sess = load_onnx_session(onnx_dir, decoder_file.name)
+    embed_tokens_sess = load_onnx_session(onnx_dir / "embed_tokens.onnx")
+    decoder_sess = load_onnx_session(decoder_file)
 
     input_ids = processor.tokenizer.encode(prompt, return_tensors="pt")
     seq_len = input_ids.shape[1]
@@ -97,6 +98,11 @@ def test_decoder(
             compare_arrays(f"decoder: '{prompt[:20]}...'", pytorch_logits, onnx_logits, atol, rtol)
         )
     if "top_k" in checks:
-        results.append(compare_top_k(f"top-5: '{prompt[:20]}...'", pytorch_logits, onnx_logits))
+        min_overlap = 3 if decoder_bits else 5
+        results.append(
+            compare_top_k(
+                f"top-5: '{prompt[:20]}...'", pytorch_logits, onnx_logits, min_overlap=min_overlap
+            )
+        )
 
-    assert_results(results, logger)
+    check_results(results, logger)

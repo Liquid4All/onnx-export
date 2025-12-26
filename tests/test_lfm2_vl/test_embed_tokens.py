@@ -1,4 +1,10 @@
-"""Verify embed_tokens ONNX export against PyTorch reference."""
+"""
+Verify embed_tokens ONNX export against PyTorch reference.
+
+Run with:
+    uv run pytest tests/test_lfm2_vl/test_embed_tokens.py -v
+    uv run pytest tests/test_lfm2_vl/test_embed_tokens.py -v -k "450M"
+"""
 
 import logging
 import pathlib
@@ -6,16 +12,12 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from test_lfm2_vl.helpers import (
-    assert_results,
-    compare_arrays,
-    get_tolerances,
-    get_vl_onnx_dir,
-    load_onnx_session,
-    skip_if_missing,
-)
+from helpers import skip_if_missing
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
+from liquidonnx.lfm2_vl.generate import get_onnx_dir
+from liquidonnx.session import load_onnx_session
+from liquidonnx.verify import check_results, compare_arrays, get_tolerances
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +31,11 @@ def test_embed_tokens(exports_dir: pathlib.Path, pytorch_model, prompt: str):
     size, model, processor = pytorch_model
     logger.info(f"Testing {size}: '{prompt}'")
 
-    onnx_dir = get_vl_onnx_dir(exports_dir, size, VISION_MODE_TILED)
+    onnx_dir = get_onnx_dir(exports_dir, size, VISION_MODE_TILED)
     skip_if_missing(onnx_dir, "Export not found")
-    skip_if_missing(onnx_dir / "onnx" / "embed_tokens.onnx", "embed_tokens not found")
+    skip_if_missing(onnx_dir / "embed_tokens.onnx", "embed_tokens not found")
 
-    embed_tokens_sess = load_onnx_session(onnx_dir, "embed_tokens.onnx")
+    embed_tokens_sess = load_onnx_session(onnx_dir / "embed_tokens.onnx")
 
     input_ids = processor.tokenizer.encode(prompt, return_tensors="pt")
 
@@ -52,4 +54,4 @@ def test_embed_tokens(exports_dir: pathlib.Path, pytorch_model, prompt: str):
         f"embed_tokens: '{prompt[:20]}...'", pytorch_embeds, onnx_embeds, atol, rtol
     )
 
-    assert_results([result], logger)
+    check_results([result], logger)

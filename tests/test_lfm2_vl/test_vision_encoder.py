@@ -1,8 +1,13 @@
-"""Verify vision encoder ONNX export against PyTorch reference.
+"""
+Verify vision encoder ONNX export against PyTorch reference.
 
 Note: Only tests tiled format. Conv2d format uses different preprocessing
 (our preprocess_conv2d vs HuggingFace processor) which causes numerical
 differences. Coherence tests verify conv2d works end-to-end.
+
+Run with:
+    uv run pytest tests/test_lfm2_vl/test_vision_encoder.py -v
+    uv run pytest tests/test_lfm2_vl/test_vision_encoder.py -v -k "450M and q4"
 """
 
 import logging
@@ -11,27 +16,21 @@ import pathlib
 import numpy as np
 import pytest
 import torch
+from helpers import skip_if_missing
 from PIL import Image
-from test_lfm2_vl.helpers import (
-    assert_results,
-    bits_to_str,
-    compare_arrays,
-    compare_correlation,
-    get_onnx_file,
-    get_tolerances,
-    get_vl_onnx_dir,
-    load_onnx_session,
-    pad_to_square,
-    skip_if_missing,
-)
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
+from liquidonnx.lfm2_vl.generate import get_onnx_dir
+from liquidonnx.lfm2_vl.preprocessing import pad_to_square
+from liquidonnx.quantize import bits_to_str
+from liquidonnx.session import get_onnx_file, load_onnx_session
+from liquidonnx.verify import check_results, compare_arrays, compare_correlation, get_tolerances
 
 logger = logging.getLogger(__name__)
 
 VISION_CORRELATION_THRESHOLD = 0.89
 
-VISION_CONFIGS = [
+QUANT_CONFIGS = [
     pytest.param(None, ["arrays"], id="fp32"),
     pytest.param(4, ["correlation"], id="q4"),
     pytest.param(8, ["arrays"], id="q8"),
@@ -113,7 +112,7 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, v
 # pytorch_model outermost so same model runs consecutively (memory optimization)
 # Only tests tiled format (conv2d has different preprocessing, verified via coherence tests)
 @pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
-@pytest.mark.parametrize("vision_bits,checks", VISION_CONFIGS)
+@pytest.mark.parametrize("vision_bits,checks", QUANT_CONFIGS)
 def test_vision_encoder(
     exports_dir: pathlib.Path,
     cardinal_image: pathlib.Path,
@@ -124,13 +123,13 @@ def test_vision_encoder(
     size, model, processor = pytorch_model
     logger.info(f"Testing vision encoder {size}/tiled/{bits_to_str(vision_bits)}")
 
-    onnx_dir = get_vl_onnx_dir(exports_dir, size, VISION_MODE_TILED)
+    onnx_dir = get_onnx_dir(exports_dir, size, VISION_MODE_TILED)
     skip_if_missing(onnx_dir, "Export not found")
 
-    embed_images_file = get_onnx_file(onnx_dir, "embed_images", vision_bits)
+    embed_images_file = get_onnx_file(onnx_dir, vision_bits, "embed_images")
     skip_if_missing(embed_images_file, "Vision encoder not found")
 
-    embed_images_sess = load_onnx_session(onnx_dir, embed_images_file.name)
+    embed_images_sess = load_onnx_session(embed_images_file)
     image = Image.open(cardinal_image).convert("RGB")
 
     pytorch_embeddings, inputs = get_pytorch_vision_embeddings(model, processor, image)
@@ -138,4 +137,4 @@ def test_vision_encoder(
         embed_images_sess, inputs, pytorch_embeddings, checks, vision_bits
     )
 
-    assert_results(results, logger)
+    check_results(results, logger)
