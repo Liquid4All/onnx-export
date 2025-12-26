@@ -3,9 +3,8 @@
 ONNX inference script for LFM2 text models.
 
 Usage:
-    uv run inference.py --model LFM2-1.2B-ONNX-builder-Q4-fp32head
-    uv run inference.py --model LFM2-1.2B-ONNX-builder-Q4-fp32head --prompt "Hello, how are you?"
-    uv run inference.py --model LFM2-1.2B-ONNX-builder-Q4-fp32head --max-tokens 100
+    uv run lfm2-infer --model exports/LFM2-1.2B-ONNX
+    uv run lfm2-infer --model exports/LFM2-1.2B-ONNX --prompt "Hello"
 """
 
 import argparse
@@ -38,19 +37,15 @@ class TextModelInference:
         """Load tokenizer and ONNX model."""
         logger.info(f"Loading model from {self.model_path}...")
 
-        # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(str(self.model_path), trust_remote_code=True)
 
-        # Load ONNX model
         onnx_path = self.model_path / "onnx" / "decoder.onnx"
         if not onnx_path.exists():
-            # Try model.onnx for non-split models
             onnx_path = self.model_path / "onnx" / "model.onnx"
 
         logger.info(f"Loading ONNX from {onnx_path}...")
         self.session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
 
-        # Get model info
         self.input_names = {inp.name for inp in self.session.get_inputs()}
         logger.info(f"Model loaded. Inputs: {list(self.input_names)[:5]}...")
 
@@ -61,20 +56,14 @@ class TextModelInference:
         stream: bool = True,
     ) -> str:
         """Generate response for chat messages."""
-        # Apply chat template
         prompt = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-
-        # Tokenize
         input_ids = np.array(
             [self.tokenizer.encode(prompt, add_special_tokens=False)], dtype=np.int64
         )
 
-        # Initialize cache
         cache = initialize_cache(self.session)
-
-        # Get output info
         output_infos = self.session.get_outputs()
 
         seq_len = input_ids.shape[1]
@@ -84,7 +73,6 @@ class TextModelInference:
         cur_len = seq_len
 
         for step in range(max_new_tokens):
-            # Build inputs
             if step == 0:
                 ids = input_ids
                 pos = position_ids
@@ -99,24 +87,19 @@ class TextModelInference:
                 feed["position_ids"] = pos
             feed.update(cache)
 
-            # Run inference
             outputs = self.session.run(None, feed)
             logits = outputs[0][0, -1]
 
-            # Greedy decoding
             next_token = int(np.argmax(logits))
             generated_tokens.append(next_token)
 
-            # Update cache
             update_cache(cache, outputs, output_infos)
             cur_len += 1
 
-            # Stream output
             if stream:
                 token_str = self.tokenizer.decode([next_token])
                 print(token_str, end="", flush=True)
 
-            # Check for EOS
             if next_token == self.tokenizer.eos_token_id:
                 break
 
@@ -136,7 +119,6 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
-    # Load model
     model = TextModelInference(args.model)
     model.load()
 
@@ -147,7 +129,6 @@ def main():
 
     messages = []
 
-    # Initial prompt if provided
     if args.prompt:
         messages.append({"role": "user", "content": args.prompt})
         print(f"User: {args.prompt}")
@@ -159,7 +140,6 @@ def main():
         if args.no_stream:
             print(response)
 
-    # Interactive loop
     while True:
         try:
             user_input = input("\nUser: ").strip()
