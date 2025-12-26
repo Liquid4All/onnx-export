@@ -12,7 +12,6 @@ Set ONNX_COMMUNITY_DIR environment variable to the directory containing communit
 """
 
 import logging
-import os
 import pathlib
 
 import numpy as np
@@ -22,6 +21,7 @@ from helpers import skip_if_missing
 
 from liquidonnx.lfm2 import MODELS
 from liquidonnx.lfm2.generate import get_onnx_dir
+from liquidonnx.quantize import bits_to_str
 from liquidonnx.session import get_onnx_file, load_onnx_session
 
 logger = logging.getLogger(__name__)
@@ -34,15 +34,6 @@ QUANT_CONFIGS = [
 PROMPTS = ["Hello, how are", "The sky is", "1 + 1 ="]
 
 
-@pytest.fixture(scope="session")
-def community_dir() -> pathlib.Path:
-    """Base directory for onnx-community models."""
-    env_dir = os.environ.get("ONNX_COMMUNITY_DIR")
-    if env_dir:
-        return pathlib.Path(env_dir)
-    return pathlib.Path.home() / "workplace" / "models" / "onnx-community"
-
-
 def get_community_onnx_dir(community_dir: pathlib.Path, size: str) -> pathlib.Path:
     """Get onnx-community model directory."""
     return community_dir / f"LFM2-{size}-ONNX" / "onnx"
@@ -53,10 +44,6 @@ def get_community_onnx_file(onnx_dir: pathlib.Path, bits: int | None) -> pathlib
     if bits is None:
         return onnx_dir / "model.onnx"
     return onnx_dir / f"model_q{bits}.onnx"
-
-
-def bits_to_str(bits: int | None) -> str:
-    return f"q{bits}" if bits else "fp32"
 
 
 def compute_metrics(expected: np.ndarray, actual: np.ndarray) -> dict:
