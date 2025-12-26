@@ -27,7 +27,7 @@ from liquidonnx.lfm2_vl.preprocessing import (
     preprocess_conv2d,
 )
 from liquidonnx.session import get_onnx_file, load_onnx_session
-from liquidonnx.verify import cosine_similarity
+from liquidonnx.verify import compare_logits_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -255,14 +255,6 @@ def generate_onnx(
     return generated_tokens, np.stack(all_logits) if all_logits else np.array([]), text
 
 
-def compare_logits(pytorch_logits, onnx_logits) -> float:
-    if len(pytorch_logits) == 0 or len(onnx_logits) == 0:
-        return 1.0
-    min_steps = min(len(pytorch_logits), len(onnx_logits))
-    similarities = [cosine_similarity(pytorch_logits[i], onnx_logits[i]) for i in range(min_steps)]
-    return float(np.mean(similarities))
-
-
 def run_multi_turn_coherence(
     model,
     processor,
@@ -310,7 +302,7 @@ def run_multi_turn_coherence(
             MAX_NEW_TOKENS,
         )
 
-        similarity = compare_logits(pt_logits, ox_logits)
+        similarity = compare_logits_similarity(pt_logits, ox_logits)
         similarities.append(similarity)
 
         logger.info(f"  Turn {turn}: similarity={similarity:.4f}")
