@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 VISION_CORRELATION_THRESHOLD = 0.89
 
-VISION_CONFIGS = [
+QUANT_CONFIGS = [
     pytest.param(None, ["arrays"], id="fp32"),
     pytest.param(4, ["correlation"], id="q4"),
     pytest.param(8, ["arrays"], id="q8"),
@@ -107,7 +107,7 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, v
 # pytorch_model outermost so same model runs consecutively (memory optimization)
 # Only tests tiled format (conv2d has different preprocessing, verified via coherence tests)
 @pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
-@pytest.mark.parametrize("vision_bits,checks", VISION_CONFIGS)
+@pytest.mark.parametrize("vision_bits,checks", QUANT_CONFIGS)
 def test_vision_encoder(
     exports_dir: pathlib.Path,
     cardinal_image: pathlib.Path,
