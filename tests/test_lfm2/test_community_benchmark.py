@@ -19,7 +19,6 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 from helpers import get_community_onnx_dir, get_community_onnx_file, skip_if_missing
-from transformers import AutoTokenizer
 
 from liquidonnx.lfm2 import MODELS
 from liquidonnx.lfm2.generate import get_onnx_dir
@@ -47,12 +46,6 @@ class BenchmarkResult:
     decode_ms_per_token: float
     tokens_per_sec: float
     total_tokens: int
-
-
-@pytest.fixture(scope="module")
-def tokenizer():
-    """Load tokenizer."""
-    return AutoTokenizer.from_pretrained("LiquidAI/LFM2-350M", trust_remote_code=True)
 
 
 def run_benchmark(
@@ -160,16 +153,16 @@ def benchmark_model(
     )
 
 
-@pytest.mark.parametrize("size", MODELS.keys())
+@pytest.mark.parametrize("model_tokenizer", MODELS.keys(), indirect=True)
 @pytest.mark.parametrize("bits", QUANT_CONFIGS)
 def test_benchmark_comparison(
     exports_dir: pathlib.Path,
     community_dir: pathlib.Path,
-    tokenizer,
-    size: str,
+    model_tokenizer,
     bits: int,
 ):
     """Benchmark local vs community ONNX models."""
+    size, tokenizer = model_tokenizer
     logger.info(f"Benchmarking {size}/q{bits}")
 
     # Check local export exists

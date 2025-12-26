@@ -26,6 +26,18 @@ def load_pytorch_model(model_path: str) -> tuple:
 
 
 @pytest.fixture(scope="module")
+def model_tokenizer(request):
+    """Load tokenizer for model size. Use with indirect=True.
+
+    Lighter alternative to pytorch_model when full model isn't needed.
+    Returns (size, tokenizer) tuple.
+    """
+    size = request.param
+    tokenizer = AutoTokenizer.from_pretrained(MODELS[size], trust_remote_code=True)
+    return size, tokenizer
+
+
+@pytest.fixture(scope="module")
 def pytorch_model(request):
     """Load PyTorch model for current test group. Use with indirect=True.
 
