@@ -237,6 +237,9 @@ def export_vl_model(
         layer_type = vl_config.text_config.layer_types[layer_idx]
         logger.info(f"Building text layer {layer_idx} ({layer_type})...")
 
+        # Prepare weights for this layer (handles transposition, adds initializers)
+        text_builder.prepare_layer_weights(layer_idx, layer_type)
+
         if layer_type == "conv":
             hidden_state = text_builder.build_conv_layer(layer_idx, hidden_state)
         else:

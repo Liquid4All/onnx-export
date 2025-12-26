@@ -23,13 +23,11 @@ from dataclasses import dataclass
 
 import numpy as np
 import onnx
-from onnx import TensorProto, helper, numpy_helper
+from onnx import TensorProto, helper
+
+from liquidonnx.builder_base import SLICE_END, ONNXBuilderBase
 
 logger = logging.getLogger(__name__)
-
-# Constants for ONNX slice operations
-# Large value for ONNX Slice "end" parameter (means "slice to end")
-SLICE_END = np.array([np.iinfo(np.int64).max], dtype=np.int64)
 
 
 @dataclass
@@ -63,7 +61,7 @@ class LFM2Config:
         )
 
 
-class LFM2Builder:
+class LFM2Builder(ONNXBuilderBase):
     """
     LFM2 model builder for ONNX export.
 
@@ -74,6 +72,7 @@ class LFM2Builder:
     """
 
     def __init__(self, config: LFM2Config):
+        super().__init__()
         self.config = config
         self.head_dim = config.hidden_size // config.num_attention_heads
 
@@ -81,58 +80,10 @@ class LFM2Builder:
         self.conv_indices = [i for i, t in enumerate(config.layer_types) if t == "conv"]
         self.attn_indices = [i for i, t in enumerate(config.layer_types) if t == "full_attention"]
 
-        # Graph components
-        self.nodes: list[onnx.NodeProto] = []
-        self.inputs: list[onnx.ValueInfoProto] = []
-        self.outputs: list[onnx.ValueInfoProto] = []
-        self.initializers: list[onnx.TensorProto] = []
-
-        # Weights storage
-        self.weights: dict[str, np.ndarray] = {}
-
-        # Node counter for unique names
-        self._node_count = 0
-
-    def _unique_name(self, prefix: str) -> str:
-        self._node_count += 1
-        return f"{prefix}_{self._node_count}"
-
-    def add_initializer(self, name: str, tensor: np.ndarray, dtype=None):
-        """Add weight tensor as graph initializer."""
-        if dtype is None:
-            # Default to float32 for weights, preserve dtype for constants
-            if tensor.dtype in [np.int32, np.int64]:
-                pass  # Keep int types as-is
-            else:
-                tensor = tensor.astype(np.float32)
-        else:
-            tensor = tensor.astype(dtype)
-        self.initializers.append(numpy_helper.from_array(tensor, name))
-
-    def make_node(
-        self,
-        op_type: str,
-        inputs: list[str],
-        outputs: list[str],
-        name: str = None,
-        domain: str = "",
-        **attrs,
-    ) -> str:
-        """Create an ONNX node and return the first output name."""
-        if name is None:
-            name = self._unique_name(op_type)
-
-        node = helper.make_node(op_type, inputs, outputs, name=name, domain=domain, **attrs)
-        self.nodes.append(node)
-        return outputs[0] if outputs else None
-
-    def make_layernorm(self, input_name: str, weight_name: str, output_name: str) -> str:
-        """Create SimplifiedLayerNormalization node."""
-        return self.make_node(
-            "SimplifiedLayerNormalization",
-            inputs=[input_name, weight_name],
-            outputs=[output_name],
-            epsilon=self.config.norm_eps,
+    def make_simple_layernorm(self, input_name: str, weight_name: str, output_name: str) -> str:
+        """Create SimplifiedLayerNormalization node (no bias)."""
+        return self.make_layernorm(
+            input_name, weight_name, None, output_name, epsilon=self.config.norm_eps
         )
 
     def make_skip_layernorm(
@@ -145,76 +96,6 @@ class LFM2Builder:
             outputs=[output_name],
             domain="com.microsoft",
             epsilon=self.config.norm_eps,
-        )
-
-    def make_matmul(self, input_name: str, weight_name: str, output_name: str) -> str:
-        """Create MatMul node."""
-        return self.make_node("MatMul", [input_name, weight_name], [output_name])
-
-    def make_add(self, a: str, b: str, output_name: str) -> str:
-        """Create Add node."""
-        return self.make_node("Add", [a, b], [output_name])
-
-    def make_mul(self, a: str, b: str, output_name: str) -> str:
-        """Create Mul node."""
-        return self.make_node("Mul", [a, b], [output_name])
-
-    def make_sigmoid(self, input_name: str, output_name: str) -> str:
-        """Create Sigmoid node."""
-        return self.make_node("Sigmoid", [input_name], [output_name])
-
-    def make_silu(self, input_name: str, output_name: str) -> str:
-        """Create SiLU activation (x * sigmoid(x))."""
-        sigmoid_out = self.make_sigmoid(input_name, f"{output_name}_sigmoid")
-        return self.make_mul(input_name, sigmoid_out, output_name)
-
-    def make_linear(
-        self, input_name: str, weight_key: str, output_prefix: str, transpose: bool = True
-    ) -> str:
-        """Create linear projection (MatMul with weight).
-
-        Args:
-            input_name: Input tensor name
-            weight_key: Key in self.weights dict
-            output_prefix: Prefix for output tensor name
-            transpose: Whether to transpose weight (True for [out, in] -> [in, out])
-
-        Returns:
-            Output tensor name
-        """
-        weight = self.weights[weight_key]
-        if transpose:
-            weight = weight.T
-        weight_name = weight_key.replace(".", "_")
-        self.add_initializer(weight_name, weight)
-        return self.make_matmul(input_name, weight_name, f"{output_prefix}/linear")
-
-    def make_slice_last_n(
-        self, input_name: str, n_elements: str, output_name: str, axis: int = 2
-    ) -> str:
-        """Slice last N elements along axis (dynamic N).
-
-        Args:
-            input_name: Input tensor name
-            n_elements: Name of scalar tensor containing N
-            output_name: Output tensor name
-            axis: Axis to slice along
-
-        Returns:
-            Output tensor name
-        """
-        prefix = f"{output_name}_slice"
-        # Negate n to get start position from end
-        self.add_initializer(f"{prefix}/neg1", np.array(-1, dtype=np.int64))
-        neg_n = self.make_node("Mul", [n_elements, f"{prefix}/neg1"], [f"{prefix}/neg_n"])
-        # Unsqueeze for slice
-        self.add_initializer(f"{prefix}/axes0", np.array([0], dtype=np.int64))
-        start = self.make_node("Unsqueeze", [neg_n, f"{prefix}/axes0"], [f"{prefix}/start"])
-        # Slice to end
-        self.add_initializer(f"{prefix}/end", SLICE_END.copy())
-        self.add_initializer(f"{prefix}/axis", np.array([axis], dtype=np.int64))
-        return self.make_node(
-            "Slice", [input_name, start, f"{prefix}/end", f"{prefix}/axis"], [output_name]
         )
 
     def prepare_layer_weights(self, layer_idx: int, layer_type: str):
@@ -472,7 +353,7 @@ class LFM2Builder:
         residual = hidden_state
 
         # === Operator LayerNorm ===
-        normed = self.make_layernorm(
+        normed = self.make_simple_layernorm(
             hidden_state, f"{prefix}.operator_norm.weight", f"{prefix}/op_norm"
         )
 
@@ -585,7 +466,7 @@ class LFM2Builder:
         residual = hidden_state
 
         # === Operator LayerNorm ===
-        normed = self.make_layernorm(
+        normed = self.make_simple_layernorm(
             hidden_state, f"{prefix}.operator_norm.weight", f"{prefix}/op_norm"
         )
 
@@ -598,13 +479,15 @@ class LFM2Builder:
         # Reshape to [B, -1, head_dim] for per-head norm
         self.add_initializer(f"{prefix}/reshape_for_norm", np.array([0, -1, hd], dtype=np.int64))
         self.add_initializer(f"{prefix}/q_reshape_back", np.array([0, -1, H], dtype=np.int64))
-        self.add_initializer(f"{prefix}/k_reshape_back", np.array([0, -1, kv_hidden], dtype=np.int64))
+        self.add_initializer(
+            f"{prefix}/k_reshape_back", np.array([0, -1, kv_hidden], dtype=np.int64)
+        )
 
         # Q norm
         q_for_norm = self.make_node(
             "Reshape", [q, f"{prefix}/reshape_for_norm"], [f"{prefix}/q_for_norm"]
         )
-        q_normed = self.make_layernorm(
+        q_normed = self.make_simple_layernorm(
             q_for_norm, f"{prefix}.self_attn.q_layernorm.weight", f"{prefix}/q_normed"
         )
         q_3d = self.make_node("Reshape", [q_normed, f"{prefix}/q_reshape_back"], [f"{prefix}/q_3d"])
@@ -613,14 +496,19 @@ class LFM2Builder:
         k_for_norm = self.make_node(
             "Reshape", [k, f"{prefix}/reshape_for_norm"], [f"{prefix}/k_for_norm"]
         )
-        k_normed = self.make_layernorm(
+        k_normed = self.make_simple_layernorm(
             k_for_norm, f"{prefix}.self_attn.k_layernorm.weight", f"{prefix}/k_normed"
         )
         k_3d = self.make_node("Reshape", [k_normed, f"{prefix}/k_reshape_back"], [f"{prefix}/k_3d"])
 
         # === RoPE (Rotary Position Embedding) ===
         # num_heads=0, rotary_embedding_dim=0 lets operator infer from tensor shapes
-        rope_attrs = {"domain": "com.microsoft", "interleaved": 0, "num_heads": 0, "rotary_embedding_dim": 0}
+        rope_attrs = {
+            "domain": "com.microsoft",
+            "interleaved": 0,
+            "num_heads": 0,
+            "rotary_embedding_dim": 0,
+        }
         q_rope = self.make_node(
             "RotaryEmbedding",
             [q_3d, "position_ids", "cos_cache", "sin_cache"],
@@ -639,7 +527,9 @@ class LFM2Builder:
         self.make_node(
             "GroupQueryAttention",
             [
-                q_rope, k_rope, v,
+                q_rope,
+                k_rope,
+                v,
                 f"past_key_values.{layer_idx}.key",
                 f"past_key_values.{layer_idx}.value",
                 "/attn_mask/seqlens_k",
@@ -691,7 +581,7 @@ class LFM2Builder:
         residual = hidden_state
 
         # FFN LayerNorm
-        normed = self.make_layernorm(
+        normed = self.make_simple_layernorm(
             hidden_state, f"{prefix}.ffn_norm.weight", f"{prefix}/ffn_norm"
         )
 
@@ -790,25 +680,6 @@ class LFM2Builder:
         # LM head
         self.build_lm_head(hidden_state)
 
-        # Create graph
-        graph = helper.make_graph(
-            self.nodes,
-            "lfm2",
-            self.inputs,
-            self.outputs,
-            self.initializers,
-        )
-
-        # Create model
-        model = helper.make_model(
-            graph,
-            opset_imports=[
-                helper.make_opsetid("", 21),
-                helper.make_opsetid("com.microsoft", 1),
-            ],
-            ir_version=9,
-        )
-        model.producer_name = "lfm2-builder"
-
+        model = self.build_graph("lfm2", producer_name="lfm2-builder")
         logger.info(f"Model built: {len(self.nodes)} nodes")
         return model
