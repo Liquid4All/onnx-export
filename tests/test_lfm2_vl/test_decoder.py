@@ -19,9 +19,9 @@ logger = logging.getLogger(__name__)
 PROMPTS = ["Hello, how are", "The image shows", "I can see"]
 
 QUANT_CONFIGS = [
-    pytest.param(None, ["arrays", "top_k"], id="fp32"),
-    pytest.param(4, ["top_k"], id="q4"),
-    pytest.param(8, ["arrays", "top_k"], id="q8"),
+    pytest.param(None, ["arrays", "top_k"], id="fp32"),  # exact array match + top-k
+    pytest.param(4, ["top_k"], id="q4"),  # quantization error too high for array match
+    pytest.param(8, ["arrays", "top_k"], id="q8"),  # q8 retains enough precision
 ]
 
 
