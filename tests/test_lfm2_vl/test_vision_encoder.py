@@ -15,9 +15,10 @@ from helpers import skip_if_missing
 from PIL import Image
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
-from liquidonnx.lfm2_vl.inference import get_onnx_dir, get_onnx_file, load_onnx_session
+from liquidonnx.lfm2_vl.generate import get_onnx_dir
 from liquidonnx.lfm2_vl.preprocessing import pad_to_square
 from liquidonnx.quantize import bits_to_str
+from liquidonnx.session import get_onnx_file, load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, compare_correlation, get_tolerances
 
 logger = logging.getLogger(__name__)
@@ -120,10 +121,10 @@ def test_vision_encoder(
     onnx_dir = get_onnx_dir(exports_dir, size, VISION_MODE_TILED)
     skip_if_missing(onnx_dir, "Export not found")
 
-    embed_images_file = get_onnx_file(onnx_dir, "embed_images", vision_bits)
+    embed_images_file = get_onnx_file(onnx_dir, vision_bits, "embed_images")
     skip_if_missing(embed_images_file, "Vision encoder not found")
 
-    embed_images_sess = load_onnx_session(onnx_dir, embed_images_file.name)
+    embed_images_sess = load_onnx_session(embed_images_file)
     image = Image.open(cardinal_image).convert("RGB")
 
     pytorch_embeddings, inputs = get_pytorch_vision_embeddings(model, processor, image)

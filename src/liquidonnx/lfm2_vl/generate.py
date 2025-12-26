@@ -34,35 +34,14 @@ from liquidonnx.lfm2_vl.preprocessing import (
     preprocess_conv2d,
     preprocess_tiled,
 )
+from liquidonnx.session import initialize_cache, update_cache
 
 logger = logging.getLogger(__name__)
 
 
 def get_onnx_dir(exports_dir: Path, size: str, vision_mode: str) -> Path:
     """Get ONNX directory for a VL model size and vision mode."""
-    return exports_dir / f"LFM2-VL-{size}-ONNX-{vision_mode}"
-
-
-def get_onnx_file(onnx_dir: Path, name: str, bits: int | None) -> Path:
-    """Get ONNX model file for given component and quantization.
-
-    Args:
-        onnx_dir: Directory containing ONNX files
-        name: Component name (embed_tokens, embed_images, decoder)
-        bits: None for fp32, 4 for q4, 8 for q8
-    """
-    if bits:
-        return onnx_dir / "onnx" / f"{name}_q{bits}.onnx"
-    return onnx_dir / "onnx" / f"{name}_fp32.onnx"
-
-
-def load_onnx_session(onnx_dir: Path, filename: str) -> ort.InferenceSession:
-    """Load ONNX model as inference session."""
-    path = onnx_dir / "onnx" / filename
-    if not path.exists():
-        raise FileNotFoundError(f"{filename} not found in {onnx_dir / 'onnx'}")
-    logger.info(f"Loading {filename}...")
-    return ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    return exports_dir / f"LFM2-VL-{size}-ONNX-{vision_mode}" / "onnx"
 
 
 class VLModelInference:
@@ -172,34 +151,6 @@ class VLModelInference:
         text_embeds = self._get_text_embeddings(input_ids)[0]  # [seq_len, hidden]
         return build_inputs_embeds(text_embeds, image_embeds_list, self.image_token_id, input_ids)
 
-    def _initialize_cache(self) -> dict:
-        """Initialize cache tensors for decoder."""
-        cache = {}
-        for inp in self.decoder_sess.get_inputs():
-            name = inp.name
-            if name in ["inputs_embeds", "attention_mask", "position_ids"]:
-                continue
-            shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-            # Set sequence dimension to 0 for KV cache
-            for i, d in enumerate(inp.shape):
-                if isinstance(d, str) and "sequence" in d.lower():
-                    shape[i] = 0
-            cache[name] = np.zeros(shape, dtype=np.float32)
-        return cache
-
-    def _update_cache(self, cache: dict, outputs: list):
-        """Update cache from decoder outputs."""
-        output_names = [out.name for out in self.decoder_sess.get_outputs()]
-        for i, name in enumerate(output_names[1:], 1):  # Skip logits
-            if "present_conv" in name:
-                cache_name = name.replace("present_conv", "past_conv")
-            elif "present." in name:
-                cache_name = name.replace("present.", "past_key_values.")
-            else:
-                continue
-            if cache_name in cache:
-                cache[cache_name] = outputs[i]
-
     def generate(
         self,
         messages: list,
@@ -262,7 +213,7 @@ class VLModelInference:
             inputs_embeds = self._get_text_embeddings(input_ids)
 
         # Initialize cache
-        cache = self._initialize_cache()
+        cache = initialize_cache(self.decoder_sess)
 
         # Check for position_ids input
         has_position_ids = "position_ids" in {inp.name for inp in self.decoder_sess.get_inputs()}
@@ -300,7 +251,7 @@ class VLModelInference:
             generated_tokens.append(next_token)
 
             # Update cache
-            self._update_cache(cache, outputs)
+            update_cache(cache, outputs, self.decoder_sess.get_outputs())
             cur_len += 1
 
             # Stream output

@@ -1081,8 +1081,8 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     vision_builder.load_weights(weights)
     vision_model = vision_builder.build()
 
-    vision_path = os.path.join(onnx_dir, "embed_images_fp32.onnx")
-    vision_data_path = os.path.join(onnx_dir, "embed_images_fp32.onnx_data")
+    vision_path = os.path.join(onnx_dir, "embed_images.onnx")
+    vision_data_path = os.path.join(onnx_dir, "embed_images.onnx_data")
     if os.path.exists(vision_data_path):
         os.remove(vision_data_path)
     onnx.save_model(
@@ -1090,7 +1090,7 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
         vision_path,
         save_as_external_data=True,
         all_tensors_to_one_file=True,
-        location="embed_images_fp32.onnx_data",
+        location="embed_images.onnx_data",
         size_threshold=1024,
     )
     logger.info(f"embed_images saved to {vision_path}")
@@ -1236,8 +1236,8 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     text_builder.initializers.clear()
     gc.collect()
 
-    decoder_path = os.path.join(onnx_dir, "decoder_fp32.onnx")
-    decoder_data_path = os.path.join(onnx_dir, "decoder_fp32.onnx_data")
+    decoder_path = os.path.join(onnx_dir, "decoder.onnx")
+    decoder_data_path = os.path.join(onnx_dir, "decoder.onnx_data")
     if os.path.exists(decoder_data_path):
         os.remove(decoder_data_path)
 
@@ -1247,7 +1247,7 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
         decoder_path,
         save_as_external_data=True,
         all_tensors_to_one_file=True,
-        location="decoder_fp32.onnx_data",
+        location="decoder.onnx_data",
         size_threshold=1024,
     )  # Move tensors > 1KB to external file
     logger.info(f"decoder saved to {decoder_path}")

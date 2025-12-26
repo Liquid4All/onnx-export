@@ -9,7 +9,8 @@ import torch
 from helpers import skip_if_missing
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
-from liquidonnx.lfm2_vl.inference import get_onnx_dir, load_onnx_session
+from liquidonnx.lfm2_vl.generate import get_onnx_dir
+from liquidonnx.session import load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, get_tolerances
 
 logger = logging.getLogger(__name__)
@@ -26,9 +27,9 @@ def test_embed_tokens(exports_dir: pathlib.Path, pytorch_model, prompt: str):
 
     onnx_dir = get_onnx_dir(exports_dir, size, VISION_MODE_TILED)
     skip_if_missing(onnx_dir, "Export not found")
-    skip_if_missing(onnx_dir / "onnx" / "embed_tokens.onnx", "embed_tokens not found")
+    skip_if_missing(onnx_dir / "embed_tokens.onnx", "embed_tokens not found")
 
-    embed_tokens_sess = load_onnx_session(onnx_dir, "embed_tokens.onnx")
+    embed_tokens_sess = load_onnx_session(onnx_dir / "embed_tokens.onnx")
 
     input_ids = processor.tokenizer.encode(prompt, return_tensors="pt")
 

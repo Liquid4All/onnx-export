@@ -43,7 +43,7 @@ import logging
 import pathlib
 
 from liquidonnx.lfm2 import MODELS
-from liquidonnx.lfm2.export import export_model
+from liquidonnx.lfm2.builder import export_model
 from liquidonnx.quantize import get_model_size, quantize_model
 
 logger = logging.getLogger(__name__)

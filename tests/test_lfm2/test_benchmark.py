@@ -22,7 +22,8 @@ import pytest
 from helpers import skip_if_missing
 from transformers import AutoTokenizer
 
-from liquidonnx.lfm2.inference import get_onnx_dir, get_onnx_file
+from liquidonnx.lfm2.generate import get_onnx_dir
+from liquidonnx.session import get_onnx_file
 
 logger = logging.getLogger(__name__)
 

@@ -9,8 +9,9 @@ import torch
 from helpers import skip_if_missing
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
-from liquidonnx.lfm2_vl.inference import get_onnx_dir, get_onnx_file, load_onnx_session
+from liquidonnx.lfm2_vl.generate import get_onnx_dir
 from liquidonnx.quantize import bits_to_str
+from liquidonnx.session import get_onnx_file, load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, compare_top_k, get_tolerances
 
 logger = logging.getLogger(__name__)
@@ -41,10 +42,10 @@ def test_decoder(
     onnx_dir = get_onnx_dir(exports_dir, size, VISION_MODE_TILED)
     skip_if_missing(onnx_dir, "Export not found")
 
-    decoder_file = get_onnx_file(onnx_dir, "decoder", decoder_bits)
+    decoder_file = get_onnx_file(onnx_dir, decoder_bits, "decoder")
     skip_if_missing(decoder_file, "Decoder not found")
-    embed_tokens_sess = load_onnx_session(onnx_dir, "embed_tokens.onnx")
-    decoder_sess = load_onnx_session(onnx_dir, decoder_file.name)
+    embed_tokens_sess = load_onnx_session(onnx_dir / "embed_tokens.onnx")
+    decoder_sess = load_onnx_session(decoder_file)
 
     input_ids = processor.tokenizer.encode(prompt, return_tensors="pt")
     seq_len = input_ids.shape[1]

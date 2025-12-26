@@ -19,13 +19,14 @@ from helpers import skip_if_missing
 from PIL import Image
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D, VISION_MODE_TILED, VISION_MODES
-from liquidonnx.lfm2_vl.inference import get_onnx_dir, get_onnx_file, load_onnx_session
+from liquidonnx.lfm2_vl.generate import get_onnx_dir
 from liquidonnx.lfm2_vl.preprocessing import (
     detect_vision_format,
     get_image_token_id,
     pad_to_square,
     preprocess_conv2d,
 )
+from liquidonnx.session import get_onnx_file, load_onnx_session
 from liquidonnx.verify import cosine_similarity
 
 logger = logging.getLogger(__name__)
@@ -345,13 +346,13 @@ def test_coherence(
     onnx_dir = get_onnx_dir(exports_dir, size, vision_mode)
     skip_if_missing(onnx_dir, "Export not found")
 
-    decoder_file = get_onnx_file(onnx_dir, "decoder", decoder_bits)
-    embed_images_file = get_onnx_file(onnx_dir, "embed_images", vision_bits)
+    decoder_file = get_onnx_file(onnx_dir, decoder_bits, "decoder")
+    embed_images_file = get_onnx_file(onnx_dir, vision_bits, "embed_images")
     skip_if_missing(decoder_file, "Decoder not found")
     skip_if_missing(embed_images_file, "Vision encoder not found")
-    embed_tokens_sess = load_onnx_session(onnx_dir, "embed_tokens.onnx")
-    embed_images_sess = load_onnx_session(onnx_dir, embed_images_file.name)
-    decoder_sess = load_onnx_session(onnx_dir, decoder_file.name)
+    embed_tokens_sess = load_onnx_session(onnx_dir / "embed_tokens.onnx")
+    embed_images_sess = load_onnx_session(embed_images_file)
+    decoder_sess = load_onnx_session(decoder_file)
 
     if scenario == "single":
         images = [Image.open(cardinal_image).convert("RGB")]

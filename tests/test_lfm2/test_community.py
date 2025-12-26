@@ -20,7 +20,8 @@ import pytest
 import torch
 from helpers import skip_if_missing
 
-from liquidonnx.lfm2.inference import get_onnx_dir, get_onnx_file, load_onnx_session
+from liquidonnx.lfm2.generate import get_onnx_dir
+from liquidonnx.session import get_onnx_file, load_onnx_session
 
 logger = logging.getLogger(__name__)
 

@@ -13,10 +13,10 @@ Output Structure (Transformers.js compatible):
         ├── tokenizer.json
         └── onnx/
             ├── embed_tokens.onnx
-            ├── embed_images_fp32.onnx
+            ├── embed_images.onnx
             ├── embed_images_q4.onnx
             ├── embed_images_q8.onnx
-            ├── decoder_fp32.onnx
+            ├── decoder.onnx
             ├── decoder_q4.onnx
             └── decoder_q8.onnx
 
@@ -46,7 +46,7 @@ import logging
 import pathlib
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODES
-from liquidonnx.lfm2_vl.export import export_vl_model
+from liquidonnx.lfm2_vl.builder import export_vl_model
 from liquidonnx.quantize import get_model_size, quantize_model
 
 logger = logging.getLogger(__name__)
@@ -75,9 +75,7 @@ def do_quantize(
     )
 
     # Quantize embed_images
-    embed_fp32 = onnx_dir / "embed_images_fp32.onnx"
-    if not embed_fp32.exists():
-        embed_fp32 = onnx_dir / "embed_images.onnx"
+    embed_fp32 = onnx_dir / "embed_images.onnx"
 
     embed_output = onnx_dir / f"embed_images_q{vision_bits}.onnx"
     if embed_fp32.exists() and not embed_output.exists():
@@ -92,9 +90,7 @@ def do_quantize(
         )
 
     # Quantize decoder
-    decoder_fp32 = onnx_dir / "decoder_fp32.onnx"
-    if not decoder_fp32.exists():
-        decoder_fp32 = onnx_dir / "decoder.onnx"
+    decoder_fp32 = onnx_dir / "decoder.onnx"
 
     decoder_output = onnx_dir / f"decoder_q{decoder_bits}.onnx"
     if decoder_fp32.exists() and not decoder_output.exists():

@@ -1,6 +1,6 @@
 """LFM2 text model ONNX export and inference."""
 
-from .export import LFM2Builder, LFM2Config, export_model
+from .builder import LFM2Builder, LFM2Config, export_model
 
 MODELS = {
     "350M": "LiquidAI/LFM2-350M",
