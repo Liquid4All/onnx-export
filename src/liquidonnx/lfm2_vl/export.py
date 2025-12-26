@@ -43,11 +43,17 @@ Usage:
 """
 
 import argparse
+import gc
+import json
 import logging
 import pathlib
 
-from liquidonnx.lfm2_vl import MODELS, VISION_MODES
-from liquidonnx.lfm2_vl.builder import export_vl_model
+import onnx
+from onnx import TensorProto, helper
+
+from liquidonnx.lfm2.builder import LFM2Builder
+from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED, VISION_MODES
+from liquidonnx.lfm2_vl.builder import EmbedTokensBuilder, LFM2VLConfig, VisionEmbedBuilder
 from liquidonnx.quantize import get_model_size, quantize_model
 
 logger = logging.getLogger(__name__)
@@ -58,10 +64,275 @@ def get_output_dir(size: str, fmt: str, output_base: pathlib.Path) -> pathlib.Pa
     return output_base / "exports" / f"LFM2-VL-{size}-ONNX-{fmt}"
 
 
+def export_vl_model(
+    model_path: str, output_dir: pathlib.Path | str, vision_input_format: str = VISION_MODE_TILED
+):
+    """Export LFM2-VL model to ONNX (embed_tokens + embed_images + decoder).
+
+    Args:
+        model_path: HuggingFace model path
+        output_dir: Output directory for ONNX files
+        vision_input_format: "tiled" for [B, N, 768] or "conv2d" for [B, 3, H, W]
+    """
+    import torch
+    from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
+
+    output_dir = pathlib.Path(output_dir)
+    logger.info(f"Vision input format: {vision_input_format}")
+
+    # Load config
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    vl_config = LFM2VLConfig.from_hf_config(config)
+
+    # Load model weights
+    logger.info(f"Loading weights from {model_path}...")
+    model = AutoModelForImageTextToText.from_pretrained(
+        model_path, torch_dtype=torch.float32, trust_remote_code=True
+    )
+
+    weights = {}
+    for name, param in model.named_parameters():
+        weights[name] = param.detach().numpy()
+        logger.debug(f"Loaded: {name} {param.shape}")
+
+    logger.info(f"Loaded {len(weights)} total weights")
+
+    del model
+    gc.collect()
+
+    # Create output directories
+    output_dir.mkdir(parents=True, exist_ok=True)
+    onnx_dir = output_dir / "onnx"
+    onnx_dir.mkdir(exist_ok=True)
+
+    # =========================================================================
+    # 1. Export embed_tokens (token embedding lookup)
+    # =========================================================================
+    logger.info("Exporting embed_tokens...")
+    embed_tokens_builder = EmbedTokensBuilder(vl_config)
+    embed_tokens_builder.load_weights(weights)
+    embed_tokens_model = embed_tokens_builder.build()
+
+    embed_tokens_path = onnx_dir / "embed_tokens.onnx"
+    onnx.save_model(embed_tokens_model, str(embed_tokens_path))
+    logger.info(f"embed_tokens saved to {embed_tokens_path}")
+    del embed_tokens_model
+    del embed_tokens_builder
+
+    # =========================================================================
+    # 2. Export embed_images (vision encoder + projector)
+    # =========================================================================
+    logger.info(
+        f"Exporting embed_images (vision encoder + projector) [{vision_input_format} mode]..."
+    )
+    vision_builder = VisionEmbedBuilder(vl_config, vision_input_format=vision_input_format)
+    vision_builder.load_weights(weights)
+    vision_model = vision_builder.build()
+
+    vision_path = onnx_dir / "embed_images.onnx"
+    vision_data_path = onnx_dir / "embed_images.onnx_data"
+    if vision_data_path.exists():
+        vision_data_path.unlink()
+    onnx.save_model(
+        vision_model,
+        str(vision_path),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="embed_images.onnx_data",
+        size_threshold=1024,
+    )
+    logger.info(f"embed_images saved to {vision_path}")
+
+    del vision_model
+    del vision_builder
+    gc.collect()
+
+    # =========================================================================
+    # 3. Export decoder (takes inputs_embeds, not input_ids)
+    # =========================================================================
+    logger.info("Exporting decoder (with inputs_embeds input)...")
+
+    text_builder = LFM2Builder(vl_config.text_config)
+
+    # Filter text model weights (they have "model.language_model." prefix in VL model)
+    for name, weight in weights.items():
+        if name.startswith("model.language_model."):
+            new_name = name.replace("model.language_model.", "model.")
+            text_builder.weights[new_name] = weight
+        elif name.startswith("language_model."):
+            new_name = name.replace("language_model.", "model.")
+            text_builder.weights[new_name] = weight
+
+    weights.clear()
+    gc.collect()
+
+    # Build custom inputs: inputs_embeds instead of input_ids
+    H = vl_config.text_config.hidden_size
+
+    text_builder.inputs.append(
+        helper.make_tensor_value_info(
+            "inputs_embeds", TensorProto.FLOAT, ["batch_size", "sequence_length", H]
+        )
+    )
+    text_builder.inputs.append(
+        helper.make_tensor_value_info(
+            "attention_mask", TensorProto.INT64, ["batch_size", "total_sequence_length"]
+        )
+    )
+    text_builder.inputs.append(
+        helper.make_tensor_value_info(
+            "position_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
+        )
+    )
+
+    # Conv caches
+    for idx in text_builder.conv_indices:
+        text_builder.inputs.append(
+            helper.make_tensor_value_info(
+                f"past_conv.{idx}",
+                TensorProto.FLOAT,
+                ["batch_size", H, vl_config.text_config.conv_L_cache],
+            )
+        )
+
+    # KV caches
+    for idx in text_builder.attn_indices:
+        text_builder.inputs.append(
+            helper.make_tensor_value_info(
+                f"past_key_values.{idx}.key",
+                TensorProto.FLOAT,
+                [
+                    "batch_size",
+                    vl_config.text_config.num_key_value_heads,
+                    "past_sequence_length",
+                    text_builder.head_dim,
+                ],
+            )
+        )
+        text_builder.inputs.append(
+            helper.make_tensor_value_info(
+                f"past_key_values.{idx}.value",
+                TensorProto.FLOAT,
+                [
+                    "batch_size",
+                    vl_config.text_config.num_key_value_heads,
+                    "past_sequence_length",
+                    text_builder.head_dim,
+                ],
+            )
+        )
+
+    text_builder.build_outputs()
+    text_builder.build_rope_cache()
+    text_builder.build_attention_mask_subgraph()
+
+    # Skip build_embedding() - use inputs_embeds directly as hidden_state
+    # But we still need embed_tokens weight for lm_head (tied weights)
+    text_builder.add_initializer(
+        "model.embed_tokens.weight", text_builder.weights["model.embed_tokens.weight"]
+    )
+    hidden_state = "inputs_embeds"
+
+    for layer_idx in range(vl_config.text_config.num_hidden_layers):
+        layer_type = vl_config.text_config.layer_types[layer_idx]
+        logger.info(f"Building text layer {layer_idx} ({layer_type})...")
+
+        if layer_type == "conv":
+            hidden_state = text_builder.build_conv_layer(layer_idx, hidden_state)
+        else:
+            hidden_state = text_builder.build_attention_layer(layer_idx, hidden_state)
+
+    text_builder.build_lm_head(hidden_state)
+
+    text_builder.weights.clear()
+    gc.collect()
+
+    logger.info("Building decoder graph...")
+    text_graph = helper.make_graph(
+        text_builder.nodes,
+        "decoder",
+        text_builder.inputs,
+        text_builder.outputs,
+        text_builder.initializers,
+    )
+
+    text_model = helper.make_model(
+        text_graph,
+        opset_imports=[
+            helper.make_opsetid("", 21),
+            helper.make_opsetid("com.microsoft", 1),
+        ],
+        ir_version=9,
+    )
+    text_model.producer_name = "lfm2-vl-builder"
+
+    text_builder.nodes.clear()
+    text_builder.initializers.clear()
+    gc.collect()
+
+    decoder_path = onnx_dir / "decoder.onnx"
+    decoder_data_path = onnx_dir / "decoder.onnx_data"
+    if decoder_data_path.exists():
+        decoder_data_path.unlink()
+
+    logger.info("Saving decoder (this may take a while for large models)...")
+    onnx.save_model(
+        text_model,
+        str(decoder_path),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="decoder.onnx_data",
+        size_threshold=1024,
+    )
+    logger.info(f"decoder saved to {decoder_path}")
+
+    del text_model
+    gc.collect()
+
+    # Copy tokenizer and config
+    try:
+        processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+        processor.save_pretrained(output_dir)
+    except Exception as e:
+        logger.warning(f"Could not save processor: {e}")
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        tokenizer.save_pretrained(output_dir)
+
+    config.save_pretrained(output_dir)
+
+    # Create generation_config.json
+    gen_config = {
+        "_from_model_config": True,
+        "bos_token_id": config.text_config.bos_token_id
+        if hasattr(config.text_config, "bos_token_id")
+        else 1,
+        "eos_token_id": config.text_config.eos_token_id
+        if hasattr(config.text_config, "eos_token_id")
+        else 7,
+        "pad_token_id": 0,
+        "transformers_version": "4.57.0",
+    }
+    gen_config_path = output_dir / "generation_config.json"
+    gen_config_path.write_text(json.dumps(gen_config, indent=2))
+
+    # Print summary
+    total_size = 0
+    for fpath in onnx_dir.iterdir():
+        if fpath.is_file():
+            size = fpath.stat().st_size
+            total_size += size
+            logger.info(f"  {fpath.name}: {size / 1e6:.1f} MB")
+
+    logger.info(f"Total ONNX size: {total_size / 1e9:.2f} GB")
+    logger.info(f"Output directory: {output_dir}")
+
+    return output_dir
+
+
 def do_export(model_path: str, output_path: pathlib.Path, fmt: str):
     """Export a single VL model to ONNX (FP32)."""
     logger.info(f"Exporting {model_path} to {output_path}...")
-    export_vl_model(model_path, str(output_path), vision_input_format=fmt)
+    export_vl_model(model_path, output_path, vision_input_format=fmt)
 
 
 def do_quantize(
