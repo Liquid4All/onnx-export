@@ -22,13 +22,12 @@ import pytest
 from helpers import skip_if_missing
 from transformers import AutoTokenizer
 
+from liquidonnx.lfm2 import MODELS
 from liquidonnx.lfm2.generate import get_onnx_dir
 from liquidonnx.quantize import get_total_model_size_mb
 from liquidonnx.session import get_onnx_file
 
 logger = logging.getLogger(__name__)
-
-SIZES = ["350M", "700M", "1.2B", "2.6B"]
 
 QUANT_CONFIGS = [
     pytest.param(4, id="q4"),
@@ -201,7 +200,7 @@ def benchmark_model(
     )
 
 
-@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("size", MODELS.keys())
 @pytest.mark.parametrize("bits", QUANT_CONFIGS)
 def test_benchmark_comparison(
     exports_dir: pathlib.Path,

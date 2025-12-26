@@ -20,12 +20,11 @@ import pytest
 import torch
 from helpers import skip_if_missing
 
+from liquidonnx.lfm2 import MODELS
 from liquidonnx.lfm2.generate import get_onnx_dir
 from liquidonnx.session import get_onnx_file, load_onnx_session
 
 logger = logging.getLogger(__name__)
-
-SIZES = ["350M", "700M", "1.2B", "2.6B"]
 
 QUANT_CONFIGS = [
     pytest.param(None, id="fp32"),
@@ -83,7 +82,7 @@ def compute_metrics(expected: np.ndarray, actual: np.ndarray) -> dict:
     }
 
 
-@pytest.mark.parametrize("pytorch_model", SIZES, indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
 @pytest.mark.parametrize("bits", QUANT_CONFIGS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_community_comparison(
