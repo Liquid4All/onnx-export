@@ -40,6 +40,12 @@ def get_model_size(path: pathlib.Path) -> tuple[float, float]:
     return model_size, data_size
 
 
+def get_total_model_size_mb(path: pathlib.Path) -> float:
+    """Return total model size in MB (model + external data)."""
+    model_mb, data_mb = get_model_size(path)
+    return model_mb + data_mb
+
+
 def quantize_model(
     model_path: pathlib.Path,
     output_path: pathlib.Path,

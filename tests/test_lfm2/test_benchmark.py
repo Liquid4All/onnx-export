@@ -23,6 +23,7 @@ from helpers import skip_if_missing
 from transformers import AutoTokenizer
 
 from liquidonnx.lfm2.generate import get_onnx_dir
+from liquidonnx.quantize import get_total_model_size_mb
 from liquidonnx.session import get_onnx_file
 
 logger = logging.getLogger(__name__)
@@ -71,15 +72,6 @@ def get_community_onnx_dir(community_dir: pathlib.Path, size: str) -> pathlib.Pa
 
 def get_community_onnx_file(onnx_dir: pathlib.Path, bits: int) -> pathlib.Path:
     return onnx_dir / f"model_q{bits}.onnx"
-
-
-def get_model_size_mb(path: pathlib.Path) -> float:
-    """Get total model size in MB (including external data)."""
-    total = path.stat().st_size if path.exists() else 0
-    data_file = path.with_suffix(".onnx_data")
-    if data_file.exists():
-        total += data_file.stat().st_size
-    return total / (1024 * 1024)
 
 
 def run_benchmark(
@@ -178,7 +170,7 @@ def benchmark_model(
     """Benchmark a single model."""
     import onnxruntime as ort
 
-    size_mb = get_model_size_mb(onnx_path)
+    size_mb = get_total_model_size_mb(onnx_path)
 
     # Load model
     load_start = time.perf_counter()

@@ -17,24 +17,9 @@ from pathlib import Path
 
 import numpy as np
 
+from liquidonnx.quantize import get_total_model_size_mb
+
 logger = logging.getLogger(__name__)
-
-
-def get_model_size_mb(onnx_path: str) -> float:
-    """Get total model size in MB (including external data)."""
-    path = Path(onnx_path)
-    total = path.stat().st_size if path.exists() else 0
-
-    # Check for external data files (different naming conventions)
-    data_path = Path(str(path) + ".data")
-    if data_path.exists():
-        total += data_path.stat().st_size
-    else:
-        data_path = path.parent / (path.stem + ".onnx_data")
-        if data_path.exists():
-            total += data_path.stat().st_size
-
-    return total / (1024 * 1024)
 
 
 @dataclass
@@ -188,7 +173,7 @@ class ONNXBenchmark:
         sess, load_time, model_file = self.load_onnx_model(onnx_path)
 
         # Get file size
-        file_size_mb = get_model_size_mb(model_file)
+        file_size_mb = get_total_model_size_mb(Path(model_file))
 
         # Prepare inputs
         input_ids = self.tokenizer.encode(prompt)
