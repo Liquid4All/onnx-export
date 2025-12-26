@@ -24,7 +24,7 @@ from transformers import AutoTokenizer
 from liquidonnx.lfm2 import MODELS
 from liquidonnx.lfm2.generate import get_onnx_dir
 from liquidonnx.quantize import get_total_model_size_mb
-from liquidonnx.session import get_onnx_file
+from liquidonnx.session import get_onnx_file, initialize_cache, update_cache
 
 logger = logging.getLogger(__name__)
 
@@ -67,15 +67,7 @@ def run_benchmark(
 
     input_names = {inp.name for inp in sess.get_inputs()}
     has_position_ids = "position_ids" in input_names
-
-    # Initialize caches
-    cache = {}
-    for inp in sess.get_inputs():
-        if inp.name not in ["input_ids", "attention_mask", "position_ids"]:
-            shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-            cache[inp.name] = np.zeros(shape, dtype=np.float32)
-
-    outputs_info = sess.get_outputs()
+    cache = initialize_cache(sess)
 
     # Warmup
     for _ in range(warmup):
@@ -87,11 +79,7 @@ def run_benchmark(
         feed.update(cache)
         sess.run(None, feed)
 
-    # Reset cache
-    for inp in sess.get_inputs():
-        if inp.name not in ["input_ids", "attention_mask", "position_ids"]:
-            shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-            cache[inp.name] = np.zeros(shape, dtype=np.float32)
+    cache = initialize_cache(sess)
 
     prefill_ms = 0.0
     gen_start = None
@@ -120,17 +108,7 @@ def run_benchmark(
             prefill_ms = elapsed * 1000
             gen_start = time.perf_counter()
 
-        # Update caches
-        for i, out_info in enumerate(outputs_info[1:], 1):
-            out_name = out_info.name
-            if "present_conv" in out_name:
-                cache_name = out_name.replace("present_conv", "past_conv")
-            elif "present." in out_name:
-                cache_name = out_name.replace("present.", "past_key_values.")
-            else:
-                continue
-            if cache_name in cache:
-                cache[cache_name] = result[i]
+        update_cache(cache, result, sess.get_outputs())
 
         next_token = int(np.argmax(result[0][0, -1]))
         generated.append(next_token)
