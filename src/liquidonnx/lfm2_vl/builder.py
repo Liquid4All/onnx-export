@@ -1021,12 +1021,14 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
         output_dir: Output directory for ONNX files
         vision_input_format: "tiled" for [B, N, 768] or "conv2d" for [B, 3, H, W]
     """
+    import gc
     import json
-    import os
+    import pathlib
 
     import torch
     from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
 
+    output_dir = pathlib.Path(output_dir)
     logger.info(f"Vision input format: {vision_input_format}")
 
     # Load config
@@ -1047,14 +1049,12 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     logger.info(f"Loaded {len(weights)} total weights")
 
     del model
-    import gc
-
     gc.collect()
 
     # Create output directories
-    os.makedirs(output_dir, exist_ok=True)
-    onnx_dir = os.path.join(output_dir, "onnx")
-    os.makedirs(onnx_dir, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    onnx_dir = output_dir / "onnx"
+    onnx_dir.mkdir(exist_ok=True)
 
     # =========================================================================
     # 1. Export embed_tokens (token embedding lookup)
@@ -1064,9 +1064,9 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     embed_tokens_builder.load_weights(weights)
     embed_tokens_model = embed_tokens_builder.build()
 
-    embed_tokens_path = os.path.join(onnx_dir, "embed_tokens.onnx")
+    embed_tokens_path = onnx_dir / "embed_tokens.onnx"
     # embed_tokens is small enough to not need external data
-    onnx.save_model(embed_tokens_model, embed_tokens_path)
+    onnx.save_model(embed_tokens_model, str(embed_tokens_path))
     logger.info(f"embed_tokens saved to {embed_tokens_path}")
     del embed_tokens_model
     del embed_tokens_builder
@@ -1081,13 +1081,13 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     vision_builder.load_weights(weights)
     vision_model = vision_builder.build()
 
-    vision_path = os.path.join(onnx_dir, "embed_images.onnx")
-    vision_data_path = os.path.join(onnx_dir, "embed_images.onnx_data")
-    if os.path.exists(vision_data_path):
-        os.remove(vision_data_path)
+    vision_path = onnx_dir / "embed_images.onnx"
+    vision_data_path = onnx_dir / "embed_images.onnx_data"
+    if vision_data_path.exists():
+        vision_data_path.unlink()
     onnx.save_model(
         vision_model,
-        vision_path,
+        str(vision_path),
         save_as_external_data=True,
         all_tensors_to_one_file=True,
         location="embed_images.onnx_data",
@@ -1236,15 +1236,15 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
     text_builder.initializers.clear()
     gc.collect()
 
-    decoder_path = os.path.join(onnx_dir, "decoder.onnx")
-    decoder_data_path = os.path.join(onnx_dir, "decoder.onnx_data")
-    if os.path.exists(decoder_data_path):
-        os.remove(decoder_data_path)
+    decoder_path = onnx_dir / "decoder.onnx"
+    decoder_data_path = onnx_dir / "decoder.onnx_data"
+    if decoder_data_path.exists():
+        decoder_data_path.unlink()
 
     logger.info("Saving decoder (this may take a while for large models)...")
     onnx.save_model(
         text_model,
-        decoder_path,
+        str(decoder_path),
         save_as_external_data=True,
         all_tensors_to_one_file=True,
         location="decoder.onnx_data",
@@ -1278,18 +1278,16 @@ def export_vl_model(model_path: str, output_dir: str, vision_input_format: str =
         "pad_token_id": 0,
         "transformers_version": "4.57.0",
     }
-    gen_config_path = os.path.join(output_dir, "generation_config.json")
-    with open(gen_config_path, "w") as f:
-        json.dump(gen_config, f, indent=2)
+    gen_config_path = output_dir / "generation_config.json"
+    gen_config_path.write_text(json.dumps(gen_config, indent=2))
 
     # Print summary
     total_size = 0
-    for f in os.listdir(onnx_dir):
-        fpath = os.path.join(onnx_dir, f)
-        if os.path.isfile(fpath):
-            size = os.path.getsize(fpath)
+    for fpath in onnx_dir.iterdir():
+        if fpath.is_file():
+            size = fpath.stat().st_size
             total_size += size
-            logger.info(f"  {f}: {size / 1e6:.1f} MB")
+            logger.info(f"  {fpath.name}: {size / 1e6:.1f} MB")
 
     logger.info(f"Total ONNX size: {total_size / 1e9:.2f} GB")
     logger.info(f"Output directory: {output_dir}")

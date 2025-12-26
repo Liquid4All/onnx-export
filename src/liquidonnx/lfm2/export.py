@@ -41,7 +41,6 @@ Usage:
 import argparse
 import json
 import logging
-import os
 import pathlib
 
 import onnx
@@ -59,7 +58,7 @@ def get_output_dir(size: str, output_base: pathlib.Path) -> pathlib.Path:
     return output_base / "exports" / f"LFM2-{size}-ONNX"
 
 
-def export_model(model_path: str, output_dir: str):
+def export_model(model_path: str, output_dir: pathlib.Path | str):
     """Export LFM2 model to ONNX.
 
     Creates output structure:
@@ -73,26 +72,27 @@ def export_model(model_path: str, output_dir: str):
             ├── model.onnx
             └── model.onnx_data
     """
+    output_dir = pathlib.Path(output_dir)
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     lfm2_config = LFM2Config.from_hf_config(config)
 
     builder = LFM2Builder(lfm2_config)
     model = builder.build(model_path)
 
-    os.makedirs(output_dir, exist_ok=True)
-    onnx_dir = os.path.join(output_dir, "onnx")
-    os.makedirs(onnx_dir, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    onnx_dir = output_dir / "onnx"
+    onnx_dir.mkdir(exist_ok=True)
 
-    output_path = os.path.join(onnx_dir, "model.onnx")
+    output_path = onnx_dir / "model.onnx"
 
     # Remove existing external data file to avoid appending
-    external_data_path = os.path.join(onnx_dir, "model.onnx_data")
-    if os.path.exists(external_data_path):
-        os.remove(external_data_path)
+    external_data_path = onnx_dir / "model.onnx_data"
+    if external_data_path.exists():
+        external_data_path.unlink()
 
     onnx.save_model(
         model,
-        output_path,
+        str(output_path),
         save_as_external_data=True,
         all_tensors_to_one_file=True,
         location="model.onnx_data",
@@ -113,41 +113,35 @@ def export_model(model_path: str, output_dir: str):
         "pad_token_id": getattr(config, "pad_token_id", 0),
         "transformers_version": "4.54.0",
     }
-    gen_config_path = os.path.join(output_dir, "generation_config.json")
-    with open(gen_config_path, "w") as f:
-        json.dump(gen_config, f, indent=2)
+    gen_config_path = output_dir / "generation_config.json"
+    gen_config_path.write_text(json.dumps(gen_config, indent=2))
 
     # Add transformers.js_config to config.json (for external data support)
-    config_path = os.path.join(output_dir, "config.json")
-    with open(config_path) as f:
-        cfg = json.load(f)
+    config_path = output_dir / "config.json"
+    cfg = json.loads(config_path.read_text())
     cfg["transformers.js_config"] = {
         "kv_cache_dtype": {"fp32": "float32"},
         "use_external_data_format": True,
     }
-    with open(config_path, "w") as f:
-        json.dump(cfg, f, indent=2)
+    config_path.write_text(json.dumps(cfg, indent=2))
 
     # Save chat_template if available
-    tokenizer_config_path = os.path.join(output_dir, "tokenizer_config.json")
-    chat_template_path = os.path.join(output_dir, "chat_template.jinja")
+    tokenizer_config_path = output_dir / "tokenizer_config.json"
+    chat_template_path = output_dir / "chat_template.jinja"
 
     if tokenizer.chat_template:
-        with open(chat_template_path, "w") as f:
-            f.write(tokenizer.chat_template)
+        chat_template_path.write_text(tokenizer.chat_template)
 
-        if os.path.exists(tokenizer_config_path):
-            with open(tokenizer_config_path) as f:
-                tok_cfg = json.load(f)
+        if tokenizer_config_path.exists():
+            tok_cfg = json.loads(tokenizer_config_path.read_text())
             if "chat_template" not in tok_cfg:
                 tok_cfg["chat_template"] = tokenizer.chat_template
-                with open(tokenizer_config_path, "w") as f:
-                    json.dump(tok_cfg, f, indent=2)
+                tokenizer_config_path.write_text(json.dumps(tok_cfg, indent=2))
 
     # Print summary
-    size_mb = os.path.getsize(output_path) / 1e6
-    data_path = os.path.join(onnx_dir, "model.onnx_data")
-    data_size_gb = os.path.getsize(data_path) / 1e9 if os.path.exists(data_path) else 0
+    size_mb = output_path.stat().st_size / 1e6
+    data_path = onnx_dir / "model.onnx_data"
+    data_size_gb = data_path.stat().st_size / 1e9 if data_path.exists() else 0
     logger.info(f"Model size: {size_mb:.2f} MB + {data_size_gb:.2f} GB data")
 
     return output_path
