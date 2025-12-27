@@ -22,6 +22,10 @@ Output Structure (Transformers.js compatible):
             └── decoder_q8.onnx
 
 Usage:
+    # Export from local model path
+    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --tiled
+    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --tiled --quantize
+
     # Export FP32 only (all sizes, both formats)
     uv run lfm2-vl-export --sizes all
 
@@ -395,8 +399,12 @@ def main():
     parser.add_argument(
         "--sizes",
         nargs="+",
-        required=True,
         help="Model sizes: 450M, 1.6B, 3B, or 'all'",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        help="Local model path (alternative to --sizes for local models)",
     )
 
     # Output
@@ -462,24 +470,39 @@ def main():
                 quant_bits.append(int(q))
 
     formats = [m for m in VISION_MODES if getattr(args, m)] or VISION_MODES
-    sizes = list(MODELS.keys()) if "all" in args.sizes else args.sizes
 
-    for s in sizes:
-        if s not in MODELS:
-            parser.error(f"Unknown size: {s}. Available: {', '.join(MODELS.keys())}")
+    # Validate args
+    if args.model_path and args.sizes:
+        parser.error("Cannot specify both --model-path and --sizes")
+    if not args.model_path and not args.sizes:
+        parser.error("Must specify either --model-path or --sizes")
+
+    # Build list of (model_path, output_dir) pairs
+    exports = []
+    if args.model_path:
+        model_name = pathlib.Path(args.model_path).name
+        for fmt in formats:
+            output_dir = args.output_dir / "exports" / f"{model_name}-ONNX-{fmt}"
+            exports.append((args.model_path, output_dir, fmt))
+    else:
+        sizes = list(MODELS.keys()) if "all" in args.sizes else args.sizes
+        for s in sizes:
+            if s not in MODELS:
+                parser.error(f"Unknown size: {s}. Available: {', '.join(MODELS.keys())}")
+        for fmt in formats:
+            for size in sizes:
+                exports.append((MODELS[size], get_output_dir(size, fmt, args.output_dir), fmt))
 
     # Export
     if not args.skip_export:
-        for fmt in formats:
-            for size in sizes:
-                do_export(MODELS[size], get_output_dir(size, fmt, args.output_dir), fmt)
+        for model_path, output_dir, fmt in exports:
+            do_export(model_path, output_dir, fmt)
 
     # Quantize
     for bits in quant_bits:
-        for fmt in formats:
-            for size in sizes:
-                onnx_dir = get_output_dir(size, fmt, args.output_dir) / "onnx"
-                do_quantize(onnx_dir, bits, args.vision_quantize, args.block_size)
+        for _, output_dir, _ in exports:
+            onnx_dir = output_dir / "onnx"
+            do_quantize(onnx_dir, bits, args.vision_quantize, args.block_size)
 
 
 if __name__ == "__main__":

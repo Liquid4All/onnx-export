@@ -81,6 +81,7 @@ class LFM2VLConfig:
     projector_hidden_size: int
     projector_hidden_act: str = "gelu"
     projector_bias: bool = True
+    projector_use_layernorm: bool = True
     downsample_factor: int = 2
     image_token_id: int = 396
     tile_size: int = 512
@@ -94,6 +95,7 @@ class LFM2VLConfig:
             projector_hidden_size=config.projector_hidden_size,
             projector_hidden_act=getattr(config, "projector_hidden_act", "gelu"),
             projector_bias=getattr(config, "projector_bias", True),
+            projector_use_layernorm=getattr(config, "projector_use_layernorm", True),
             downsample_factor=getattr(config, "downsample_factor", 2),
             image_token_id=getattr(config, "image_token_id", 396),
             tile_size=getattr(config, "tile_size", 512),
@@ -685,15 +687,17 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         input_dim = C * ds * ds  # 3072 after pixel unshuffle
 
         # Load weights
-        # Layer norm
-        self.add_initializer(
-            "multi_modal_projector.layer_norm.weight",
-            self.weights["multi_modal_projector.layer_norm.weight"],
-        )
-        self.add_initializer(
-            "multi_modal_projector.layer_norm.bias",
-            self.weights["multi_modal_projector.layer_norm.bias"],
-        )
+        # Layer norm (optional based on config)
+        use_layernorm = getattr(self.config, "projector_use_layernorm", True)
+        if use_layernorm:
+            self.add_initializer(
+                "multi_modal_projector.layer_norm.weight",
+                self.weights["multi_modal_projector.layer_norm.weight"],
+            )
+            self.add_initializer(
+                "multi_modal_projector.layer_norm.bias",
+                self.weights["multi_modal_projector.layer_norm.bias"],
+            )
 
         # Linear layers
         self.add_initializer(
@@ -868,17 +872,20 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         self.add_initializer("proj/reshape_3d", np.array([0, -1, input_dim], dtype=np.int64))
         unshuffled = self.make_node("Reshape", [step4, "proj/reshape_3d"], ["proj/unshuffled"])
 
-        # Step 3: Layer norm
-        normed = self.make_node(
-            "LayerNormalization",
-            [
-                unshuffled,
-                "multi_modal_projector.layer_norm.weight",
-                "multi_modal_projector.layer_norm.bias",
-            ],
-            ["proj/normed"],
-            epsilon=1e-5,
-        )
+        # Step 3: Layer norm (optional)
+        if use_layernorm:
+            normed = self.make_node(
+                "LayerNormalization",
+                [
+                    unshuffled,
+                    "multi_modal_projector.layer_norm.weight",
+                    "multi_modal_projector.layer_norm.bias",
+                ],
+                ["proj/normed"],
+                epsilon=1e-5,
+            )
+        else:
+            normed = unshuffled
 
         # Step 4: Linear 1
         fc1 = self.make_node(
