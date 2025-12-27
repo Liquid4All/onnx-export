@@ -67,3 +67,4 @@ quote-style = "double"
 # For bleeding-edge packages from git
 [tool.uv.sources]
 onnx = { git = "https://github.com/onnx/onnx.git" }
+transformers = { git = "ssh://git@github.com/Liquid4All/transformers_private.git", branch = "lfm2-config" }
