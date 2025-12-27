@@ -355,7 +355,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "torch", specifier = ">=2.0.0" },
     { name = "torchvision", specifier = ">=0.24.1" },
-    { name = "transformers", specifier = ">=5.0.0.dev0" },
+    { name = "transformers", git = "ssh://git@github.com/Liquid4All/transformers_private.git?branch=lfm2-config" },
 ]
 provides-extras = ["dev"]
 
@@ -1491,8 +1491,8 @@ wheels = [
 
 [[package]]
 name = "transformers"
-version = "5.0.0rc1"
-source = { registry = "https://pypi.org/simple" }
+version = "5.0.0.dev0"
+source = { git = "ssh://git@github.com/Liquid4All/transformers_private.git?branch=lfm2-config#d6cb9404d7d0eb35f2e5dfbe1a248456222b3d4c" }
 dependencies = [
     { name = "filelock" },
     { name = "huggingface-hub" },
@@ -1506,10 +1506,6 @@ dependencies = [
     { name = "tokenizers" },
     { name = "tqdm" },
     { name = "typer-slim" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/2f/33/c4d7a86f5a60fda56e72f90911ce859044ecdac1dcea4cf904c1eb20ecf2/transformers-5.0.0rc1.tar.gz", hash = "sha256:1fdde557b96ef8ea277c45b8e0d558f1e167fe28a98593f4c4aec0277e335821", size = 8208085, upload-time = "2025-12-11T17:21:23.486Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fb/74/fd8aef40d2bf2a15c0e02a0d867ebbf488ccca79fcf45efa51ec8e40c004/transformers-5.0.0rc1-py3-none-any.whl", hash = "sha256:8b9604700769872cab4280dbcde201f557e93f72ee5a85c4592275ab4f15d330", size = 9873024, upload-time = "2025-12-11T17:21:20.348Z" },
 ]
 
 [[package]]
