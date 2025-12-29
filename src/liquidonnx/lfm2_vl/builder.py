@@ -176,6 +176,337 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             epsilon=self.vision_config.layer_norm_eps,
         )
 
+    def _build_antialias_pos_embed_resize(
+        self,
+        pos_emb_input: str,
+        spatial_h: str,
+        spatial_w: str,
+        src_h: int,
+        src_w: int,
+        hidden_size: int,
+    ) -> str:
+        """Build antialias-aware bilinear interpolation for position embeddings.
+
+        Matches PyTorch F.interpolate(mode='bilinear', align_corners=False, antialias=True).
+        ONNX Resize doesn't support antialias, so we implement weighted kernel interpolation.
+
+        This implements the same algorithm as the community ONNX model:
+        1. Compute scale factors and kernel sizes
+        2. For each output position, compute sample coordinates and weights
+        3. Use triangular kernel: weight = max(0, 1 - |distance| / radius)
+        4. GatherND to collect pixel values
+        5. Weighted sum and normalize
+
+        Args:
+            pos_emb_input: Input tensor name (1, hidden, src_h, src_w)
+            spatial_h: Output height (scalar tensor name)
+            spatial_w: Output width (scalar tensor name)
+            src_h: Source height (constant, e.g., 16)
+            src_w: Source width (constant, e.g., 16)
+            hidden_size: Hidden dimension (e.g., 768)
+
+        Returns:
+            Output tensor name (1, tgt_h * tgt_w, hidden)
+        """
+        prefix = "interp"
+
+        # Cast spatial shapes to float for computations
+        self.add_initializer(f"{prefix}/src_h_fp32", np.array(src_h, dtype=np.float32))
+        self.add_initializer(f"{prefix}/src_w_fp32", np.array(src_w, dtype=np.float32))
+        self.add_initializer(f"{prefix}/src_h_int64", np.array(src_h, dtype=np.int64))
+        self.add_initializer(f"{prefix}/src_w_int64", np.array(src_w, dtype=np.int64))
+
+        spatial_h_fp32 = self.make_node("Cast", [spatial_h], [f"{prefix}/tgt_h_fp32"], to=1)
+        spatial_w_fp32 = self.make_node("Cast", [spatial_w], [f"{prefix}/tgt_w_fp32"], to=1)
+
+        # Compute scale factors: scale = src / tgt
+        y_scale = self.make_node(
+            "Div", [f"{prefix}/src_h_fp32", spatial_h_fp32], [f"{prefix}/y_scale"]
+        )
+        x_scale = self.make_node(
+            "Div", [f"{prefix}/src_w_fp32", spatial_w_fp32], [f"{prefix}/x_scale"]
+        )
+
+        # Compute radius (for antialias, radius = max(scale, 1))
+        self.add_initializer(f"{prefix}/one_fp32", np.array(1.0, dtype=np.float32))
+        y_radius = self.make_node("Max", [y_scale, f"{prefix}/one_fp32"], [f"{prefix}/y_radius"])
+        x_radius = self.make_node("Max", [x_scale, f"{prefix}/one_fp32"], [f"{prefix}/x_radius"])
+
+        # Compute kernel sizes: ceil(2 * radius)
+        self.add_initializer(f"{prefix}/two_fp32", np.array(2.0, dtype=np.float32))
+        self.add_initializer(f"{prefix}/one_int64", np.array(1, dtype=np.int64))
+        self.add_initializer(f"{prefix}/zero_int64", np.array(0, dtype=np.int64))
+
+        kh_fp = self.make_node("Mul", [y_radius, f"{prefix}/two_fp32"], [f"{prefix}/kh_fp"])
+        kh_fp_ceil = self.make_node("Ceil", [kh_fp], [f"{prefix}/kh_ceil"])
+        kh = self.make_node("Cast", [kh_fp_ceil], [f"{prefix}/kh"], to=7)  # int64
+
+        kw_fp = self.make_node("Mul", [x_radius, f"{prefix}/two_fp32"], [f"{prefix}/kw_fp"])
+        kw_fp_ceil = self.make_node("Ceil", [kw_fp], [f"{prefix}/kw_ceil"])
+        kw = self.make_node("Cast", [kw_fp_ceil], [f"{prefix}/kw"], to=7)  # int64
+
+        # Compute total number of output patches
+        total_patches = self.make_node("Mul", [spatial_h, spatial_w], [f"{prefix}/total_patches"])
+
+        # Generate patch indices: [0, 1, 2, ..., total_patches-1]
+        patch_indices = self.make_node(
+            "Range",
+            [f"{prefix}/zero_int64", total_patches, f"{prefix}/one_int64"],
+            [f"{prefix}/patch_indices"],
+        )
+
+        # Convert patch indices to y, x coordinates
+        # y = indices // tgt_w, x = indices % tgt_w
+        patch_indices_fp = self.make_node(
+            "Cast", [patch_indices], [f"{prefix}/patch_indices_fp"], to=1
+        )
+        y_coords = self.make_node("Div", [patch_indices_fp, spatial_w_fp32], [f"{prefix}/y_div"])
+        y_coords = self.make_node("Floor", [y_coords], [f"{prefix}/y_coords"])
+
+        x_coords = self.make_node("Mul", [y_coords, spatial_w_fp32], [f"{prefix}/x_mul_temp"])
+        x_coords = self.make_node("Sub", [patch_indices_fp, x_coords], [f"{prefix}/x_coords"])
+
+        # Compute center input coordinates (half_pixel mode)
+        # center = (output_coord + 0.5) * scale - 0.5
+        self.add_initializer(f"{prefix}/half", np.array(0.5, dtype=np.float32))
+        y_center = self.make_node("Add", [y_coords, f"{prefix}/half"], [f"{prefix}/y_add_half"])
+        y_center = self.make_node("Mul", [y_center, y_scale], [f"{prefix}/y_center_mul"])
+        y_center = self.make_node("Sub", [y_center, f"{prefix}/half"], [f"{prefix}/y_center"])
+
+        x_center = self.make_node("Add", [x_coords, f"{prefix}/half"], [f"{prefix}/x_add_half"])
+        x_center = self.make_node("Mul", [x_center, x_scale], [f"{prefix}/x_center_mul"])
+        x_center = self.make_node("Sub", [x_center, f"{prefix}/half"], [f"{prefix}/x_center"])
+
+        # Compute minimum sample coordinates: floor(center - radius + 0.5)
+        y_min = self.make_node("Sub", [y_center, y_radius], [f"{prefix}/y_min_sub"])
+        y_min = self.make_node("Add", [y_min, f"{prefix}/half"], [f"{prefix}/y_min_add"])
+        y_min = self.make_node("Floor", [y_min], [f"{prefix}/y_min"])
+
+        x_min = self.make_node("Sub", [x_center, x_radius], [f"{prefix}/x_min_sub"])
+        x_min = self.make_node("Add", [x_min, f"{prefix}/half"], [f"{prefix}/x_min_add"])
+        x_min = self.make_node("Floor", [x_min], [f"{prefix}/x_min"])
+
+        # Generate kernel offsets: [0, 1, 2, ..., k-1]
+        ky_offsets = self.make_node(
+            "Range", [f"{prefix}/zero_int64", kh, f"{prefix}/one_int64"], [f"{prefix}/ky_offsets"]
+        )
+        kx_offsets = self.make_node(
+            "Range", [f"{prefix}/zero_int64", kw, f"{prefix}/one_int64"], [f"{prefix}/kx_offsets"]
+        )
+        ky_offsets_fp = self.make_node("Cast", [ky_offsets], [f"{prefix}/ky_offsets_fp"], to=1)
+        kx_offsets_fp = self.make_node("Cast", [kx_offsets], [f"{prefix}/kx_offsets_fp"], to=1)
+
+        # Compute sample positions: y_s[n, ky] = y_min[n] + ky
+        # Unsqueeze for broadcasting: y_min (N,) -> (N, 1), ky_offsets (K,) -> (1, K)
+        self.add_initializer(f"{prefix}/unsq_1", np.array([1], dtype=np.int64))
+        self.add_initializer(f"{prefix}/unsq_0", np.array([0], dtype=np.int64))
+
+        y_min_unsq = self.make_node(
+            "Unsqueeze", [y_min, f"{prefix}/unsq_1"], [f"{prefix}/y_min_unsq"]
+        )
+        x_min_unsq = self.make_node(
+            "Unsqueeze", [x_min, f"{prefix}/unsq_1"], [f"{prefix}/x_min_unsq"]
+        )
+        ky_unsq = self.make_node(
+            "Unsqueeze", [ky_offsets_fp, f"{prefix}/unsq_0"], [f"{prefix}/ky_unsq"]
+        )
+        kx_unsq = self.make_node(
+            "Unsqueeze", [kx_offsets_fp, f"{prefix}/unsq_0"], [f"{prefix}/kx_unsq"]
+        )
+
+        # y_s: (N, kh), x_s: (N, kw)
+        y_s = self.make_node("Add", [y_min_unsq, ky_unsq], [f"{prefix}/y_s"])
+        x_s = self.make_node("Add", [x_min_unsq, kx_unsq], [f"{prefix}/x_s"])
+
+        # Compute distances from center
+        y_center_unsq = self.make_node(
+            "Unsqueeze", [y_center, f"{prefix}/unsq_1"], [f"{prefix}/y_center_unsq"]
+        )
+        x_center_unsq = self.make_node(
+            "Unsqueeze", [x_center, f"{prefix}/unsq_1"], [f"{prefix}/x_center_unsq"]
+        )
+
+        y_dist = self.make_node("Sub", [y_s, y_center_unsq], [f"{prefix}/y_dist"])
+        y_dist_abs = self.make_node("Abs", [y_dist], [f"{prefix}/y_dist_abs"])
+
+        x_dist = self.make_node("Sub", [x_s, x_center_unsq], [f"{prefix}/x_dist"])
+        x_dist_abs = self.make_node("Abs", [x_dist], [f"{prefix}/x_dist_abs"])
+
+        # Compute triangular weights: max(0, 1 - |dist| / radius)
+        y_radius_unsq = self.make_node(
+            "Unsqueeze", [y_radius, f"{prefix}/unsq_0"], [f"{prefix}/y_radius_unsq2"]
+        )
+        x_radius_unsq = self.make_node(
+            "Unsqueeze", [x_radius, f"{prefix}/unsq_0"], [f"{prefix}/x_radius_unsq2"]
+        )
+
+        wy_div = self.make_node("Div", [y_dist_abs, y_radius_unsq], [f"{prefix}/wy_div"])
+        wy_sub = self.make_node("Sub", [f"{prefix}/one_fp32", wy_div], [f"{prefix}/wy_sub"])
+        self.add_initializer(f"{prefix}/zero_fp32", np.array(0.0, dtype=np.float32))
+        wy = self.make_node("Max", [wy_sub, f"{prefix}/zero_fp32"], [f"{prefix}/wy"])
+
+        wx_div = self.make_node("Div", [x_dist_abs, x_radius_unsq], [f"{prefix}/wx_div"])
+        wx_sub = self.make_node("Sub", [f"{prefix}/one_fp32", wx_div], [f"{prefix}/wx_sub"])
+        wx = self.make_node("Max", [wx_sub, f"{prefix}/zero_fp32"], [f"{prefix}/wx"])
+
+        # Validity masks: 0 <= sample < src_size
+        self.add_initializer(f"{prefix}/src_h_fp32_scalar", np.array(src_h, dtype=np.float32))
+        self.add_initializer(f"{prefix}/src_w_fp32_scalar", np.array(src_w, dtype=np.float32))
+
+        y_ge_zero = self.make_node(
+            "GreaterOrEqual", [y_s, f"{prefix}/zero_fp32"], [f"{prefix}/y_ge_zero"]
+        )
+        y_lt_h = self.make_node("Less", [y_s, f"{prefix}/src_h_fp32_scalar"], [f"{prefix}/y_lt_h"])
+        y_valid = self.make_node("And", [y_ge_zero, y_lt_h], [f"{prefix}/y_valid"])
+
+        x_ge_zero = self.make_node(
+            "GreaterOrEqual", [x_s, f"{prefix}/zero_fp32"], [f"{prefix}/x_ge_zero"]
+        )
+        x_lt_w = self.make_node("Less", [x_s, f"{prefix}/src_w_fp32_scalar"], [f"{prefix}/x_lt_w"])
+        x_valid = self.make_node("And", [x_ge_zero, x_lt_w], [f"{prefix}/x_valid"])
+
+        # Expand validity masks for outer product: (N, kh, 1) * (N, 1, kw) -> (N, kh, kw)
+        self.add_initializer(f"{prefix}/unsq_2", np.array([2], dtype=np.int64))
+        y_valid_unsq = self.make_node(
+            "Unsqueeze", [y_valid, f"{prefix}/unsq_2"], [f"{prefix}/y_valid_unsq"]
+        )
+        x_valid_unsq = self.make_node(
+            "Unsqueeze", [x_valid, f"{prefix}/unsq_1"], [f"{prefix}/x_valid_unsq"]
+        )
+        valid_mask = self.make_node("And", [y_valid_unsq, x_valid_unsq], [f"{prefix}/valid_mask"])
+
+        # Cast valid mask to float and apply
+        valid_mask_fp = self.make_node("Cast", [valid_mask], [f"{prefix}/valid_mask_fp"], to=1)
+
+        # Expand weights for outer product: (N, kh, 1) * (N, 1, kw) -> (N, kh, kw)
+        wy_unsq = self.make_node("Unsqueeze", [wy, f"{prefix}/unsq_2"], [f"{prefix}/wy_unsq"])
+        wx_unsq = self.make_node("Unsqueeze", [wx, f"{prefix}/unsq_1"], [f"{prefix}/wx_unsq"])
+        weights_unmasked = self.make_node("Mul", [wy_unsq, wx_unsq], [f"{prefix}/weights_unmasked"])
+        weights = self.make_node("Mul", [weights_unmasked, valid_mask_fp], [f"{prefix}/weights"])
+
+        # Clamp sample coordinates and convert to int64 for gathering
+        y_s_clamped = self.make_node(
+            "Clip",
+            [y_s, f"{prefix}/zero_fp32", f"{prefix}/src_h_fp32_scalar"],
+            [f"{prefix}/y_s_clipped"],
+        )
+        # Need to use src_h - 1 as max
+        self.add_initializer(f"{prefix}/src_h_m1_fp32", np.array(src_h - 1, dtype=np.float32))
+        self.add_initializer(f"{prefix}/src_w_m1_fp32", np.array(src_w - 1, dtype=np.float32))
+        y_s_clamped = self.make_node(
+            "Clip",
+            [y_s, f"{prefix}/zero_fp32", f"{prefix}/src_h_m1_fp32"],
+            [f"{prefix}/y_s_clamped"],
+        )
+        x_s_clamped = self.make_node(
+            "Clip",
+            [x_s, f"{prefix}/zero_fp32", f"{prefix}/src_w_m1_fp32"],
+            [f"{prefix}/x_s_clamped"],
+        )
+        y_s_int = self.make_node("Cast", [y_s_clamped], [f"{prefix}/y_s_int"], to=7)
+        x_s_int = self.make_node("Cast", [x_s_clamped], [f"{prefix}/x_s_int"], to=7)
+
+        # Build gather indices: need to tile y_s and x_s to form (N, kh, kw) grid
+        # y indices need to be tiled across kw: (N, kh) -> (N, kh, kw)
+        # x indices need to be tiled across kh: (N, kw) -> (N, kh, kw)
+        y_s_unsq = self.make_node(
+            "Unsqueeze", [y_s_int, f"{prefix}/unsq_2"], [f"{prefix}/y_s_unsq"]
+        )
+        x_s_unsq = self.make_node(
+            "Unsqueeze", [x_s_int, f"{prefix}/unsq_1"], [f"{prefix}/x_s_unsq"]
+        )
+
+        # Build tile repeats dynamically
+        kw_unsq = self.make_node("Unsqueeze", [kw, f"{prefix}/unsq_0"], [f"{prefix}/kw_unsq"])
+        kh_unsq = self.make_node("Unsqueeze", [kh, f"{prefix}/unsq_0"], [f"{prefix}/kh_unsq"])
+
+        self.add_initializer(f"{prefix}/ones_2", np.array([1, 1], dtype=np.int64))
+        y_tile_rep = self.make_node(
+            "Concat", [f"{prefix}/ones_2", kw_unsq], [f"{prefix}/y_tile_rep"], axis=0
+        )
+        # Need [1, kh, 1] for x tiling
+        self.add_initializer(f"{prefix}/one_arr", np.array([1], dtype=np.int64))
+        x_tile_rep2 = self.make_node(
+            "Concat",
+            [f"{prefix}/one_arr", kh_unsq, f"{prefix}/one_arr"],
+            [f"{prefix}/x_tile_rep2"],
+            axis=0,
+        )
+
+        y_indices = self.make_node("Tile", [y_s_unsq, y_tile_rep], [f"{prefix}/y_indices"])
+        x_indices = self.make_node("Tile", [x_s_unsq, x_tile_rep2], [f"{prefix}/x_indices"])
+
+        # Concatenate into gather indices: (N, kh, kw, 2)
+        self.add_initializer(f"{prefix}/unsq_3", np.array([3], dtype=np.int64))
+        y_idx_unsq = self.make_node(
+            "Unsqueeze", [y_indices, f"{prefix}/unsq_3"], [f"{prefix}/y_idx_unsq"]
+        )
+        x_idx_unsq = self.make_node(
+            "Unsqueeze", [x_indices, f"{prefix}/unsq_3"], [f"{prefix}/x_idx_unsq"]
+        )
+        gather_indices = self.make_node(
+            "Concat", [y_idx_unsq, x_idx_unsq], [f"{prefix}/gather_indices"], axis=3
+        )
+
+        # Transpose pos_emb from (1, hidden, H, W) to (H, W, hidden) for gathering
+        pos_emb_transposed = self.make_node(
+            "Transpose", [pos_emb_input], [f"{prefix}/pos_emb_hwc"], perm=[0, 2, 3, 1]
+        )
+        # Squeeze batch dimension: (1, H, W, hidden) -> (H, W, hidden)
+        self.add_initializer(f"{prefix}/squeeze_axes", np.array([0], dtype=np.int64))
+        pos_emb_3d = self.make_node(
+            "Squeeze", [pos_emb_transposed, f"{prefix}/squeeze_axes"], [f"{prefix}/pos_emb_3d"]
+        )
+
+        # GatherND: (H, W, hidden)[N, kh, kw, 2] -> (N, kh, kw, hidden)
+        gathered = self.make_node("GatherND", [pos_emb_3d, gather_indices], [f"{prefix}/gathered"])
+
+        # Apply weights: (N, kh, kw, 1) * (N, kh, kw, hidden)
+        weights_4d = self.make_node(
+            "Unsqueeze", [weights, f"{prefix}/unsq_3"], [f"{prefix}/weights_4d"]
+        )
+        weighted_pixels = self.make_node(
+            "Mul", [gathered, weights_4d], [f"{prefix}/weighted_pixels"]
+        )
+
+        # Sum over kernel dimensions: (N, kh, kw, hidden) -> (N, hidden)
+        self.add_initializer(f"{prefix}/reduce_axes", np.array([1, 2], dtype=np.int64))
+        weighted_sum = self.make_node(
+            "ReduceSum",
+            [weighted_pixels, f"{prefix}/reduce_axes"],
+            [f"{prefix}/weighted_sum"],
+            keepdims=0,
+        )
+
+        # Sum weights: (N, kh, kw) -> (N,)
+        total_weight = self.make_node(
+            "ReduceSum", [weights, f"{prefix}/reduce_axes"], [f"{prefix}/total_weight"], keepdims=0
+        )
+
+        # Clamp total weight to avoid division by zero
+        self.add_initializer(f"{prefix}/eps", np.array(1e-6, dtype=np.float32))
+        total_weight_clamped = self.make_node(
+            "Max", [total_weight, f"{prefix}/eps"], [f"{prefix}/total_weight_clamped"]
+        )
+
+        # Normalize: (N, hidden) / (N, 1)
+        total_weight_unsq = self.make_node(
+            "Unsqueeze", [total_weight_clamped, f"{prefix}/unsq_1"], [f"{prefix}/total_weight_unsq"]
+        )
+        interpolated = self.make_node(
+            "Div", [weighted_sum, total_weight_unsq], [f"{prefix}/interpolated"]
+        )
+
+        # Reshape to (1, N, hidden) for compatibility with rest of pipeline
+        self.add_initializer(
+            f"{prefix}/reshape_out", np.array([1, -1, hidden_size], dtype=np.int64)
+        )
+        output = self.make_node(
+            "Reshape", [interpolated, f"{prefix}/reshape_out"], ["pos_emb/final"]
+        )
+
+        return output
+
     def build_inputs(self):
         """Create model inputs based on vision_input_format."""
         if self.vision_input_format == VISION_MODE_CONV2D:
@@ -223,6 +554,14 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             self.inputs.append(
                 helper.make_tensor_value_info(
                     "patch_attention_mask", TensorProto.INT64, ["batch_size", "num_patches"]
+                )
+            )
+
+            # spatial_shapes: [batch_size, 2] with (height, width) in patch units
+            # Allows non-square images (matches community ONNX and PyTorch)
+            self.inputs.append(
+                helper.make_tensor_value_info(
+                    "spatial_shapes", TensorProto.INT64, ["batch_size", 2]
                 )
             )
 
@@ -354,94 +693,155 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             pre_merge_w = self.make_node(
                 "Mul", ["spatial_w", "pos_emb/n_merge"], ["pos_emb/pre_merge_w"]
             )
+        else:
+            # Tiled mode: extract spatial dimensions from spatial_shapes input
+            # spatial_shapes: [batch, 2] with (height, width) in patch units
+            # Use first batch item (all have same spatial dims in a batch)
+            self.add_initializer("pos_emb/idx_0_batch", np.array(0, dtype=np.int64))
+            self.add_initializer("pos_emb/idx_0", np.array(0, dtype=np.int64))
+            self.add_initializer("pos_emb/idx_1", np.array(1, dtype=np.int64))
 
-            # Build target size tensor: [1, 768, pre_merge_h, pre_merge_w]
-            self.add_initializer("pos_emb/one", np.array([1], dtype=np.int64))
-            self.add_initializer("pos_emb/hidden", np.array([H], dtype=np.int64))
-            pre_merge_h_unsq = self.make_node(
-                "Unsqueeze", [pre_merge_h, "pos_emb/axes_0"], ["pos_emb/pre_merge_h_unsq"]
-            )
-            pre_merge_w_unsq = self.make_node(
-                "Unsqueeze", [pre_merge_w, "pos_emb/axes_0"], ["pos_emb/pre_merge_w_unsq"]
-            )
-
-            target_size = self.make_node(
-                "Concat",
-                ["pos_emb/one", "pos_emb/hidden", pre_merge_h_unsq, pre_merge_w_unsq],
-                ["pos_emb/target_size"],
+            # Get spatial_shapes[0, :] -> [2]
+            first_spatial = self.make_node(
+                "Gather",
+                ["spatial_shapes", "pos_emb/idx_0_batch"],
+                ["pos_emb/first_spatial"],
                 axis=0,
+            )
+
+            # Extract height (index 0) and width (index 1)
+            spatial_h = self.make_node(
+                "Gather", [first_spatial, "pos_emb/idx_0"], ["pos_emb/spatial_h"], axis=0
+            )
+            spatial_w = self.make_node(
+                "Gather", [first_spatial, "pos_emb/idx_1"], ["pos_emb/spatial_w"], axis=0
+            )
+
+        # =====================================================================
+        # Antialias-aware bilinear interpolation
+        # Matches PyTorch F.interpolate(mode='bilinear', align_corners=False, antialias=True)
+        # ONNX Resize doesn't support antialias, so we implement weighted kernel interpolation
+        # =====================================================================
+        pos_emb_final = self._build_antialias_pos_embed_resize(
+            pos_emb_input="pos_emb/4d",
+            spatial_h=spatial_h if self.vision_input_format == VISION_MODE_TILED else pre_merge_h,
+            spatial_w=spatial_w if self.vision_input_format == VISION_MODE_TILED else pre_merge_w,
+            src_h=16,  # Original position embedding grid size
+            src_w=16,
+            hidden_size=H,
+        )
+
+        # Get batch size and num_patches from input shape
+        self.add_initializer("pos_emb/idx_0_scalar", np.array(0, dtype=np.int64))
+        self.add_initializer("pos_emb/idx_1_scalar", np.array(1, dtype=np.int64))
+        batch_size = self.make_node(
+            "Gather", [input_shape, "pos_emb/idx_0_scalar"], ["pos_emb/batch_size"], axis=0
+        )
+        num_patches = self.make_node(
+            "Gather", [input_shape, "pos_emb/idx_1_scalar"], ["pos_emb/num_patches"], axis=0
+        )
+
+        if self.vision_input_format == VISION_MODE_TILED:
+            # =====================================================================
+            # Tiled mode: Handle padding (input may have more patches than H*W)
+            # Fill padded positions with first token's position embedding
+            # =====================================================================
+
+            # Get first token's position embedding: (1, 1, hidden)
+            self.add_initializer("pos_emb/slice_start", np.array([0], dtype=np.int64))
+            self.add_initializer("pos_emb/slice_end", np.array([1], dtype=np.int64))
+            self.add_initializer("pos_emb/slice_axis", np.array([1], dtype=np.int64))
+            first_token = self.make_node(
+                "Slice",
+                [pos_emb_final, "pos_emb/slice_start", "pos_emb/slice_end", "pos_emb/slice_axis"],
+                ["pos_emb/first_token"],
+            )
+
+            # Compute actual_num_patches = H * W from spatial_shapes
+            actual_num_patches = self.make_node(
+                "Mul", [spatial_h, spatial_w], ["pos_emb/actual_num_patches"]
+            )
+
+            # Create indices: [0, 1, 2, ..., num_patches-1]
+            self.add_initializer("pos_emb/zero", np.array(0, dtype=np.int64))
+            self.add_initializer("pos_emb/one_step", np.array(1, dtype=np.int64))
+            indices = self.make_node(
+                "Range", ["pos_emb/zero", num_patches, "pos_emb/one_step"], ["pos_emb/indices"]
+            )
+
+            # Valid mask: indices < actual_num_patches
+            is_valid = self.make_node("Less", [indices, actual_num_patches], ["pos_emb/is_valid"])
+            # Unsqueeze for broadcasting: (num_patches,) -> (1, num_patches, 1)
+            self.add_initializer("pos_emb/unsq_axes", np.array([0, 2], dtype=np.int64))
+            is_valid_3d = self.make_node(
+                "Unsqueeze", [is_valid, "pos_emb/unsq_axes"], ["pos_emb/is_valid_3d"]
+            )
+
+            # Expand first_token to (1, num_patches, hidden)
+            num_patches_unsq = self.make_node(
+                "Unsqueeze", [num_patches, "pos_emb/axes_0"], ["pos_emb/num_patches_unsq"]
+            )
+            self.add_initializer("pos_emb/one_arr", np.array([1], dtype=np.int64))
+            self.add_initializer("pos_emb/hidden_arr", np.array([H], dtype=np.int64))
+            expand_shape = self.make_node(
+                "Concat",
+                ["pos_emb/one_arr", num_patches_unsq, "pos_emb/hidden_arr"],
+                ["pos_emb/expand_shape"],
+                axis=0,
+            )
+            first_token_expanded = self.make_node(
+                "Expand", [first_token, expand_shape], ["pos_emb/first_token_expanded"]
+            )
+
+            # Pad pos_emb_final to (1, num_patches, hidden)
+            # padding_size = num_patches - actual_num_patches
+            padding_size = self.make_node(
+                "Sub", [num_patches, actual_num_patches], ["pos_emb/padding_size"]
+            )
+            # Build pads tensor: [0, 0, 0, 0, padding_size, 0] for axes [batch, seq, hidden]
+            self.add_initializer("pos_emb/zeros_4", np.array([0, 0, 0, 0], dtype=np.int64))
+            self.add_initializer("pos_emb/zero_arr", np.array([0], dtype=np.int64))
+            padding_size_unsq = self.make_node(
+                "Unsqueeze", [padding_size, "pos_emb/axes_0"], ["pos_emb/padding_size_unsq"]
+            )
+            pads = self.make_node(
+                "Concat",
+                ["pos_emb/zeros_4", padding_size_unsq, "pos_emb/zero_arr"],
+                ["pos_emb/pads"],
+                axis=0,
+            )
+            pos_emb_padded = self.make_node(
+                "Pad", [pos_emb_final, pads], ["pos_emb/padded"], mode="constant"
+            )
+
+            # Apply Where: valid positions get real embeddings, padded get first_token
+            pos_emb_with_padding = self.make_node(
+                "Where",
+                [is_valid_3d, pos_emb_padded, first_token_expanded],
+                ["pos_emb/with_padding"],
+            )
+
+            # Tile across batch
+            batch_unsq = self.make_node(
+                "Unsqueeze", [batch_size, "pos_emb/axes_0"], ["pos_emb/batch_unsq"]
+            )
+            self.add_initializer("pos_emb/ones_2d", np.array([1, 1], dtype=np.int64))
+            tile_repeats = self.make_node(
+                "Concat", [batch_unsq, "pos_emb/ones_2d"], ["pos_emb/tile_repeats"], axis=0
+            )
+            pos_emb_tiled = self.make_node(
+                "Tile", [pos_emb_with_padding, tile_repeats], ["pos_emb/tiled"]
             )
         else:
-            # Tiled mode: input is [B, N, patch_dim], target size is sqrt(N) x sqrt(N)
-            self.add_initializer("pos_emb/idx_1", np.array(1, dtype=np.int64))  # scalar
-            num_patches = self.make_node(
-                "Gather", [input_shape, "pos_emb/idx_1"], ["pos_emb/num_patches"], axis=0
+            # Conv2d mode: no padding, just tile across batch
+            batch_unsq = self.make_node(
+                "Unsqueeze", [batch_size, "pos_emb/axes_0"], ["pos_emb/batch_unsq"]
             )
-
-            # sqrt(num_patches) to get spatial size
-            num_patches_float = self.make_node(
-                "Cast", [num_patches], ["pos_emb/np_float"], to=TensorProto.FLOAT
+            self.add_initializer("pos_emb/ones_2d", np.array([1, 1], dtype=np.int64))
+            tile_repeats = self.make_node(
+                "Concat", [batch_unsq, "pos_emb/ones_2d"], ["pos_emb/tile_repeats"], axis=0
             )
-            spatial_float = self.make_node("Sqrt", [num_patches_float], ["pos_emb/spatial_float"])
-            spatial_int = self.make_node(
-                "Cast", [spatial_float], ["pos_emb/spatial_int"], to=TensorProto.INT64
-            )
-
-            # Build target size tensor: [1, 768, target_h, target_w]
-            self.add_initializer("pos_emb/one", np.array([1], dtype=np.int64))
-            self.add_initializer("pos_emb/hidden", np.array([H], dtype=np.int64))
-            spatial_unsq = self.make_node(
-                "Unsqueeze", [spatial_int, "pos_emb/axes_0"], ["pos_emb/spatial_unsq"]
-            )
-
-            target_size = self.make_node(
-                "Concat",
-                ["pos_emb/one", "pos_emb/hidden", spatial_unsq, spatial_unsq],
-                ["pos_emb/target_size"],
-                axis=0,
-            )
-
-        # Use Resize with bilinear interpolation
-        # Resize needs: X, roi, scales, sizes
-        self.add_initializer("pos_emb/empty_roi", np.array([], dtype=np.float32))
-        self.add_initializer("pos_emb/empty_scales", np.array([], dtype=np.float32))
-
-        resized_pos_emb = self.make_node(
-            "Resize",
-            ["pos_emb/4d", "pos_emb/empty_roi", "pos_emb/empty_scales", target_size],
-            ["pos_emb/resized"],
-            mode="linear",  # bilinear for 2D
-            coordinate_transformation_mode="half_pixel",  # Match tiled model's default
-        )
-
-        # Reshape from (1, 768, H, W) back to (1, H*W, 768)
-        # First transpose to (1, H, W, 768)
-        resized_transposed = self.make_node(
-            "Transpose", [resized_pos_emb], ["pos_emb/transposed"], perm=[0, 2, 3, 1]
-        )
-
-        # Flatten to (1, H*W, 768)
-        self.add_initializer("pos_emb/reshape_3d", np.array([1, -1, H], dtype=np.int64))
-        pos_emb_final = self.make_node(
-            "Reshape", [resized_transposed, "pos_emb/reshape_3d"], ["pos_emb/final"]
-        )
-
-        # Broadcast position embeddings to batch size
-        # Get batch size (use scalar index)
-        self.add_initializer("pos_emb/idx_0", np.array(0, dtype=np.int64))  # scalar
-        batch_size = self.make_node(
-            "Gather", [input_shape, "pos_emb/idx_0"], ["pos_emb/batch_size"], axis=0
-        )
-
-        # Tile position embeddings across batch: (1, N, H) -> (B, N, H)
-        batch_unsq = self.make_node(
-            "Unsqueeze", [batch_size, "pos_emb/axes_0"], ["pos_emb/batch_unsq"]
-        )
-        self.add_initializer("pos_emb/ones_2d", np.array([1, 1], dtype=np.int64))
-        tile_repeats = self.make_node(
-            "Concat", [batch_unsq, "pos_emb/ones_2d"], ["pos_emb/tile_repeats"], axis=0
-        )
-        pos_emb_tiled = self.make_node("Tile", [pos_emb_final, tile_repeats], ["pos_emb/tiled"])
+            pos_emb_tiled = self.make_node("Tile", [pos_emb_final, tile_repeats], ["pos_emb/tiled"])
 
         # =====================================================================
         # Add patch embeddings + position embeddings
@@ -796,35 +1196,35 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             half_spatial_h_name = "spatial_h"  # Already the post-merge size
             half_spatial_w_name = "spatial_w"  # Already the post-merge size
         else:
-            # Tiled mode: compute spatial size from sqrt(seq_len), assumes square
-            self.add_initializer("proj/shape_indices_seq", np.array(1, dtype=np.int64))  # scalar
-            seq_len = self.make_node(
-                "Gather",
-                [
-                    self.make_node("Shape", [vision_embeddings], ["proj/input_shape2"]),
-                    "proj/shape_indices_seq",
-                ],
-                ["proj/seq_len"],
-                axis=0,
-            )
-            seq_len_float = self.make_node(
-                "Cast", [seq_len], ["proj/seq_len_float"], to=TensorProto.FLOAT
-            )
-            spatial_float = self.make_node("Sqrt", [seq_len_float], ["proj/spatial_float"])
-            spatial_size = self.make_node(
-                "Cast", [spatial_float], ["proj/spatial_size"], to=TensorProto.INT64
+            # Tiled mode: extract spatial dimensions from spatial_shapes input
+            # spatial_shapes: [batch, 2] with (height, width) in patch units
+            self.add_initializer("proj/idx_0_batch", np.array(0, dtype=np.int64))
+            self.add_initializer("proj/idx_0", np.array(0, dtype=np.int64))
+            self.add_initializer("proj/idx_1", np.array(1, dtype=np.int64))
+
+            # Get spatial_shapes[0, :] -> [2]
+            first_spatial = self.make_node(
+                "Gather", ["spatial_shapes", "proj/idx_0_batch"], ["proj/first_spatial"], axis=0
             )
 
-            # Build reshape target: [batch, spatial, spatial, C] (square)
+            # Extract height (index 0) and width (index 1)
+            spatial_h = self.make_node(
+                "Gather", [first_spatial, "proj/idx_0"], ["proj/spatial_h"], axis=0
+            )
+            spatial_w = self.make_node(
+                "Gather", [first_spatial, "proj/idx_1"], ["proj/spatial_w"], axis=0
+            )
+
+            # Build reshape target: [batch, spatial_h, spatial_w, C]
             reshape_4d_shape = self.make_node(
                 "Concat",
                 [
                     self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["proj/batch_unsq"]),
                     self.make_node(
-                        "Unsqueeze", [spatial_size, "proj/axes_0"], ["proj/spatial1_unsq"]
+                        "Unsqueeze", [spatial_h, "proj/axes_0"], ["proj/spatial_h_unsq"]
                     ),
                     self.make_node(
-                        "Unsqueeze", [spatial_size, "proj/axes_0"], ["proj/spatial2_unsq"]
+                        "Unsqueeze", [spatial_w, "proj/axes_0"], ["proj/spatial_w_unsq"]
                     ),
                     "proj/hidden_size",
                 ],
@@ -832,14 +1232,34 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 axis=0,
             )
 
-            # For tiled mode, compute half_spatial
+            # Compute half_spatial_h and half_spatial_w for pixel unshuffle
             self.add_initializer("proj/two_tiled", np.array(2, dtype=np.int64))
-            half_spatial = self.make_node(
-                "Div", [spatial_size, "proj/two_tiled"], ["proj/half_spatial_tiled"]
+            half_spatial_h = self.make_node(
+                "Div", [spatial_h, "proj/two_tiled"], ["proj/half_spatial_h_tiled"]
             )
-            spatial_h_name = spatial_size
-            half_spatial_w_name = half_spatial
-            half_spatial_h_name = half_spatial
+            half_spatial_w = self.make_node(
+                "Div", [spatial_w, "proj/two_tiled"], ["proj/half_spatial_w_tiled"]
+            )
+            spatial_h_name = spatial_h
+            half_spatial_h_name = half_spatial_h
+            half_spatial_w_name = half_spatial_w
+
+            # Tiled mode: slice out only valid patches (first H*W) before reshaping
+            # Input may be padded: (B, num_patches, C) where num_patches > H*W
+            actual_num_patches = self.make_node(
+                "Mul", [spatial_h, spatial_w], ["proj/actual_num_patches"]
+            )
+            # Slice: vision_embeddings[:, :actual_num_patches, :]
+            self.add_initializer("proj/slice_start", np.array([0], dtype=np.int64))
+            self.add_initializer("proj/slice_axes", np.array([1], dtype=np.int64))
+            actual_unsq = self.make_node(
+                "Unsqueeze", [actual_num_patches, "proj/axes_0"], ["proj/actual_unsq"]
+            )
+            vision_embeddings = self.make_node(
+                "Slice",
+                [vision_embeddings, "proj/slice_start", actual_unsq, "proj/slice_axes"],
+                ["proj/valid_embeddings"],
+            )
 
         # Reshape to 4D: (B, N, C) -> (B, H, W, C)
         hidden_4d = self.make_node(

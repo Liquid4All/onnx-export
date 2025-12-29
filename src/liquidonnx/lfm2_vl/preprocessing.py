@@ -354,6 +354,7 @@ def get_image_embeddings(
                 {
                     "pixel_values": pixel_values,
                     "patch_attention_mask": patch_attention_mask,
+                    "spatial_shapes": spatial_shapes,
                 },
             )
             # Output: [num_tiles, num_tokens_per_tile, hidden_dim]
