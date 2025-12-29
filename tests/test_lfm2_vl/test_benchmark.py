@@ -244,8 +244,12 @@ def test_benchmark(
 
     # Load models (timed)
     load_start = time.perf_counter()
-    embed_tokens_sess = ort.InferenceSession(str(embed_tokens_file), providers=["CPUExecutionProvider"])
-    embed_images_sess = ort.InferenceSession(str(embed_images_file), providers=["CPUExecutionProvider"])
+    embed_tokens_sess = ort.InferenceSession(
+        str(embed_tokens_file), providers=["CPUExecutionProvider"]
+    )
+    embed_images_sess = ort.InferenceSession(
+        str(embed_images_file), providers=["CPUExecutionProvider"]
+    )
     decoder_sess = ort.InferenceSession(str(decoder_file), providers=["CPUExecutionProvider"])
     load_time = time.perf_counter() - load_start
 

@@ -591,7 +591,9 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             self.add_initializer(f"{prefix}/scale", np.array(scale, dtype=np.float32))
 
             # Q @ K^T
-            k_t_transposed = self.make_node("Transpose", [k_t], [f"{prefix}/k_t_t"], perm=[0, 1, 3, 2])
+            k_t_transposed = self.make_node(
+                "Transpose", [k_t], [f"{prefix}/k_t_t"], perm=[0, 1, 3, 2]
+            )
             scores = self.make_node("MatMul", [q_t, k_t_transposed], [f"{prefix}/scores"])
             scores_scaled = self.make_node(
                 "Mul", [scores, f"{prefix}/scale"], [f"{prefix}/scores_scaled"]
@@ -915,8 +917,8 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         if self.config.projector_bias:
             fc1 = self.make_node("Add", [fc1, "multi_modal_projector.linear_1.bias"], ["proj/fc1"])
 
-        # GELU
-        fc1_act = self.make_gelu(fc1, "proj/fc1_act")
+        # GELU (exact, not tanh approximation - projector uses "gelu" not "gelu_pytorch_tanh")
+        fc1_act = self.make_gelu(fc1, "proj/fc1_act", approximate="none")
 
         # Step 5: Linear 2
         fc2 = self.make_node(

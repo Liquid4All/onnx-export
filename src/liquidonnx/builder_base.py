@@ -111,9 +111,18 @@ class ONNXBuilderBase:
         sigmoid_out = self.make_sigmoid(input_name, f"{output_name}_sigmoid")
         return self.make_mul(input_name, sigmoid_out, output_name)
 
-    def make_gelu(self, input_name: str, output_name: str) -> str:
-        """Create GELU activation (approximate tanh version)."""
-        return self.make_node("Gelu", [input_name], [output_name], approximate="tanh")
+    def make_gelu(self, input_name: str, output_name: str, approximate: str = "tanh") -> str:
+        """Create GELU activation.
+
+        Args:
+            input_name: Input tensor name
+            output_name: Output tensor name
+            approximate: "tanh" for fast approximation, "none" for exact GELU
+
+        Returns:
+            Output tensor name
+        """
+        return self.make_node("Gelu", [input_name], [output_name], approximate=approximate)
 
     def make_layernorm(
         self,

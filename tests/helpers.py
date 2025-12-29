@@ -21,3 +21,26 @@ def get_community_onnx_file(onnx_dir: pathlib.Path, bits: int | None) -> pathlib
     if bits is None:
         return onnx_dir / "model.onnx"
     return onnx_dir / f"model_q{bits}.onnx"
+
+
+def get_community_vl_onnx_dir(community_dir: pathlib.Path, size: str) -> pathlib.Path:
+    """Get onnx-community VL model directory."""
+    return community_dir / f"LFM2-VL-{size}-ONNX" / "onnx"
+
+
+def get_community_vl_files(
+    onnx_dir: pathlib.Path, use_fp16: bool = False
+) -> dict[str, pathlib.Path]:
+    """Get onnx-community VL model files.
+
+    Community VL models use different naming:
+    - embed_tokens.onnx / embed_tokens_fp16.onnx
+    - vision_encoder.onnx / vision_encoder_fp16.onnx
+    - decoder_model_merged.onnx / decoder_model_merged_fp16.onnx
+    """
+    suffix = "_fp16" if use_fp16 else ""
+    return {
+        "embed_tokens": onnx_dir / f"embed_tokens{suffix}.onnx",
+        "vision_encoder": onnx_dir / f"vision_encoder{suffix}.onnx",
+        "decoder": onnx_dir / f"decoder_model_merged{suffix}.onnx",
+    }

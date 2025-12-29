@@ -73,6 +73,7 @@ def export_vl_model(
     output_dir: pathlib.Path | str,
     vision_input_format: str = VISION_MODE_TILED,
     use_fused_attention: bool = False,
+    use_integrated_rope: bool = False,
 ):
     """Export LFM2-VL model to ONNX (embed_tokens + embed_images + decoder).
 
@@ -81,6 +82,7 @@ def export_vl_model(
         output_dir: Output directory for ONNX files
         vision_input_format: "tiled" for [B, N, 768] or "conv2d" for [B, 3, H, W]
         use_fused_attention: Use com.microsoft.MultiHeadAttention for vision encoder
+        use_integrated_rope: Use RoPE integrated in GroupQueryAttention (better precision)
     """
     import torch
     from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
@@ -163,8 +165,10 @@ def export_vl_model(
     # 3. Export decoder (takes inputs_embeds, not input_ids)
     # =========================================================================
     logger.info("Exporting decoder (with inputs_embeds input)...")
+    if use_integrated_rope:
+        logger.info("Using integrated RoPE in GroupQueryAttention")
 
-    text_builder = LFM2Builder(vl_config.text_config)
+    text_builder = LFM2Builder(vl_config.text_config, use_integrated_rope=use_integrated_rope)
 
     # Filter text model weights (they have "model.language_model." prefix in VL model)
     for name, weight in weights.items():
@@ -345,12 +349,20 @@ def export_vl_model(
 
 
 def do_export(
-    model_path: str, output_path: pathlib.Path, fmt: str, use_fused_attention: bool = False
+    model_path: str,
+    output_path: pathlib.Path,
+    fmt: str,
+    use_fused_attention: bool = False,
+    use_integrated_rope: bool = False,
 ):
     """Export a single VL model to ONNX (FP32)."""
     logger.info(f"Exporting {model_path} to {output_path}...")
     export_vl_model(
-        model_path, output_path, vision_input_format=fmt, use_fused_attention=use_fused_attention
+        model_path,
+        output_path,
+        vision_input_format=fmt,
+        use_fused_attention=use_fused_attention,
+        use_integrated_rope=use_integrated_rope,
     )
 
 
@@ -467,7 +479,12 @@ def main():
     parser.add_argument(
         "--fused-attention",
         action="store_true",
-        help="Use fused MultiHeadAttention for vision encoder (better precision)",
+        help="Use fused MultiHeadAttention for vision encoder",
+    )
+    parser.add_argument(
+        "--integrated-rope",
+        action="store_true",
+        help="Use RoPE integrated in GroupQueryAttention (better precision)",
     )
 
     args = parser.parse_args()
@@ -513,7 +530,7 @@ def main():
     # Export
     if not args.skip_export:
         for model_path, output_dir, fmt in exports:
-            do_export(model_path, output_dir, fmt, args.fused_attention)
+            do_export(model_path, output_dir, fmt, args.fused_attention, args.integrated_rope)
 
     # Quantize
     for bits in quant_bits:
