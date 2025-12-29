@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Export LFM2-VL models to ONNX with optional quantization.
+Export LFM2-VL models to ONNX with optional quantization and FP16 conversion.
 
 Vision Input Formats:
 - --tiled: Input [B, N, 768] with pre-extracted patches (HuggingFace style)
@@ -13,11 +13,14 @@ Output Structure (Transformers.js compatible):
         ├── tokenizer.json
         ├── tokenizer_config.json
         └── onnx/
-            ├── embed_tokens.onnx
-            ├── embed_images.onnx
+            ├── embed_tokens.onnx          # FP32
+            ├── embed_tokens_fp16.onnx     # FP16 (with --fp16)
+            ├── embed_images.onnx          # FP32
+            ├── embed_images_fp16.onnx     # FP16 (with --fp16)
             ├── embed_images_q4.onnx
             ├── embed_images_q8.onnx
-            ├── decoder.onnx
+            ├── decoder.onnx               # FP32
+            ├── decoder_fp16.onnx          # FP16 (with --fp16)
             ├── decoder_q4.onnx
             └── decoder_q8.onnx
 
@@ -44,6 +47,10 @@ Usage:
 
     # Export only tiled format
     uv run lfm2-vl-export --sizes 450M --tiled --quantize
+
+    # Convert to FP16 (2x smaller, matches onnx-community format)
+    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --tiled --fp16
+    uv run lfm2-vl-export --sizes all --skip-export --fp16
 """
 
 import argparse
@@ -58,9 +65,93 @@ from onnx import TensorProto, helper
 from liquidonnx.lfm2.builder import LFM2Builder
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED, VISION_MODES
 from liquidonnx.lfm2_vl.builder import EmbedTokensBuilder, LFM2VLConfig, VisionEmbedBuilder
-from liquidonnx.quantize import get_model_size, quantize_model
+from liquidonnx.quantize import get_model_size, get_total_model_size_mb, quantize_model
 
 logger = logging.getLogger(__name__)
+
+
+def convert_to_fp16(
+    input_path: pathlib.Path,
+    output_path: pathlib.Path,
+    keep_io_types: bool = True,
+):
+    """Convert ONNX model from FP32 to FP16.
+
+    Args:
+        input_path: Path to FP32 ONNX model
+        output_path: Path for FP16 output model
+        keep_io_types: Keep inputs/outputs as FP32 for compatibility
+    """
+    from onnx.external_data_helper import load_external_data_for_model
+    from onnxruntime.transformers.float16 import convert_float_to_float16
+
+    logger.info(f"Converting {input_path.name} to FP16...")
+
+    # Load model with external data
+    model = onnx.load(str(input_path), load_external_data=False)
+    load_external_data_for_model(model, str(input_path.parent))
+
+    # Save original Resize inputs and empty tensor initializers before conversion
+    # (converter modifies in-place)
+    resize_orig_inputs = {}
+    empty_initializers = {}
+    for node in model.graph.node:
+        if node.op_type == "Resize":
+            resize_orig_inputs[node.name] = list(node.input)
+    for init in model.graph.initializer:
+        if "empty" in init.name.lower():
+            empty_initializers[init.name] = onnx.TensorProto()
+            empty_initializers[init.name].CopyFrom(init)
+
+    # Convert to FP16
+    # disable_shape_infer=True is required for models with com.microsoft custom ops
+    model_fp16 = convert_float_to_float16(
+        model,
+        keep_io_types=keep_io_types,
+        force_fp16_initializers=True,
+        disable_shape_infer=True,
+    )
+
+    # Fix Resize nodes: the converter adds Cast nodes for empty scales/roi tensors
+    # which breaks shape inference. Restore original empty tensor inputs and initializers.
+    for node in model_fp16.graph.node:
+        if node.op_type == "Resize" and node.name in resize_orig_inputs:
+            orig_inputs = resize_orig_inputs[node.name]
+            # Restore scales input (index 2) if it was an empty tensor
+            if len(node.input) > 2 and len(orig_inputs) > 2:
+                if "cast" in node.input[2].lower() and "empty" in orig_inputs[2].lower():
+                    node.input[2] = orig_inputs[2]
+            # Restore roi input (index 1) if it was an empty tensor
+            if len(node.input) > 1 and len(orig_inputs) > 1:
+                if "cast" in node.input[1].lower() and "empty" in orig_inputs[1].lower():
+                    node.input[1] = orig_inputs[1]
+
+    # Restore FP32 empty tensor initializers
+    for i, init in enumerate(model_fp16.graph.initializer):
+        if init.name in empty_initializers:
+            model_fp16.graph.initializer[i].CopyFrom(empty_initializers[init.name])
+
+    # Save with external data
+    output_data_path = output_path.parent / f"{output_path.stem}.onnx_data"
+    if output_data_path.exists():
+        output_data_path.unlink()
+
+    onnx.save_model(
+        model_fp16,
+        str(output_path),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=f"{output_path.stem}.onnx_data",
+        size_threshold=1024,
+    )
+
+    # Get sizes for logging
+    orig_mb = get_total_model_size_mb(input_path)
+    fp16_mb = get_total_model_size_mb(output_path)
+    ratio = orig_mb / fp16_mb if fp16_mb > 0 else 0
+    logger.info(f"  {input_path.name}: {orig_mb:.1f} -> {fp16_mb:.1f} MB ({ratio:.1f}x)")
+
+    return output_path
 
 
 def get_output_dir(size: str, fmt: str, output_base: pathlib.Path) -> pathlib.Path:
@@ -412,6 +503,38 @@ def do_quantize(
         )
 
 
+def do_fp16(onnx_dir: pathlib.Path):
+    """Convert VL model to FP16 (matching onnx-community naming).
+
+    Creates:
+    - embed_tokens_fp16.onnx
+    - embed_images_fp16.onnx
+    - decoder_fp16.onnx
+    """
+    if not onnx_dir.exists():
+        raise FileNotFoundError(f"ONNX directory not found: {onnx_dir}")
+
+    logger.info(f"Converting {onnx_dir.parent.name} to FP16...")
+
+    # Convert embed_tokens
+    embed_tokens_fp32 = onnx_dir / "embed_tokens.onnx"
+    embed_tokens_fp16 = onnx_dir / "embed_tokens_fp16.onnx"
+    if embed_tokens_fp32.exists() and not embed_tokens_fp16.exists():
+        convert_to_fp16(embed_tokens_fp32, embed_tokens_fp16)
+
+    # Convert embed_images
+    embed_images_fp32 = onnx_dir / "embed_images.onnx"
+    embed_images_fp16 = onnx_dir / "embed_images_fp16.onnx"
+    if embed_images_fp32.exists() and not embed_images_fp16.exists():
+        convert_to_fp16(embed_images_fp32, embed_images_fp16)
+
+    # Convert decoder
+    decoder_fp32 = onnx_dir / "decoder.onnx"
+    decoder_fp16 = onnx_dir / "decoder_fp16.onnx"
+    if decoder_fp32.exists() and not decoder_fp16.exists():
+        convert_to_fp16(decoder_fp32, decoder_fp16)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Export LFM2-VL models to ONNX",
@@ -486,6 +609,11 @@ def main():
         action="store_true",
         help="Use RoPE integrated in GroupQueryAttention (better precision)",
     )
+    parser.add_argument(
+        "--fp16",
+        action="store_true",
+        help="Convert to FP16 (creates *_fp16.onnx files)",
+    )
 
     args = parser.parse_args()
 
@@ -537,6 +665,12 @@ def main():
         for _, output_dir, _ in exports:
             onnx_dir = output_dir / "onnx"
             do_quantize(onnx_dir, bits, args.vision_quantize, args.block_size)
+
+    # FP16 conversion
+    if args.fp16:
+        for _, output_dir, _ in exports:
+            onnx_dir = output_dir / "onnx"
+            do_fp16(onnx_dir)
 
 
 if __name__ == "__main__":
