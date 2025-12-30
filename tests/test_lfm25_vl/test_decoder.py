@@ -31,6 +31,7 @@ PROMPTS = ["Hello, how are", "The image shows", "I can see"]
 
 QUANT_CONFIGS = [
     pytest.param(None, ["arrays", "top_k"], id="fp32"),
+    pytest.param("fp16", ["arrays", "top_k"], id="fp16"),
     pytest.param("q4", ["top_k"], id="q4"),
     pytest.param("q8", ["arrays", "top_k"], id="q8"),
 ]

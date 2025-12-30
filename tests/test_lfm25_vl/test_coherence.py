@@ -40,6 +40,7 @@ def get_onnx_dir(exports_dir: pathlib.Path) -> pathlib.Path:
 
 QUANT_CONFIGS = [
     pytest.param(None, None, id="fp32"),
+    pytest.param("fp16", "fp16", id="fp16"),
     pytest.param("q4", "q4", id="q4"),
     pytest.param("q4", "q8", id="q4d-q8v"),
     pytest.param("q8", "q8", id="q8"),
@@ -88,12 +89,14 @@ def get_onnx_image_embeddings(embed_images_sess, images, processor):
             inputs = processor.image_processor(images=image, return_tensors="pt")
             pixel_values = inputs["pixel_values"].numpy().astype(np.float32)
             patch_attention_mask = inputs["pixel_attention_mask"].numpy().astype(np.int64)
+            spatial_shapes = inputs["spatial_shapes"].numpy().astype(np.int64)
 
             outputs = embed_images_sess.run(
                 None,
                 {
                     "pixel_values": pixel_values,
                     "patch_attention_mask": patch_attention_mask,
+                    "spatial_shapes": spatial_shapes,
                 },
             )
             onnx_embeds = outputs[0]
