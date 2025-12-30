@@ -143,20 +143,17 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         self,
         config: LFM2VLConfig,
         vision_input_format: str = VISION_MODE_TILED,
-        use_fused_attention: bool = False,
     ):
         """
         Args:
             config: Model configuration
             vision_input_format: "tiled" for [B, N, 768] or "conv2d" for [B, 3, H, W]
-            use_fused_attention: Use com.microsoft.MultiHeadAttention (faster, better precision)
         """
         super().__init__()
         self.config = config
         self.vision_config = config.vision_config
         self.head_dim = config.vision_config.hidden_size // config.vision_config.num_attention_heads
         self.vision_input_format = vision_input_format
-        self.use_fused_attention = use_fused_attention
 
         # Projector dimensions
         self.vision_hidden = config.vision_config.hidden_size
@@ -881,7 +878,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             output
         """
         prefix = f"vision_model.encoder.layers.{layer_idx}"
-        H = self.vision_config.hidden_size
         nh = self.vision_config.num_attention_heads
         hd = self.head_dim
 
@@ -964,57 +960,16 @@ class VisionEmbedBuilder(ONNXBuilderBase):
 
         scale = 1.0 / (hd**0.5)
 
-        if self.use_fused_attention:
-            # Fused MultiHeadAttention (com.microsoft)
-            # Inputs: query, key, value, bias, key_padding_mask, attention_bias, past_key, past_value
-            attn_out_reshaped = self.make_node(
-                "MultiHeadAttention",
-                [q, k, v, "", "", "", "", ""],
-                [f"{prefix}/attn_out"],
-                domain="com.microsoft",
-                num_heads=nh,
-                scale=scale,
-            )
-        else:
-            # Manual attention implementation
-            # Reshape to [B, N, nh, hd] then transpose to [B, nh, N, hd]
-            self.add_initializer(f"{prefix}/reshape_qkv", np.array([0, -1, nh, hd], dtype=np.int64))
-            q_4d = self.make_node("Reshape", [q, f"{prefix}/reshape_qkv"], [f"{prefix}/q_4d"])
-            k_4d = self.make_node("Reshape", [k, f"{prefix}/reshape_qkv"], [f"{prefix}/k_4d"])
-            v_4d = self.make_node("Reshape", [v, f"{prefix}/reshape_qkv"], [f"{prefix}/v_4d"])
-
-            q_t = self.make_node("Transpose", [q_4d], [f"{prefix}/q_t"], perm=[0, 2, 1, 3])
-            k_t = self.make_node("Transpose", [k_4d], [f"{prefix}/k_t"], perm=[0, 2, 1, 3])
-            v_t = self.make_node("Transpose", [v_4d], [f"{prefix}/v_t"], perm=[0, 2, 1, 3])
-
-            # Scaled dot-product attention
-            self.add_initializer(f"{prefix}/scale", np.array(scale, dtype=np.float32))
-
-            # Q @ K^T
-            k_t_transposed = self.make_node(
-                "Transpose", [k_t], [f"{prefix}/k_t_t"], perm=[0, 1, 3, 2]
-            )
-            scores = self.make_node("MatMul", [q_t, k_t_transposed], [f"{prefix}/scores"])
-            scores_scaled = self.make_node(
-                "Mul", [scores, f"{prefix}/scale"], [f"{prefix}/scores_scaled"]
-            )
-
-            # Softmax
-            attn_weights = self.make_node(
-                "Softmax", [scores_scaled], [f"{prefix}/attn_weights"], axis=-1
-            )
-
-            # Attention output
-            attn_out = self.make_node("MatMul", [attn_weights, v_t], [f"{prefix}/attn_out"])
-
-            # Transpose back and reshape
-            attn_out_t = self.make_node(
-                "Transpose", [attn_out], [f"{prefix}/attn_out_t"], perm=[0, 2, 1, 3]
-            )
-            self.add_initializer(f"{prefix}/reshape_out", np.array([0, -1, H], dtype=np.int64))
-            attn_out_reshaped = self.make_node(
-                "Reshape", [attn_out_t, f"{prefix}/reshape_out"], [f"{prefix}/attn_out_reshaped"]
-            )
+        # Fused MultiHeadAttention (com.microsoft)
+        # Inputs: query, key, value, bias, key_padding_mask, attention_bias, past_key, past_value
+        attn_out_reshaped = self.make_node(
+            "MultiHeadAttention",
+            [q, k, v, "", "", "", "", ""],
+            [f"{prefix}/attn_out"],
+            domain="com.microsoft",
+            num_heads=nh,
+            scale=scale,
+        )
 
         # Output projection
         out_proj = self.make_node(
@@ -1394,9 +1349,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         logger.info("Building projector...")
         self.build_projector(vision_embeddings)
 
-        model = self.build_graph(
-            "embed_images", producer_name="lfm2-vl-builder", ms_domain=self.use_fused_attention
-        )
+        model = self.build_graph("embed_images", producer_name="lfm2-vl-builder")
         logger.info(f"Vision + projector model built: {len(self.nodes)} nodes")
         return model
 
