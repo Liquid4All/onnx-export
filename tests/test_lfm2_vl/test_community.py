@@ -197,7 +197,7 @@ def run_community_onnx_vl(
         "attention_mask": attention_mask,
     }
 
-    # Initialize KV cache
+    # Initialize KV cache (auto-detects dtype from model)
     cache = initialize_cache(decoder_sess)
     decoder_inputs.update(cache)
 

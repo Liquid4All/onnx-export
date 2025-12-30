@@ -35,10 +35,19 @@ def load_onnx_session(path: pathlib.Path) -> ort.InferenceSession:
     return ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
 
 
+ONNX_TYPE_TO_NUMPY = {
+    "tensor(float)": np.float32,
+    "tensor(float16)": np.float16,
+    "tensor(int64)": np.int64,
+    "tensor(int32)": np.int32,
+}
+
+
 def initialize_cache(session: ort.InferenceSession) -> dict:
     """Initialize KV cache tensors for an ONNX inference session.
 
     Automatically detects cache inputs (past_*) and initializes them with zeros.
+    Infers dtype from the ONNX model input specification.
     """
     skip_inputs = {"input_ids", "inputs_embeds", "attention_mask", "position_ids"}
     cache = {}
@@ -50,7 +59,8 @@ def initialize_cache(session: ort.InferenceSession) -> dict:
         for i, d in enumerate(inp.shape):
             if isinstance(d, str) and "sequence" in d.lower():
                 shape[i] = 0
-        cache[inp.name] = np.zeros(shape, dtype=np.float32)
+        dtype = ONNX_TYPE_TO_NUMPY.get(inp.type, np.float32)
+        cache[inp.name] = np.zeros(shape, dtype=dtype)
 
     return cache
 
