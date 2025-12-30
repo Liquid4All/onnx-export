@@ -251,7 +251,7 @@ def preprocess_conv2d(
 def preprocess_tiled(
     image: Image.Image,
     processor,
-    do_image_splitting: bool = False,
+    do_image_splitting: bool | None = None,
     do_pad_to_square: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Preprocess image for tiled format ONNX model.
@@ -261,7 +261,7 @@ def preprocess_tiled(
     Args:
         image: PIL Image to preprocess
         processor: HuggingFace processor with image_processor
-        do_image_splitting: Whether to split large images into tiles
+        do_image_splitting: Whether to split large images into tiles (None = use processor default)
         do_pad_to_square: If True, pad non-square images to square first
                           (recommended for ONNX models that assume square input)
 
@@ -275,11 +275,10 @@ def preprocess_tiled(
         image = pad_to_square(image)
 
     # Use processor's image_processor for patch extraction
-    inputs = processor.image_processor(
-        images=image,
-        return_tensors="pt",
-        do_image_splitting=do_image_splitting,
-    )
+    kwargs = {"images": image, "return_tensors": "pt"}
+    if do_image_splitting is not None:
+        kwargs["do_image_splitting"] = do_image_splitting
+    inputs = processor.image_processor(**kwargs)
 
     pixel_values = inputs["pixel_values"].numpy().astype(np.float32)
     patch_attention_mask = inputs["pixel_attention_mask"].numpy().astype(np.int64)

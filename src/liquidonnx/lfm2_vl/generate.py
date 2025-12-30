@@ -51,15 +51,19 @@ class VLModelInference:
         """Load processor and ONNX models."""
         logger.info(f"Loading VL model from {self.model_path}...")
 
-        dir_name = self.model_path.name
-        if "450M" in dir_name:
-            hf_model = "LiquidAI/LFM2-VL-450M"
-        elif "1.6B" in dir_name:
-            hf_model = "LiquidAI/LFM2-VL-1.6B"
-        elif "3B" in dir_name:
-            hf_model = "LiquidAI/LFM2-VL-3B"
-        else:
+        # Try loading processor from local path first if it has tokenizer files
+        if (self.model_path / "tokenizer.json").exists():
             hf_model = str(self.model_path)
+        else:
+            dir_name = self.model_path.name
+            if "450M" in dir_name:
+                hf_model = "LiquidAI/LFM2-VL-450M"
+            elif "1.6B" in dir_name:
+                hf_model = "LiquidAI/LFM2-VL-1.6B"
+            elif "3B" in dir_name:
+                hf_model = "LiquidAI/LFM2-VL-3B"
+            else:
+                hf_model = str(self.model_path)
 
         logger.info(f"Loading processor from {hf_model}...")
         self.processor = AutoProcessor.from_pretrained(hf_model, trust_remote_code=True)
@@ -102,16 +106,22 @@ class VLModelInference:
                     },
                 )
             else:
-                pixel_values, patch_attention_mask, _ = preprocess_tiled(
-                    image, self.processor, do_image_splitting=False, do_pad_to_square=True
+                pixel_values, patch_attention_mask, spatial_shapes = preprocess_tiled(
+                    image, self.processor, do_pad_to_square=True
                 )
                 outputs = self.embed_images_sess.run(
                     None,
                     {
                         "pixel_values": pixel_values,
                         "patch_attention_mask": patch_attention_mask,
+                        "spatial_shapes": spatial_shapes,
                     },
                 )
+                # Tiled output is [num_tiles, tokens_per_tile, hidden], flatten to [total_patches, hidden]
+                onnx_embeds = outputs[0]
+                num_tiles, tokens_per_tile, hidden = onnx_embeds.shape
+                embeddings.append(onnx_embeds.reshape(-1, hidden))
+                continue
             embeddings.append(outputs[0][0])
 
         return embeddings
@@ -161,7 +171,6 @@ class VLModelInference:
                 images=images,
                 text=prompt,
                 return_tensors="pt",
-                do_image_splitting=False,
             )
             input_ids = inputs["input_ids"].numpy()
 
