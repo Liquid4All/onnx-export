@@ -19,7 +19,7 @@ import pytest
 from helpers import skip_if_missing
 from PIL import Image
 
-from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D, VISION_MODES
+from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D
 from liquidonnx.lfm2_vl.generate import get_onnx_dir
 from liquidonnx.lfm2_vl.preprocessing import (
     detect_vision_format,
@@ -32,9 +32,9 @@ from liquidonnx.session import get_onnx_file, initialize_cache, update_cache
 logger = logging.getLogger(__name__)
 
 QUANT_CONFIGS = [
-    pytest.param(4, 4, id="q4"),
-    pytest.param(4, 8, id="q4d-q8v"),
-    pytest.param(8, 8, id="q8"),
+    pytest.param("q4", "q4", id="q4"),
+    pytest.param("q4", "q8", id="q4d-q8v"),
+    pytest.param("q8", "q8", id="q8"),
 ]
 
 DECODE_TOKENS = 50
@@ -77,12 +77,14 @@ def get_image_embeddings(embed_images_sess, image, processor):
         inputs = processor.image_processor(images=image, return_tensors="pt")
         pixel_values = inputs["pixel_values"].numpy().astype(np.float32)
         patch_attention_mask = inputs["pixel_attention_mask"].numpy().astype(np.int64)
+        spatial_shapes = inputs["spatial_shapes"].numpy().astype(np.int64)
 
         outputs = embed_images_sess.run(
             None,
             {
                 "pixel_values": pixel_values,
                 "patch_attention_mask": patch_attention_mask,
+                "spatial_shapes": spatial_shapes,
             },
         )
         onnx_embeds = outputs[0]
@@ -211,26 +213,24 @@ def run_benchmark(
 
 
 @pytest.mark.parametrize("model_processor", MODELS.keys(), indirect=True)
-@pytest.mark.parametrize("vision_mode", VISION_MODES)
-@pytest.mark.parametrize("decoder_bits,vision_bits", QUANT_CONFIGS)
+@pytest.mark.parametrize("decoder_type,vision_type", QUANT_CONFIGS)
 def test_benchmark(
     exports_dir: pathlib.Path,
     cardinal_image: pathlib.Path,
     model_processor,
-    vision_mode: str,
-    decoder_bits: int,
-    vision_bits: int,
+    decoder_type: str,
+    vision_type: str,
 ):
     """Benchmark single-image VL inference."""
     size, processor = model_processor
-    logger.info(f"Benchmarking {size}/{vision_mode}/q{decoder_bits}d-q{vision_bits}v")
+    logger.info(f"Benchmarking {size}/{decoder_type}d-{vision_type}v")
 
-    onnx_dir = get_onnx_dir(exports_dir, size, vision_mode)
+    onnx_dir = get_onnx_dir(exports_dir, size)
     skip_if_missing(onnx_dir, "Export not found")
 
     embed_tokens_file = onnx_dir / "embed_tokens.onnx"
-    embed_images_file = get_onnx_file(onnx_dir, vision_bits, "embed_images")
-    decoder_file = get_onnx_file(onnx_dir, decoder_bits, "decoder")
+    embed_images_file = get_onnx_file(onnx_dir, vision_type, "embed_images")
+    decoder_file = get_onnx_file(onnx_dir, decoder_type, "decoder")
 
     skip_if_missing(embed_tokens_file, "embed_tokens not found")
     skip_if_missing(embed_images_file, "embed_images not found")
@@ -244,8 +244,12 @@ def test_benchmark(
 
     # Load models (timed)
     load_start = time.perf_counter()
-    embed_tokens_sess = ort.InferenceSession(str(embed_tokens_file), providers=["CPUExecutionProvider"])
-    embed_images_sess = ort.InferenceSession(str(embed_images_file), providers=["CPUExecutionProvider"])
+    embed_tokens_sess = ort.InferenceSession(
+        str(embed_tokens_file), providers=["CPUExecutionProvider"]
+    )
+    embed_images_sess = ort.InferenceSession(
+        str(embed_images_file), providers=["CPUExecutionProvider"]
+    )
     decoder_sess = ort.InferenceSession(str(decoder_file), providers=["CPUExecutionProvider"])
     load_time = time.perf_counter() - load_start
 

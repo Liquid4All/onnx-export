@@ -1,12 +1,12 @@
 """
-Multi-turn coherence tests for LFM2-VL ONNX exports.
+Multi-turn coherence tests for LFM2.5-VL (LFM2-VL-1.6B-3102461) ONNX exports.
 
 Tests whether ONNX models maintain coherent multi-turn conversations
 with image context compared to PyTorch reference.
 
 Run with:
-    uv run pytest tests/test_lfm2_vl/test_coherence.py -v
-    uv run pytest tests/test_lfm2_vl/test_coherence.py -v -k "450M and tiled"
+    uv run pytest tests/test_lfm25_vl/test_coherence.py -v
+    uv run pytest tests/test_lfm25_vl/test_coherence.py -v -k "tiled and fp32"
 """
 
 import logging
@@ -18,8 +18,7 @@ import torch
 from helpers import skip_if_missing
 from PIL import Image
 
-from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D, VISION_MODE_TILED
-from liquidonnx.lfm2_vl.generate import get_onnx_dir
+from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.preprocessing import (
     detect_vision_format,
     get_image_token_id,
@@ -31,16 +30,25 @@ from liquidonnx.verify import compare_logits_similarity
 
 logger = logging.getLogger(__name__)
 
+MODEL_NAME = "LFM2-VL-1.6B-3102461"
+
+
+def get_onnx_dir(exports_dir: pathlib.Path) -> pathlib.Path:
+    """Get ONNX directory for the LFM2.5-VL model."""
+    return exports_dir / f"{MODEL_NAME}-ONNX" / "onnx"
+
+
 QUANT_CONFIGS = [
     pytest.param(None, None, id="fp32"),
     pytest.param("fp16", "fp16", id="fp16"),
     pytest.param("q4", "q4", id="q4"),
+    pytest.param("q4", "q8", id="q4d-q8v"),
     pytest.param("q8", "q8", id="q8"),
 ]
 
 MAX_NEW_TOKENS = 20
-SIMILARITY_THRESHOLD_FP32 = 0.75  # Higher threshold for fp32 (no quantization error)
-SIMILARITY_THRESHOLD_QUANT = 0.7  # Lower threshold for quantized models
+SIMILARITY_THRESHOLD_FP32 = 0.75
+SIMILARITY_THRESHOLD_QUANT = 0.7
 
 SINGLE_IMAGE_PROMPTS = [
     "What do you see in this image? Describe the main elements.",
@@ -61,11 +69,7 @@ COHERENCE_SCENARIOS = [
 
 
 def get_onnx_image_embeddings(embed_images_sess, images, processor):
-    """Get image embeddings from ONNX model.
-
-    Note: Caller should pad images to square for tiled format to ensure all
-    tiles have regular 32x32 patches (avoids ONNX/PyTorch pixel_unshuffle mismatch).
-    """
+    """Get image embeddings from ONNX model."""
     vision_format = detect_vision_format(embed_images_sess)
     embeddings = []
 
@@ -110,7 +114,6 @@ def generate_pytorch(model, processor, messages, images, max_new_tokens):
     )
 
     if has_images and images:
-        # Inject actual images into message content
         img_idx = 0
         messages_with_images = []
         for msg in messages:
@@ -246,9 +249,8 @@ def run_multi_turn_coherence(
     decoder_sess,
     images: list,
     prompts: list[str],
+    max_new_tokens: int = MAX_NEW_TOKENS,
 ) -> float:
-    # For tiled format, pad images to square to ensure all tiles are regular.
-    # This avoids ONNX/PyTorch mismatch on irregular tiles due to pixel_unshuffle ordering.
     vision_format = detect_vision_format(embed_images_sess)
     if vision_format == VISION_MODE_TILED:
         images = [pad_to_square(img) for img in images]
@@ -260,7 +262,6 @@ def run_multi_turn_coherence(
     for turn, prompt in enumerate(prompts, 1):
         is_first = turn == 1
 
-        # Build user message
         if is_first and images:
             content = [{"type": "image"} for _ in images]
             content.append({"type": "text", "text": prompt})
@@ -271,9 +272,8 @@ def run_multi_turn_coherence(
         current_pytorch = messages_pytorch + [user_msg]
         current_onnx = messages_onnx + [user_msg]
 
-        # Generate responses
         pt_tokens, pt_logits, pt_text = generate_pytorch(
-            model, processor, current_pytorch, images, MAX_NEW_TOKENS
+            model, processor, current_pytorch, images, max_new_tokens
         )
         ox_tokens, ox_logits, ox_text = generate_onnx(
             embed_tokens_sess,
@@ -282,7 +282,7 @@ def run_multi_turn_coherence(
             processor,
             current_onnx,
             images,
-            MAX_NEW_TOKENS,
+            max_new_tokens,
         )
 
         similarity = compare_logits_similarity(pt_logits, ox_logits)
@@ -293,15 +293,12 @@ def run_multi_turn_coherence(
         logger.info(f"    PyTorch: {pt_text}")
         logger.info(f"    ONNX:    {ox_text}")
 
-        # Update conversation history
         messages_pytorch = current_pytorch + [{"role": "assistant", "content": pt_text}]
         messages_onnx = current_onnx + [{"role": "assistant", "content": ox_text}]
 
     return float(np.mean(similarities)) if similarities else 0.0
 
 
-# pytorch_model outermost so same model runs consecutively (memory optimization)
-@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
 @pytest.mark.parametrize("decoder_type,vision_type", QUANT_CONFIGS)
 @pytest.mark.parametrize("scenario,prompts", COHERENCE_SCENARIOS)
 def test_coherence(
@@ -314,9 +311,8 @@ def test_coherence(
     scenario: str,
     prompts: list[str],
 ):
-    size, model, processor = pytorch_model
-
-    onnx_dir = get_onnx_dir(exports_dir, size)
+    model_name, model, processor = pytorch_model
+    onnx_dir = get_onnx_dir(exports_dir)
     skip_if_missing(onnx_dir, "Export not found")
 
     decoder_file = get_onnx_file(onnx_dir, decoder_type, "decoder")
@@ -343,9 +339,9 @@ def test_coherence(
         decoder_sess,
         images,
         prompts,
+        MAX_NEW_TOKENS,
     )
 
-    # Use stricter threshold for fp32/fp16 (no quantization error)
     is_float = decoder_type is None or decoder_type == "fp16"
     threshold = SIMILARITY_THRESHOLD_FP32 if is_float else SIMILARITY_THRESHOLD_QUANT
 

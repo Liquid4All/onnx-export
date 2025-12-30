@@ -1,49 +1,48 @@
 #!/usr/bin/env python3
 """
-Export LFM2-VL models to ONNX with optional quantization.
-
-Vision Input Formats:
-- --tiled: Input [B, N, 768] with pre-extracted patches (HuggingFace style)
-- --conv2d: Input [B, 3, H, W] with raw image (simpler, llama.cpp style)
+Export LFM2-VL models to ONNX with optional quantization and FP16 conversion.
 
 Output Structure (Transformers.js compatible):
     exports/
-    └── LFM2-VL-{size}-ONNX-{tiled|conv2d}/
+    └── LFM2-VL-{size}-ONNX/
         ├── config.json
         ├── tokenizer.json
         ├── tokenizer_config.json
         └── onnx/
-            ├── embed_tokens.onnx
-            ├── embed_images.onnx
-            ├── embed_images_q4.onnx
-            ├── embed_images_q8.onnx
-            ├── decoder.onnx
-            ├── decoder_q4.onnx
-            └── decoder_q8.onnx
+            ├── embed_tokens.onnx          # FP32
+            ├── embed_tokens_fp16.onnx     # --precision fp16
+            ├── embed_images.onnx          # FP32
+            ├── embed_images_fp16.onnx     # --precision fp16
+            ├── embed_images_q4.onnx       # --precision q4
+            ├── embed_images_q8.onnx       # --precision q8
+            ├── decoder.onnx               # FP32
+            ├── decoder_fp16.onnx          # --precision fp16
+            ├── decoder_q4.onnx            # --precision q4
+            └── decoder_q8.onnx            # --precision q8
 
 Usage:
     # Export from local model path
-    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --tiled
-    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --tiled --quantize
+    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461
+    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --precision
 
-    # Export FP32 only (all sizes, both formats)
+    # Export FP32 only (all sizes)
     uv run lfm2-vl-export --sizes all
 
-    # Export with all quantizations (q4, q8 decoder, q8 vision)
-    uv run lfm2-vl-export --sizes all --quantize
+    # Export with all precisions (fp16, q4, q8)
+    uv run lfm2-vl-export --sizes all --precision
 
-    # Export with Q4 vision for WebGPU
-    uv run lfm2-vl-export --sizes 450M --quantize q4 --vision-quantize 4
+    # Export with specific precisions
+    uv run lfm2-vl-export --sizes 450M --precision q4
+    uv run lfm2-vl-export --sizes 450M --precision fp16 q4 q8
 
-    # Export with specific quantization
-    uv run lfm2-vl-export --sizes 450M --quantize q4
-    uv run lfm2-vl-export --sizes 450M --quantize q4 q8
+    # Convert existing exports (skip FP32 export)
+    uv run lfm2-vl-export --sizes all --precision --skip-export
 
-    # Quantize existing exports (skip FP32 export)
-    uv run lfm2-vl-export --sizes all --quantize --skip-export
+    # Convert to FP16 (2x smaller, matches onnx-community format)
+    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --precision fp16
 
-    # Export only tiled format
-    uv run lfm2-vl-export --sizes 450M --tiled --quantize
+    # Export with conv2d vision format (instead of default tiled)
+    uv run lfm2-vl-export --sizes 450M --vision-format conv2d
 """
 
 import argparse
@@ -56,20 +55,110 @@ import onnx
 from onnx import TensorProto, helper
 
 from liquidonnx.lfm2.builder import LFM2Builder
-from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED, VISION_MODES
+from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.builder import EmbedTokensBuilder, LFM2VLConfig, VisionEmbedBuilder
-from liquidonnx.quantize import get_model_size, quantize_model
+from liquidonnx.quantize import get_model_size, get_total_model_size_mb, quantize_model
 
 logger = logging.getLogger(__name__)
 
 
-def get_output_dir(size: str, fmt: str, output_base: pathlib.Path) -> pathlib.Path:
+def convert_to_fp16(
+    input_path: pathlib.Path,
+    output_path: pathlib.Path,
+    keep_io_types: bool = True,
+):
+    """Convert ONNX model from FP32 to FP16.
+
+    Args:
+        input_path: Path to FP32 ONNX model
+        output_path: Path for FP16 output model
+        keep_io_types: Keep inputs/outputs as FP32 for compatibility
+    """
+    from onnx.external_data_helper import load_external_data_for_model
+    from onnxruntime.transformers.float16 import convert_float_to_float16
+
+    logger.info(f"Converting {input_path.name} to FP16...")
+
+    # Load model with external data
+    model = onnx.load(str(input_path), load_external_data=False)
+    load_external_data_for_model(model, str(input_path.parent))
+
+    # Save original Resize inputs and empty tensor initializers before conversion
+    # (converter modifies in-place)
+    resize_orig_inputs = {}
+    empty_initializers = {}
+    for node in model.graph.node:
+        if node.op_type == "Resize":
+            resize_orig_inputs[node.name] = list(node.input)
+    for init in model.graph.initializer:
+        if "empty" in init.name.lower():
+            empty_initializers[init.name] = onnx.TensorProto()
+            empty_initializers[init.name].CopyFrom(init)
+
+    # Convert to FP16
+    # disable_shape_infer=True is required for models with com.microsoft custom ops
+    model_fp16 = convert_float_to_float16(
+        model,
+        keep_io_types=keep_io_types,
+        force_fp16_initializers=True,
+        disable_shape_infer=True,
+    )
+
+    # Fix Resize nodes: the converter adds Cast nodes for empty scales/roi tensors
+    # which breaks shape inference. Restore original empty tensor inputs and initializers.
+    for node in model_fp16.graph.node:
+        if node.op_type == "Resize" and node.name in resize_orig_inputs:
+            orig_inputs = resize_orig_inputs[node.name]
+            # Restore scales input (index 2) if it was an empty tensor
+            if len(node.input) > 2 and len(orig_inputs) > 2:
+                if "cast" in node.input[2].lower() and "empty" in orig_inputs[2].lower():
+                    node.input[2] = orig_inputs[2]
+            # Restore roi input (index 1) if it was an empty tensor
+            if len(node.input) > 1 and len(orig_inputs) > 1:
+                if "cast" in node.input[1].lower() and "empty" in orig_inputs[1].lower():
+                    node.input[1] = orig_inputs[1]
+
+    # Restore FP32 empty tensor initializers
+    for i, init in enumerate(model_fp16.graph.initializer):
+        if init.name in empty_initializers:
+            model_fp16.graph.initializer[i].CopyFrom(empty_initializers[init.name])
+
+    # Save with external data
+    output_data_path = output_path.parent / f"{output_path.stem}.onnx_data"
+    if output_data_path.exists():
+        output_data_path.unlink()
+
+    onnx.save_model(
+        model_fp16,
+        str(output_path),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=f"{output_path.stem}.onnx_data",
+        size_threshold=1024,
+    )
+
+    # Get sizes for logging
+    orig_mb = get_total_model_size_mb(input_path)
+    fp16_mb = get_total_model_size_mb(output_path)
+    ratio = orig_mb / fp16_mb if fp16_mb > 0 else 0
+    logger.info(f"  {input_path.name}: {orig_mb:.1f} -> {fp16_mb:.1f} MB ({ratio:.1f}x)")
+
+    return output_path
+
+
+def get_output_dir(
+    size: str, output_base: pathlib.Path, vision_format: str = VISION_MODE_TILED
+) -> pathlib.Path:
     """Get output directory for a model."""
-    return output_base / "exports" / f"LFM2-VL-{size}-ONNX-{fmt}"
+    suffix = f"-{vision_format}" if vision_format != VISION_MODE_TILED else ""
+    return output_base / "exports" / f"LFM2-VL-{size}-ONNX{suffix}"
 
 
 def export_vl_model(
-    model_path: str, output_dir: pathlib.Path | str, vision_input_format: str = VISION_MODE_TILED
+    model_path: str,
+    output_dir: pathlib.Path | str,
+    vision_input_format: str = VISION_MODE_TILED,
+    use_integrated_rope: bool = False,
 ):
     """Export LFM2-VL model to ONNX (embed_tokens + embed_images + decoder).
 
@@ -77,6 +166,7 @@ def export_vl_model(
         model_path: HuggingFace model path
         output_dir: Output directory for ONNX files
         vision_input_format: "tiled" for [B, N, 768] or "conv2d" for [B, 3, H, W]
+        use_integrated_rope: Use RoPE integrated in GroupQueryAttention (better precision)
     """
     import torch
     from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
@@ -155,8 +245,10 @@ def export_vl_model(
     # 3. Export decoder (takes inputs_embeds, not input_ids)
     # =========================================================================
     logger.info("Exporting decoder (with inputs_embeds input)...")
+    if use_integrated_rope:
+        logger.info("Using integrated RoPE in GroupQueryAttention")
 
-    text_builder = LFM2Builder(vl_config.text_config)
+    text_builder = LFM2Builder(vl_config.text_config, use_integrated_rope=use_integrated_rope)
 
     # Filter text model weights (they have "model.language_model." prefix in VL model)
     for name, weight in weights.items():
@@ -336,10 +428,20 @@ def export_vl_model(
     return output_dir
 
 
-def do_export(model_path: str, output_path: pathlib.Path, fmt: str):
+def do_export(
+    model_path: str,
+    output_path: pathlib.Path,
+    vision_format: str = VISION_MODE_TILED,
+    use_integrated_rope: bool = False,
+):
     """Export a single VL model to ONNX (FP32)."""
     logger.info(f"Exporting {model_path} to {output_path}...")
-    export_vl_model(model_path, output_path, vision_input_format=fmt)
+    export_vl_model(
+        model_path,
+        output_path,
+        vision_input_format=vision_format,
+        use_integrated_rope=use_integrated_rope,
+    )
 
 
 def do_quantize(
@@ -388,6 +490,38 @@ def do_quantize(
         )
 
 
+def do_fp16(onnx_dir: pathlib.Path):
+    """Convert VL model to FP16 (matching onnx-community naming).
+
+    Creates:
+    - embed_tokens_fp16.onnx
+    - embed_images_fp16.onnx
+    - decoder_fp16.onnx
+    """
+    if not onnx_dir.exists():
+        raise FileNotFoundError(f"ONNX directory not found: {onnx_dir}")
+
+    logger.info(f"Converting {onnx_dir.parent.name} to FP16...")
+
+    # Convert embed_tokens
+    embed_tokens_fp32 = onnx_dir / "embed_tokens.onnx"
+    embed_tokens_fp16 = onnx_dir / "embed_tokens_fp16.onnx"
+    if embed_tokens_fp32.exists() and not embed_tokens_fp16.exists():
+        convert_to_fp16(embed_tokens_fp32, embed_tokens_fp16)
+
+    # Convert embed_images
+    embed_images_fp32 = onnx_dir / "embed_images.onnx"
+    embed_images_fp16 = onnx_dir / "embed_images_fp16.onnx"
+    if embed_images_fp32.exists() and not embed_images_fp16.exists():
+        convert_to_fp16(embed_images_fp32, embed_images_fp16)
+
+    # Convert decoder
+    decoder_fp32 = onnx_dir / "decoder.onnx"
+    decoder_fp16 = onnx_dir / "decoder_fp16.onnx"
+    if decoder_fp32.exists() and not decoder_fp16.exists():
+        convert_to_fp16(decoder_fp32, decoder_fp16)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Export LFM2-VL models to ONNX",
@@ -415,31 +549,12 @@ def main():
         help="Output base directory (default: current directory)",
     )
 
-    # Vision input format
+    # Output precision
     parser.add_argument(
-        "--tiled",
-        action="store_true",
-        help="Tiled input format [B, N, 768] (HuggingFace style)",
-    )
-    parser.add_argument(
-        "--conv2d",
-        action="store_true",
-        help="Conv2d input format [B, 3, H, W] (llama.cpp style)",
-    )
-
-    # Quantization
-    parser.add_argument(
-        "--quantize",
+        "--precision",
         nargs="*",
-        metavar="BITS",
-        help="Quantize decoder: q4, q8, or both (default if no args)",
-    )
-    parser.add_argument(
-        "--vision-quantize",
-        type=int,
-        choices=[4, 8],
-        default=8,
-        help="Vision encoder quantization bits (default: 8)",
+        metavar="PRECISION",
+        help="Output precisions: fp16, q4, q8, or all (default if no args)",
     )
     parser.add_argument(
         "--skip-export",
@@ -452,24 +567,38 @@ def main():
         default=32,
         help="Block size for quantization (default: 32)",
     )
+    parser.add_argument(
+        "--integrated-rope",
+        action="store_true",
+        help="Use RoPE integrated in GroupQueryAttention (better precision)",
+    )
+    parser.add_argument(
+        "--vision-format",
+        choices=[VISION_MODE_TILED, VISION_MODE_CONV2D],
+        default=VISION_MODE_TILED,
+        help="Vision encoder format: tiled (default) or conv2d",
+    )
 
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
-    # Parse quantization options
+    # Parse output precisions
     quant_bits = []
-    if args.quantize is not None:
-        if len(args.quantize) == 0:
+    do_fp16_conversion = False
+    if args.precision is not None:
+        if len(args.precision) == 0:
             quant_bits = [4, 8]
+            do_fp16_conversion = True
         else:
-            for q in args.quantize:
-                q = q.lower().replace("q", "")
-                if q not in ("4", "8"):
-                    parser.error(f"Invalid quantization: {q}. Use q4 or q8.")
-                quant_bits.append(int(q))
-
-    formats = [m for m in VISION_MODES if getattr(args, m)] or VISION_MODES
+            for p in args.precision:
+                p = p.lower()
+                if p == "fp16":
+                    do_fp16_conversion = True
+                elif p in ("q4", "q8"):
+                    quant_bits.append(int(p[1]))
+                else:
+                    parser.error(f"Invalid precision: {p}. Use fp16, q4, or q8.")
 
     # Validate args
     if args.model_path and args.sizes:
@@ -478,31 +607,36 @@ def main():
         parser.error("Must specify either --model-path or --sizes")
 
     # Build list of (model_path, output_dir) pairs
+    vision_suffix = f"-{args.vision_format}" if args.vision_format != VISION_MODE_TILED else ""
     exports = []
     if args.model_path:
         model_name = pathlib.Path(args.model_path).name
-        for fmt in formats:
-            output_dir = args.output_dir / "exports" / f"{model_name}-ONNX-{fmt}"
-            exports.append((args.model_path, output_dir, fmt))
+        output_dir = args.output_dir / "exports" / f"{model_name}-ONNX{vision_suffix}"
+        exports.append((args.model_path, output_dir))
     else:
         sizes = list(MODELS.keys()) if "all" in args.sizes else args.sizes
         for s in sizes:
             if s not in MODELS:
                 parser.error(f"Unknown size: {s}. Available: {', '.join(MODELS.keys())}")
-        for fmt in formats:
-            for size in sizes:
-                exports.append((MODELS[size], get_output_dir(size, fmt, args.output_dir), fmt))
+        for size in sizes:
+            exports.append((MODELS[size], get_output_dir(size, args.output_dir, args.vision_format)))
 
     # Export
     if not args.skip_export:
-        for model_path, output_dir, fmt in exports:
-            do_export(model_path, output_dir, fmt)
+        for model_path, output_dir in exports:
+            do_export(model_path, output_dir, args.vision_format, args.integrated_rope)
 
     # Quantize
     for bits in quant_bits:
-        for _, output_dir, _ in exports:
+        for _, output_dir in exports:
             onnx_dir = output_dir / "onnx"
-            do_quantize(onnx_dir, bits, args.vision_quantize, args.block_size)
+            do_quantize(onnx_dir, bits, bits, args.block_size)
+
+    # FP16 conversion
+    if do_fp16_conversion:
+        for _, output_dir in exports:
+            onnx_dir = output_dir / "onnx"
+            do_fp16(onnx_dir)
 
 
 if __name__ == "__main__":

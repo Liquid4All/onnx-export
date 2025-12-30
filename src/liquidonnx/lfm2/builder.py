@@ -71,10 +71,17 @@ class LFM2Builder(ONNXBuilderBase):
     - Fused operators for better performance
     """
 
-    def __init__(self, config: LFM2Config):
+    def __init__(self, config: LFM2Config, use_integrated_rope: bool = False):
+        """
+        Args:
+            config: Model configuration
+            use_integrated_rope: Use RoPE integrated in GroupQueryAttention (do_rotary=1)
+                instead of separate RotaryEmbedding ops. May improve numerical precision.
+        """
         super().__init__()
         self.config = config
         self.head_dim = config.hidden_size // config.num_attention_heads
+        self.use_integrated_rope = use_integrated_rope
 
         # Categorize layers
         self.conv_indices = [i for i, t in enumerate(config.layer_types) if t == "conv"]
@@ -501,52 +508,78 @@ class LFM2Builder(ONNXBuilderBase):
         )
         k_3d = self.make_node("Reshape", [k_normed, f"{prefix}/k_reshape_back"], [f"{prefix}/k_3d"])
 
-        # === RoPE (Rotary Position Embedding) ===
-        # num_heads=0, rotary_embedding_dim=0 lets operator infer from tensor shapes
-        rope_attrs = {
-            "domain": "com.microsoft",
-            "interleaved": 0,
-            "num_heads": 0,
-            "rotary_embedding_dim": 0,
-        }
-        q_rope = self.make_node(
-            "RotaryEmbedding",
-            [q_3d, "position_ids", "cos_cache", "sin_cache"],
-            [f"{prefix}/q_rope"],
-            **rope_attrs,
-        )
-        k_rope = self.make_node(
-            "RotaryEmbedding",
-            [k_3d, "position_ids", "cos_cache", "sin_cache"],
-            [f"{prefix}/k_rope"],
-            **rope_attrs,
-        )
-
-        # === GroupQueryAttention ===
+        # === RoPE + GroupQueryAttention ===
         scale = 1.0 / (hd**0.5)
-        self.make_node(
-            "GroupQueryAttention",
-            [
-                q_rope,
-                k_rope,
-                v,
-                f"past_key_values.{layer_idx}.key",
-                f"past_key_values.{layer_idx}.value",
-                "/attn_mask/seqlens_k",
-                "/attn_mask/total_seq",
-                "",  # cos_cache (unused, RoPE applied above)
-                "",  # sin_cache (unused, RoPE applied above)
-            ],
-            [f"{prefix}/attn_out", f"present.{layer_idx}.key", f"present.{layer_idx}.value"],
-            domain="com.microsoft",
-            num_heads=nh,
-            kv_num_heads=nkv,
-            scale=scale,
-            local_window_size=-1,
-            softcap=0.0,
-            do_rotary=0,
-            rotary_interleaved=0,
-        )
+
+        if self.use_integrated_rope:
+            # Integrated RoPE: pass un-rotated Q/K, let GQA apply RoPE internally
+            self.make_node(
+                "GroupQueryAttention",
+                [
+                    q_3d,
+                    k_3d,
+                    v,
+                    f"past_key_values.{layer_idx}.key",
+                    f"past_key_values.{layer_idx}.value",
+                    "/attn_mask/seqlens_k",
+                    "/attn_mask/total_seq",
+                    "cos_cache",
+                    "sin_cache",
+                ],
+                [f"{prefix}/attn_out", f"present.{layer_idx}.key", f"present.{layer_idx}.value"],
+                domain="com.microsoft",
+                num_heads=nh,
+                kv_num_heads=nkv,
+                scale=scale,
+                local_window_size=-1,
+                softcap=0.0,
+                do_rotary=1,
+                rotary_interleaved=0,
+            )
+        else:
+            # Separate RoPE: apply RotaryEmbedding first, then GQA
+            rope_attrs = {
+                "domain": "com.microsoft",
+                "interleaved": 0,
+                "num_heads": 0,
+                "rotary_embedding_dim": 0,
+            }
+            q_rope = self.make_node(
+                "RotaryEmbedding",
+                [q_3d, "position_ids", "cos_cache", "sin_cache"],
+                [f"{prefix}/q_rope"],
+                **rope_attrs,
+            )
+            k_rope = self.make_node(
+                "RotaryEmbedding",
+                [k_3d, "position_ids", "cos_cache", "sin_cache"],
+                [f"{prefix}/k_rope"],
+                **rope_attrs,
+            )
+
+            self.make_node(
+                "GroupQueryAttention",
+                [
+                    q_rope,
+                    k_rope,
+                    v,
+                    f"past_key_values.{layer_idx}.key",
+                    f"past_key_values.{layer_idx}.value",
+                    "/attn_mask/seqlens_k",
+                    "/attn_mask/total_seq",
+                    "",  # cos_cache (unused, RoPE applied above)
+                    "",  # sin_cache (unused, RoPE applied above)
+                ],
+                [f"{prefix}/attn_out", f"present.{layer_idx}.key", f"present.{layer_idx}.value"],
+                domain="com.microsoft",
+                num_heads=nh,
+                kv_num_heads=nkv,
+                scale=scale,
+                local_window_size=-1,
+                softcap=0.0,
+                do_rotary=0,
+                rotary_interleaved=0,
+            )
 
         # === Output projection + Residual + MLP ===
         o_proj = self.make_matmul(

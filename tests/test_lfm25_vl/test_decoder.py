@@ -1,9 +1,9 @@
 """
-Verify decoder ONNX export against PyTorch reference.
+Verify decoder ONNX export against PyTorch reference for LFM2.5-VL.
 
 Run with:
-    uv run pytest tests/test_lfm2_vl/test_decoder.py -v
-    uv run pytest tests/test_lfm2_vl/test_decoder.py -v -k "450M and q4"
+    uv run pytest tests/test_lfm25_vl/test_decoder.py -v
+    uv run pytest tests/test_lfm25_vl/test_decoder.py -v -k "q4"
 """
 
 import logging
@@ -14,12 +14,18 @@ import pytest
 import torch
 from helpers import skip_if_missing
 
-from liquidonnx.lfm2_vl import MODELS
-from liquidonnx.lfm2_vl.generate import get_onnx_dir
 from liquidonnx.session import get_onnx_file, load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, compare_top_k, get_tolerances
 
 logger = logging.getLogger(__name__)
+
+MODEL_NAME = "LFM2-VL-1.6B-3102461"
+
+
+def get_onnx_dir(exports_dir: pathlib.Path) -> pathlib.Path:
+    """Get ONNX directory for the LFM2.5-VL model."""
+    return exports_dir / f"{MODEL_NAME}-ONNX" / "onnx"
+
 
 PROMPTS = ["Hello, how are", "The image shows", "I can see"]
 
@@ -27,13 +33,10 @@ QUANT_CONFIGS = [
     pytest.param(None, ["arrays", "top_k"], id="fp32"),
     pytest.param("fp16", ["arrays", "top_k"], id="fp16"),
     pytest.param("q4", ["top_k"], id="q4"),
-    # arrays check ok: embed_tokens.onnx stays fp32, reducing quantization error
     pytest.param("q8", ["arrays", "top_k"], id="q8"),
 ]
 
 
-# pytorch_model outermost so same model runs consecutively (memory optimization)
-@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
 @pytest.mark.parametrize("decoder_type,checks", QUANT_CONFIGS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_decoder(
@@ -43,10 +46,10 @@ def test_decoder(
     checks: list[str],
     prompt: str,
 ):
-    size, model, processor = pytorch_model
-    logger.info(f"Testing {size}/{decoder_type or 'fp32'}: '{prompt}'")
+    model_name, model, processor = pytorch_model
+    logger.info(f"Testing {model_name}/{decoder_type or 'fp32'}: '{prompt}'")
 
-    onnx_dir = get_onnx_dir(exports_dir, size)
+    onnx_dir = get_onnx_dir(exports_dir)
     skip_if_missing(onnx_dir, "Export not found")
 
     decoder_file = get_onnx_file(onnx_dir, decoder_type, "decoder")

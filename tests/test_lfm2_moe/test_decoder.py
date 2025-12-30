@@ -1,11 +1,11 @@
 """
-Verify decoder ONNX export against PyTorch reference.
+Verify decoder ONNX export against PyTorch reference for LFM2-MoE.
 
 Tests single-step logit comparison between PyTorch and ONNX models.
 
 Run with:
-    uv run pytest tests/test_lfm2/test_decoder.py -v
-    uv run pytest tests/test_lfm2/test_decoder.py -v -k "350M and q4"
+    uv run pytest tests/test_lfm2_moe/test_decoder.py -v
+    uv run pytest tests/test_lfm2_moe/test_decoder.py -v -k "8B-A1B and q4"
 """
 
 import logging
@@ -16,19 +16,23 @@ import pytest
 import torch
 from helpers import skip_if_missing
 
-from liquidonnx.lfm2 import MODELS
-from liquidonnx.lfm2.generate import get_onnx_dir
+from liquidonnx.lfm2_moe import MODELS
 from liquidonnx.session import get_onnx_file, load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, compare_top_k, get_tolerances
 
 logger = logging.getLogger(__name__)
+
+
+def get_onnx_dir(exports_dir: pathlib.Path, size: str) -> pathlib.Path:
+    """Get ONNX directory for a model size."""
+    return exports_dir / f"LFM2-MoE-{size}-ONNX" / "onnx"
+
 
 PROMPTS = ["Hello, how are", "The sky is", "1 + 1 ="]
 
 QUANT_CONFIGS = [
     pytest.param(None, ["arrays", "top_k"], id="fp32"),
     pytest.param("q4", ["top_k"], id="q4"),
-    # no arrays check: combined model.onnx quantizes embeddings, causing higher error
     pytest.param("q8", ["top_k"], id="q8"),
 ]
 
@@ -91,7 +95,6 @@ def test_decoder(
             compare_arrays(f"decoder: '{prompt[:20]}...'", pytorch_logits, onnx_logits, atol, rtol)
         )
     if "top_k" in checks:
-        # Quantized models may have slight logit differences causing token reordering
         min_overlap = 5 if precision in (None, "fp16") else 3
         results.append(
             compare_top_k(

@@ -17,11 +17,6 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
 logger = logging.getLogger(__name__)
 
 
-def bits_to_str(bits: int | None) -> str:
-    """Convert quantization bits to string representation."""
-    return f"q{bits}" if bits else "fp32"
-
-
 def find_lm_head_node(model) -> str | None:
     """Find the lm_head MatMul node name."""
     for node in model.graph.node:

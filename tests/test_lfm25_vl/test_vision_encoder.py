@@ -1,13 +1,13 @@
 """
-Verify vision encoder ONNX export against PyTorch reference.
+Verify vision encoder ONNX export against PyTorch reference for LFM2.5-VL.
 
 Note: Only tests tiled format. Conv2d format uses different preprocessing
 (our preprocess_conv2d vs HuggingFace processor) which causes numerical
 differences. Coherence tests verify conv2d works end-to-end.
 
 Run with:
-    uv run pytest tests/test_lfm2_vl/test_vision_encoder.py -v
-    uv run pytest tests/test_lfm2_vl/test_vision_encoder.py -v -k "450M and q4"
+    uv run pytest tests/test_lfm25_vl/test_vision_encoder.py -v
+    uv run pytest tests/test_lfm25_vl/test_vision_encoder.py -v -k "q4"
 """
 
 import logging
@@ -19,13 +19,19 @@ import torch
 from helpers import skip_if_missing
 from PIL import Image
 
-from liquidonnx.lfm2_vl import MODELS
-from liquidonnx.lfm2_vl.generate import get_onnx_dir
 from liquidonnx.lfm2_vl.preprocessing import pad_to_square
 from liquidonnx.session import get_onnx_file, load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, compare_correlation, get_tolerances
 
 logger = logging.getLogger(__name__)
+
+MODEL_NAME = "LFM2-VL-1.6B-3102461"
+
+
+def get_onnx_dir(exports_dir: pathlib.Path) -> pathlib.Path:
+    """Get ONNX directory for the LFM2.5-VL model."""
+    return exports_dir / f"{MODEL_NAME}-ONNX" / "onnx"
+
 
 VISION_CORRELATION_THRESHOLD = 0.89
 
@@ -111,9 +117,6 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, v
     return results
 
 
-# pytorch_model outermost so same model runs consecutively (memory optimization)
-# Only tests tiled format (conv2d has different preprocessing, verified via coherence tests)
-@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
 @pytest.mark.parametrize("vision_type,checks", QUANT_CONFIGS)
 def test_vision_encoder(
     exports_dir: pathlib.Path,
@@ -122,10 +125,10 @@ def test_vision_encoder(
     vision_type: str | None,
     checks: list[str],
 ):
-    size, model, processor = pytorch_model
-    logger.info(f"Testing vision encoder {size}/{vision_type or 'fp32'}")
+    model_name, model, processor = pytorch_model
+    logger.info(f"Testing vision encoder {model_name}/{vision_type or 'fp32'}")
 
-    onnx_dir = get_onnx_dir(exports_dir, size)
+    onnx_dir = get_onnx_dir(exports_dir)
     skip_if_missing(onnx_dir, "Export not found")
 
     embed_images_file = get_onnx_file(onnx_dir, vision_type, "embed_images")

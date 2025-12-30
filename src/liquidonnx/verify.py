@@ -25,9 +25,9 @@ class VerificationResult:
     details: str = ""
 
 
-def get_tolerances(bits: int | None) -> tuple[float, float]:
-    """Get (atol, rtol) based on quantization level."""
-    if bits:
+def get_tolerances(precision: str | None) -> tuple[float, float]:
+    """Get (atol, rtol) based on precision (fp32/fp16 use tight, q4/q8 use loose)."""
+    if precision and precision != "fp16":
         return ATOL_QUANT, RTOL_QUANT
     return ATOL, RTOL
 

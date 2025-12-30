@@ -1,12 +1,12 @@
 """
-Multi-turn coherence tests for LFM2 ONNX exports.
+Multi-turn coherence tests for LFM2-MoE ONNX exports.
 
 Tests whether ONNX models maintain coherent multi-turn conversations
 compared to PyTorch reference.
 
 Run with:
-    uv run pytest tests/test_lfm2/test_coherence.py -v
-    uv run pytest tests/test_lfm2/test_coherence.py -v -k "1.2B and q4"
+    uv run pytest tests/test_lfm2_moe/test_coherence.py -v
+    uv run pytest tests/test_lfm2_moe/test_coherence.py -v -k "8B-A1B and q4"
 """
 
 import logging
@@ -17,12 +17,17 @@ import pytest
 import torch
 from helpers import skip_if_missing
 
-from liquidonnx.lfm2 import MODELS
-from liquidonnx.lfm2.generate import get_onnx_dir
+from liquidonnx.lfm2_moe import MODELS
 from liquidonnx.session import get_onnx_file, initialize_cache, load_onnx_session, update_cache
 from liquidonnx.verify import compare_logits_similarity
 
 logger = logging.getLogger(__name__)
+
+
+def get_onnx_dir(exports_dir: pathlib.Path, size: str) -> pathlib.Path:
+    """Get ONNX directory for a model size."""
+    return exports_dir / f"LFM2-MoE-{size}-ONNX" / "onnx"
+
 
 QUANT_CONFIGS = [
     pytest.param(None, id="fp32"),
@@ -134,11 +139,9 @@ def run_multi_turn_coherence(
     similarities = []
 
     for turn, prompt in enumerate(prompts, 1):
-        # Add user message
         messages_pytorch = messages_pytorch + [{"role": "user", "content": prompt}]
         messages_onnx = messages_onnx + [{"role": "user", "content": prompt}]
 
-        # Apply chat template
         pytorch_text = tokenizer.apply_chat_template(
             messages_pytorch, tokenize=False, add_generation_prompt=True
         )
@@ -149,7 +152,6 @@ def run_multi_turn_coherence(
         pytorch_input = tokenizer.encode(pytorch_text, add_special_tokens=False)
         onnx_input = tokenizer.encode(onnx_text, add_special_tokens=False)
 
-        # Generate responses
         pytorch_output, pytorch_logits = generate_pytorch(
             model, tokenizer, pytorch_input, MAX_NEW_TOKENS
         )
@@ -160,7 +162,6 @@ def run_multi_turn_coherence(
         similarity = compare_logits_similarity(pytorch_logits, onnx_logits)
         similarities.append(similarity)
 
-        # Decode responses
         pytorch_new = pytorch_output[len(pytorch_input) :]
         onnx_new = onnx_output[len(onnx_input) :]
         pytorch_response = tokenizer.decode(pytorch_new, skip_special_tokens=True)
@@ -171,7 +172,6 @@ def run_multi_turn_coherence(
         logger.info(f"    PyTorch: {pytorch_response[:80]}")
         logger.info(f"    ONNX:    {onnx_response[:80]}")
 
-        # Update conversation history
         messages_pytorch = messages_pytorch + [{"role": "assistant", "content": pytorch_response}]
         messages_onnx = messages_onnx + [{"role": "assistant", "content": onnx_response}]
 
