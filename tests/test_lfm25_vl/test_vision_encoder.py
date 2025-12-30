@@ -19,9 +19,7 @@ import torch
 from helpers import skip_if_missing
 from PIL import Image
 
-from liquidonnx.lfm2_vl import VISION_MODE_TILED
 from liquidonnx.lfm2_vl.preprocessing import pad_to_square
-from liquidonnx.quantize import bits_to_str
 from liquidonnx.session import get_onnx_file, load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, compare_correlation, get_tolerances
 
@@ -30,17 +28,17 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = "LFM2-VL-1.6B-3102461"
 
 
-def get_onnx_dir(exports_dir: pathlib.Path, vision_mode: str) -> pathlib.Path:
+def get_onnx_dir(exports_dir: pathlib.Path) -> pathlib.Path:
     """Get ONNX directory for the LFM2.5-VL model."""
-    return exports_dir / f"{MODEL_NAME}-ONNX-{vision_mode}" / "onnx"
+    return exports_dir / f"{MODEL_NAME}-ONNX" / "onnx"
 
 
 VISION_CORRELATION_THRESHOLD = 0.89
 
 QUANT_CONFIGS = [
     pytest.param(None, ["arrays"], id="fp32"),
-    pytest.param(4, ["correlation"], id="q4"),
-    pytest.param(8, ["arrays"], id="q8"),
+    pytest.param("q4", ["correlation"], id="q4"),
+    pytest.param("q8", ["arrays"], id="q8"),
 ]
 
 
@@ -72,7 +70,7 @@ def get_pytorch_vision_embeddings(model, processor, image):
     return pytorch_embeddings, inputs
 
 
-def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, vision_bits):
+def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, vision_type):
     """Verify tiled vision encoder outputs."""
     pixel_values = inputs["pixel_values"]
     pixel_attention_mask = inputs["pixel_attention_mask"]
@@ -86,7 +84,7 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, v
     )
     onnx_embeddings = onnx_outputs[0]
 
-    atol, rtol = get_tolerances(vision_bits)
+    atol, rtol = get_tolerances(vision_type)
     results = []
     for tile_idx, pytorch_tile in enumerate(pytorch_embeddings):
         pytorch_np = pytorch_tile.numpy()
@@ -116,21 +114,21 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, v
     return results
 
 
-@pytest.mark.parametrize("vision_bits,checks", QUANT_CONFIGS)
+@pytest.mark.parametrize("vision_type,checks", QUANT_CONFIGS)
 def test_vision_encoder(
     exports_dir: pathlib.Path,
     cardinal_image: pathlib.Path,
     pytorch_model,
-    vision_bits: int | None,
+    vision_type: str | None,
     checks: list[str],
 ):
     model_name, model, processor = pytorch_model
-    logger.info(f"Testing vision encoder {model_name}/tiled/{bits_to_str(vision_bits)}")
+    logger.info(f"Testing vision encoder {model_name}/{vision_type or 'fp32'}")
 
-    onnx_dir = get_onnx_dir(exports_dir, VISION_MODE_TILED)
+    onnx_dir = get_onnx_dir(exports_dir)
     skip_if_missing(onnx_dir, "Export not found")
 
-    embed_images_file = get_onnx_file(onnx_dir, vision_bits, "embed_images")
+    embed_images_file = get_onnx_file(onnx_dir, vision_type, "embed_images")
     skip_if_missing(embed_images_file, "Vision encoder not found")
 
     embed_images_sess = load_onnx_session(embed_images_file)
@@ -138,7 +136,7 @@ def test_vision_encoder(
 
     pytorch_embeddings, inputs = get_pytorch_vision_embeddings(model, processor, image)
     results = verify_vision_tiled(
-        embed_images_sess, inputs, pytorch_embeddings, checks, vision_bits
+        embed_images_sess, inputs, pytorch_embeddings, checks, vision_type
     )
 
     check_results(results, logger)

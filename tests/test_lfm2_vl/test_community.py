@@ -20,18 +20,17 @@ import torch
 from helpers import get_community_vl_files, get_community_vl_onnx_dir, skip_if_missing
 from PIL import Image
 
-from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
+from liquidonnx.lfm2_vl import MODELS
 from liquidonnx.lfm2_vl.generate import get_onnx_dir
 from liquidonnx.lfm2_vl.preprocessing import get_image_token_id, pad_to_square
-from liquidonnx.quantize import bits_to_str
 from liquidonnx.session import get_onnx_file, initialize_cache, load_onnx_session
 
 logger = logging.getLogger(__name__)
 
 QUANT_CONFIGS = [
     pytest.param(None, None, False, id="fp32"),
-    pytest.param(4, None, False, id="q4d"),
-    pytest.param(8, 8, False, id="q8"),
+    pytest.param("q4", None, False, id="q4d"),
+    pytest.param("q8", "q8", False, id="q8"),
     pytest.param(None, None, True, id="fp16-community"),
 ]
 
@@ -207,31 +206,31 @@ def run_community_onnx_vl(
 
 
 @pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
-@pytest.mark.parametrize("decoder_bits,vision_bits,use_fp16", QUANT_CONFIGS)
+@pytest.mark.parametrize("decoder_type,vision_type,use_fp16", QUANT_CONFIGS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_community_comparison(
     exports_dir: pathlib.Path,
     community_dir: pathlib.Path,
     cardinal_image: pathlib.Path,
     pytorch_model,
-    decoder_bits: int | None,
-    vision_bits: int | None,
+    decoder_type: str | None,
+    vision_type: str | None,
     use_fp16: bool,
     prompt: str,
 ):
     """Compare local and community ONNX VL exports against PyTorch reference."""
     size, model, processor = pytorch_model
-    quant_str = f"d{bits_to_str(decoder_bits)}/v{bits_to_str(vision_bits)}"
+    quant_str = f"d{decoder_type or 'fp32'}/v{vision_type or 'fp32'}"
     if use_fp16:
         quant_str = "fp16"
     logger.info(f"Comparing VL {size}/{quant_str}: '{prompt}'")
 
     # Check local export exists
-    local_onnx_dir = get_onnx_dir(exports_dir, size, VISION_MODE_TILED)
+    local_onnx_dir = get_onnx_dir(exports_dir, size)
     skip_if_missing(local_onnx_dir, "Local VL export not found")
 
-    local_decoder_file = get_onnx_file(local_onnx_dir, decoder_bits, "decoder")
-    local_vision_file = get_onnx_file(local_onnx_dir, vision_bits, "embed_images")
+    local_decoder_file = get_onnx_file(local_onnx_dir, decoder_type, "decoder")
+    local_vision_file = get_onnx_file(local_onnx_dir, vision_type, "embed_images")
     skip_if_missing(local_decoder_file, f"Local decoder not found: {local_decoder_file.name}")
     skip_if_missing(local_vision_file, f"Local vision encoder not found: {local_vision_file.name}")
 

@@ -2,55 +2,47 @@
 """
 Export LFM2-VL models to ONNX with optional quantization and FP16 conversion.
 
-Vision Input Formats:
-- --tiled: Input [B, N, 768] with pre-extracted patches (HuggingFace style)
-- --conv2d: Input [B, 3, H, W] with raw image (simpler, llama.cpp style)
-
 Output Structure (Transformers.js compatible):
     exports/
-    └── LFM2-VL-{size}-ONNX-{tiled|conv2d}/
+    └── LFM2-VL-{size}-ONNX/
         ├── config.json
         ├── tokenizer.json
         ├── tokenizer_config.json
         └── onnx/
             ├── embed_tokens.onnx          # FP32
-            ├── embed_tokens_fp16.onnx     # FP16 (with --fp16)
+            ├── embed_tokens_fp16.onnx     # --precision fp16
             ├── embed_images.onnx          # FP32
-            ├── embed_images_fp16.onnx     # FP16 (with --fp16)
-            ├── embed_images_q4.onnx
-            ├── embed_images_q8.onnx
+            ├── embed_images_fp16.onnx     # --precision fp16
+            ├── embed_images_q4.onnx       # --precision q4
+            ├── embed_images_q8.onnx       # --precision q8
             ├── decoder.onnx               # FP32
-            ├── decoder_fp16.onnx          # FP16 (with --fp16)
-            ├── decoder_q4.onnx
-            └── decoder_q8.onnx
+            ├── decoder_fp16.onnx          # --precision fp16
+            ├── decoder_q4.onnx            # --precision q4
+            └── decoder_q8.onnx            # --precision q8
 
 Usage:
     # Export from local model path
-    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --tiled
-    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --tiled --quantize
+    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461
+    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --precision
 
-    # Export FP32 only (all sizes, both formats)
+    # Export FP32 only (all sizes)
     uv run lfm2-vl-export --sizes all
 
-    # Export with all quantizations (q4, q8 decoder, q8 vision)
-    uv run lfm2-vl-export --sizes all --quantize
+    # Export with all precisions (fp16, q4, q8)
+    uv run lfm2-vl-export --sizes all --precision
 
-    # Export with Q4 vision for WebGPU
-    uv run lfm2-vl-export --sizes 450M --quantize q4 --vision-quantize 4
+    # Export with specific precisions
+    uv run lfm2-vl-export --sizes 450M --precision q4
+    uv run lfm2-vl-export --sizes 450M --precision fp16 q4 q8
 
-    # Export with specific quantization
-    uv run lfm2-vl-export --sizes 450M --quantize q4
-    uv run lfm2-vl-export --sizes 450M --quantize q4 q8
-
-    # Quantize existing exports (skip FP32 export)
-    uv run lfm2-vl-export --sizes all --quantize --skip-export
-
-    # Export only tiled format
-    uv run lfm2-vl-export --sizes 450M --tiled --quantize
+    # Convert existing exports (skip FP32 export)
+    uv run lfm2-vl-export --sizes all --precision --skip-export
 
     # Convert to FP16 (2x smaller, matches onnx-community format)
-    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --tiled --fp16
-    uv run lfm2-vl-export --sizes all --skip-export --fp16
+    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --precision fp16
+
+    # Export with conv2d vision format (instead of default tiled)
+    uv run lfm2-vl-export --sizes 450M --vision-format conv2d
 """
 
 import argparse
@@ -63,7 +55,7 @@ import onnx
 from onnx import TensorProto, helper
 
 from liquidonnx.lfm2.builder import LFM2Builder
-from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED, VISION_MODES
+from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.builder import EmbedTokensBuilder, LFM2VLConfig, VisionEmbedBuilder
 from liquidonnx.quantize import get_model_size, get_total_model_size_mb, quantize_model
 
@@ -154,9 +146,12 @@ def convert_to_fp16(
     return output_path
 
 
-def get_output_dir(size: str, fmt: str, output_base: pathlib.Path) -> pathlib.Path:
+def get_output_dir(
+    size: str, output_base: pathlib.Path, vision_format: str = VISION_MODE_TILED
+) -> pathlib.Path:
     """Get output directory for a model."""
-    return output_base / "exports" / f"LFM2-VL-{size}-ONNX-{fmt}"
+    suffix = f"-{vision_format}" if vision_format != VISION_MODE_TILED else ""
+    return output_base / "exports" / f"LFM2-VL-{size}-ONNX{suffix}"
 
 
 def export_vl_model(
@@ -436,7 +431,7 @@ def export_vl_model(
 def do_export(
     model_path: str,
     output_path: pathlib.Path,
-    fmt: str,
+    vision_format: str = VISION_MODE_TILED,
     use_integrated_rope: bool = False,
 ):
     """Export a single VL model to ONNX (FP32)."""
@@ -444,7 +439,7 @@ def do_export(
     export_vl_model(
         model_path,
         output_path,
-        vision_input_format=fmt,
+        vision_input_format=vision_format,
         use_integrated_rope=use_integrated_rope,
     )
 
@@ -554,31 +549,12 @@ def main():
         help="Output base directory (default: current directory)",
     )
 
-    # Vision input format
+    # Output precision
     parser.add_argument(
-        "--tiled",
-        action="store_true",
-        help="Tiled input format [B, N, 768] (HuggingFace style)",
-    )
-    parser.add_argument(
-        "--conv2d",
-        action="store_true",
-        help="Conv2d input format [B, 3, H, W] (llama.cpp style)",
-    )
-
-    # Quantization
-    parser.add_argument(
-        "--quantize",
+        "--precision",
         nargs="*",
-        metavar="BITS",
-        help="Quantize decoder: q4, q8, or both (default if no args)",
-    )
-    parser.add_argument(
-        "--vision-quantize",
-        type=int,
-        choices=[4, 8],
-        default=8,
-        help="Vision encoder quantization bits (default: 8)",
+        metavar="PRECISION",
+        help="Output precisions: fp16, q4, q8, or all (default if no args)",
     )
     parser.add_argument(
         "--skip-export",
@@ -597,28 +573,32 @@ def main():
         help="Use RoPE integrated in GroupQueryAttention (better precision)",
     )
     parser.add_argument(
-        "--fp16",
-        action="store_true",
-        help="Convert to FP16 (creates *_fp16.onnx files)",
+        "--vision-format",
+        choices=[VISION_MODE_TILED, VISION_MODE_CONV2D],
+        default=VISION_MODE_TILED,
+        help="Vision encoder format: tiled (default) or conv2d",
     )
 
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
-    # Parse quantization options
+    # Parse output precisions
     quant_bits = []
-    if args.quantize is not None:
-        if len(args.quantize) == 0:
+    do_fp16_conversion = False
+    if args.precision is not None:
+        if len(args.precision) == 0:
             quant_bits = [4, 8]
+            do_fp16_conversion = True
         else:
-            for q in args.quantize:
-                q = q.lower().replace("q", "")
-                if q not in ("4", "8"):
-                    parser.error(f"Invalid quantization: {q}. Use q4 or q8.")
-                quant_bits.append(int(q))
-
-    formats = [m for m in VISION_MODES if getattr(args, m)] or VISION_MODES
+            for p in args.precision:
+                p = p.lower()
+                if p == "fp16":
+                    do_fp16_conversion = True
+                elif p in ("q4", "q8"):
+                    quant_bits.append(int(p[1]))
+                else:
+                    parser.error(f"Invalid precision: {p}. Use fp16, q4, or q8.")
 
     # Validate args
     if args.model_path and args.sizes:
@@ -627,35 +607,34 @@ def main():
         parser.error("Must specify either --model-path or --sizes")
 
     # Build list of (model_path, output_dir) pairs
+    vision_suffix = f"-{args.vision_format}" if args.vision_format != VISION_MODE_TILED else ""
     exports = []
     if args.model_path:
         model_name = pathlib.Path(args.model_path).name
-        for fmt in formats:
-            output_dir = args.output_dir / "exports" / f"{model_name}-ONNX-{fmt}"
-            exports.append((args.model_path, output_dir, fmt))
+        output_dir = args.output_dir / "exports" / f"{model_name}-ONNX{vision_suffix}"
+        exports.append((args.model_path, output_dir))
     else:
         sizes = list(MODELS.keys()) if "all" in args.sizes else args.sizes
         for s in sizes:
             if s not in MODELS:
                 parser.error(f"Unknown size: {s}. Available: {', '.join(MODELS.keys())}")
-        for fmt in formats:
-            for size in sizes:
-                exports.append((MODELS[size], get_output_dir(size, fmt, args.output_dir), fmt))
+        for size in sizes:
+            exports.append((MODELS[size], get_output_dir(size, args.output_dir, args.vision_format)))
 
     # Export
     if not args.skip_export:
-        for model_path, output_dir, fmt in exports:
-            do_export(model_path, output_dir, fmt, args.integrated_rope)
+        for model_path, output_dir in exports:
+            do_export(model_path, output_dir, args.vision_format, args.integrated_rope)
 
     # Quantize
     for bits in quant_bits:
-        for _, output_dir, _ in exports:
+        for _, output_dir in exports:
             onnx_dir = output_dir / "onnx"
-            do_quantize(onnx_dir, bits, args.vision_quantize, args.block_size)
+            do_quantize(onnx_dir, bits, bits, args.block_size)
 
     # FP16 conversion
-    if args.fp16:
-        for _, output_dir, _ in exports:
+    if do_fp16_conversion:
+        for _, output_dir in exports:
             onnx_dir = output_dir / "onnx"
             do_fp16(onnx_dir)
 

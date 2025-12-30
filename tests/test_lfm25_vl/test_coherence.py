@@ -18,7 +18,7 @@ import torch
 from helpers import skip_if_missing
 from PIL import Image
 
-from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED, VISION_MODES
+from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.preprocessing import (
     detect_vision_format,
     get_image_token_id,
@@ -33,16 +33,16 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = "LFM2-VL-1.6B-3102461"
 
 
-def get_onnx_dir(exports_dir: pathlib.Path, vision_mode: str) -> pathlib.Path:
+def get_onnx_dir(exports_dir: pathlib.Path) -> pathlib.Path:
     """Get ONNX directory for the LFM2.5-VL model."""
-    return exports_dir / f"{MODEL_NAME}-ONNX-{vision_mode}" / "onnx"
+    return exports_dir / f"{MODEL_NAME}-ONNX" / "onnx"
 
 
 QUANT_CONFIGS = [
     pytest.param(None, None, id="fp32"),
-    pytest.param(4, 4, id="q4"),
-    pytest.param(4, 8, id="q4d-q8v"),
-    pytest.param(8, 8, id="q8"),
+    pytest.param("q4", "q4", id="q4"),
+    pytest.param("q4", "q8", id="q4d-q8v"),
+    pytest.param("q8", "q8", id="q8"),
 ]
 
 MAX_NEW_TOKENS = 20
@@ -296,26 +296,24 @@ def run_multi_turn_coherence(
     return float(np.mean(similarities)) if similarities else 0.0
 
 
-@pytest.mark.parametrize("vision_mode", VISION_MODES)
-@pytest.mark.parametrize("decoder_bits,vision_bits", QUANT_CONFIGS)
+@pytest.mark.parametrize("decoder_type,vision_type", QUANT_CONFIGS)
 @pytest.mark.parametrize("scenario,prompts", COHERENCE_SCENARIOS)
 def test_coherence(
     exports_dir: pathlib.Path,
     cardinal_image: pathlib.Path,
     bluejay_image: pathlib.Path,
     pytorch_model,
-    vision_mode: str,
-    decoder_bits: int | None,
-    vision_bits: int | None,
+    decoder_type: str | None,
+    vision_type: str | None,
     scenario: str,
     prompts: list[str],
 ):
     model_name, model, processor = pytorch_model
-    onnx_dir = get_onnx_dir(exports_dir, vision_mode)
+    onnx_dir = get_onnx_dir(exports_dir)
     skip_if_missing(onnx_dir, "Export not found")
 
-    decoder_file = get_onnx_file(onnx_dir, decoder_bits, "decoder")
-    embed_images_file = get_onnx_file(onnx_dir, vision_bits, "embed_images")
+    decoder_file = get_onnx_file(onnx_dir, decoder_type, "decoder")
+    embed_images_file = get_onnx_file(onnx_dir, vision_type, "embed_images")
     skip_if_missing(decoder_file, "Decoder not found")
     skip_if_missing(embed_images_file, "Vision encoder not found")
     embed_tokens_sess = load_onnx_session(onnx_dir / "embed_tokens.onnx")
@@ -341,8 +339,8 @@ def test_coherence(
         MAX_NEW_TOKENS,
     )
 
-    is_fp32 = decoder_bits is None and vision_bits is None
-    threshold = SIMILARITY_THRESHOLD_FP32 if is_fp32 else SIMILARITY_THRESHOLD_QUANT
+    is_float = decoder_type is None or decoder_type == "fp16"
+    threshold = SIMILARITY_THRESHOLD_FP32 if is_float else SIMILARITY_THRESHOLD_QUANT
 
     assert avg_similarity > threshold, (
         f"Semantic similarity too low: {avg_similarity:.4f} (threshold={threshold})"

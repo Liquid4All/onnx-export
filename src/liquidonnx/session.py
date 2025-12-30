@@ -9,19 +9,21 @@ import onnxruntime as ort
 logger = logging.getLogger(__name__)
 
 
-def get_onnx_file(onnx_dir: pathlib.Path, bits: int | None, name: str = "model") -> pathlib.Path:
-    """Get ONNX file path for given quantization.
+def get_onnx_file(
+    onnx_dir: pathlib.Path, precision: str | None, name: str = "model"
+) -> pathlib.Path:
+    """Get ONNX file path for given precision.
 
     Args:
         onnx_dir: Directory containing ONNX files
-        bits: None for fp32, 4 for q4, 8 for q8
+        precision: None for fp32, "fp16", "q4", "q8"
         name: Base name of the model file (default: "model")
 
     Returns:
-        Path to the ONNX file (e.g., model.onnx, model_q4.onnx, decoder.onnx)
+        Path to the ONNX file (e.g., model.onnx, model_q4.onnx, decoder_fp16.onnx)
     """
-    if bits:
-        return onnx_dir / f"{name}_q{bits}.onnx"
+    if precision:
+        return onnx_dir / f"{name}_{precision}.onnx"
     return onnx_dir / f"{name}.onnx"
 
 

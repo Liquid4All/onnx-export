@@ -3,9 +3,9 @@
 ONNX inference script for LFM2-VL vision-language models.
 
 Usage:
-    uv run lfm2-vl-infer --model exports/LFM2-VL-450M-ONNX-tiled
-    uv run lfm2-vl-infer --model exports/LFM2-VL-450M-ONNX-tiled --images photo.jpg
-    uv run lfm2-vl-infer --model exports/LFM2-VL-450M-ONNX-tiled --images a.jpg b.jpg --prompt "Compare"
+    uv run lfm2-vl-infer --model exports/LFM2-VL-450M-ONNX
+    uv run lfm2-vl-infer --model exports/LFM2-VL-450M-ONNX --images photo.jpg
+    uv run lfm2-vl-infer --model exports/LFM2-VL-450M-ONNX --images a.jpg b.jpg --prompt "Compare"
 """
 
 import argparse
@@ -29,9 +29,9 @@ from liquidonnx.session import initialize_cache, update_cache
 logger = logging.getLogger(__name__)
 
 
-def get_onnx_dir(exports_dir: Path, size: str, vision_mode: str) -> Path:
-    """Get ONNX directory for a VL model size and vision mode."""
-    return exports_dir / f"LFM2-VL-{size}-ONNX-{vision_mode}" / "onnx"
+def get_onnx_dir(exports_dir: Path, size: str) -> Path:
+    """Get ONNX directory for a VL model size."""
+    return exports_dir / f"LFM2-VL-{size}-ONNX" / "onnx"
 
 
 class VLModelInference:

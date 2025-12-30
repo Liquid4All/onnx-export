@@ -21,15 +21,14 @@ from helpers import get_community_onnx_dir, get_community_onnx_file, skip_if_mis
 
 from liquidonnx.lfm2 import MODELS
 from liquidonnx.lfm2.generate import get_onnx_dir
-from liquidonnx.quantize import bits_to_str
 from liquidonnx.session import get_onnx_file, load_onnx_session
 
 logger = logging.getLogger(__name__)
 
 QUANT_CONFIGS = [
     pytest.param(None, id="fp32"),
-    pytest.param(4, id="q4"),
-    pytest.param(8, id="q8"),
+    pytest.param("q4", id="q4"),
+    pytest.param("q8", id="q8"),
 ]
 
 PROMPTS = ["Hello, how are", "The sky is", "1 + 1 ="]
@@ -59,32 +58,31 @@ def compute_metrics(expected: np.ndarray, actual: np.ndarray) -> dict:
 
 
 @pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
-@pytest.mark.parametrize("bits", QUANT_CONFIGS)
+@pytest.mark.parametrize("precision", QUANT_CONFIGS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_community_comparison(
     exports_dir: pathlib.Path,
     community_dir: pathlib.Path,
     pytorch_model,
-    bits: int | None,
+    precision: str | None,
     prompt: str,
 ):
     """Compare local and community ONNX exports against PyTorch reference."""
     size, model, tokenizer = pytorch_model
-    quant_str = bits_to_str(bits)
-    logger.info(f"Comparing {size}/{quant_str}: '{prompt}'")
+    logger.info(f"Comparing {size}/{precision or 'fp32'}: '{prompt}'")
 
     # Check local export exists
     local_onnx_dir = get_onnx_dir(exports_dir, size)
     skip_if_missing(local_onnx_dir, "Local export not found")
 
-    local_onnx_file = get_onnx_file(local_onnx_dir, bits)
+    local_onnx_file = get_onnx_file(local_onnx_dir, precision)
     skip_if_missing(local_onnx_file, f"Local ONNX file not found: {local_onnx_file.name}")
 
     # Check community export exists
     community_onnx_dir = get_community_onnx_dir(community_dir, size)
     skip_if_missing(community_onnx_dir, f"Community export not found: {community_onnx_dir}")
 
-    community_onnx_file = get_community_onnx_file(community_onnx_dir, bits)
+    community_onnx_file = get_community_onnx_file(community_onnx_dir, precision)
     skip_if_missing(community_onnx_file, f"Community ONNX file not found: {community_onnx_file}")
 
     # Load ONNX models
@@ -166,7 +164,7 @@ def test_community_comparison(
     logger.info(f"  Winner: {winner} (lower max_diff)")
 
     # Assert both produce reasonable results (top-1 match with PyTorch)
-    min_overlap = 4 if bits is None else 3
+    min_overlap = 4 if precision in (None, "fp16") else 3
 
     assert local_metrics["top5_overlap"] >= min_overlap, (
         f"Local top-5 overlap too low: {local_metrics['top5_overlap']}/5"

@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 
 QUANT_CONFIGS = [
     pytest.param(None, id="fp32"),
-    pytest.param(4, id="q4"),
-    pytest.param(8, id="q8"),
+    pytest.param("q4", id="q4"),
+    pytest.param("q8", id="q8"),
 ]
 
 MAX_NEW_TOKENS = 20
@@ -179,11 +179,11 @@ def run_multi_turn_coherence(
 
 
 @pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
-@pytest.mark.parametrize("bits", QUANT_CONFIGS)
+@pytest.mark.parametrize("precision", QUANT_CONFIGS)
 def test_coherence(
     exports_dir: pathlib.Path,
     pytorch_model,
-    bits: int | None,
+    precision: str | None,
 ):
     """Test multi-turn coherence between PyTorch and ONNX."""
     size, model, tokenizer = pytorch_model
@@ -191,7 +191,7 @@ def test_coherence(
     onnx_dir = get_onnx_dir(exports_dir, size)
     skip_if_missing(onnx_dir, "Export not found")
 
-    onnx_file = get_onnx_file(onnx_dir, bits)
+    onnx_file = get_onnx_file(onnx_dir, precision)
     skip_if_missing(onnx_file, f"ONNX file not found: {onnx_file.name}")
 
     onnx_session = load_onnx_session(onnx_file)
@@ -203,8 +203,8 @@ def test_coherence(
         DEFAULT_PROMPTS,
     )
 
-    # Use stricter threshold for fp32 (no quantization error)
-    threshold = SIMILARITY_THRESHOLD_FP32 if bits is None else SIMILARITY_THRESHOLD_QUANT
+    is_float = precision is None or precision == "fp16"
+    threshold = SIMILARITY_THRESHOLD_FP32 if is_float else SIMILARITY_THRESHOLD_QUANT
 
     assert avg_similarity > threshold, (
         f"Semantic similarity too low: {avg_similarity:.4f} (threshold={threshold})"
