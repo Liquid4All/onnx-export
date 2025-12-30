@@ -95,6 +95,7 @@ def run_local_onnx_vl(embed_tokens_sess, embed_images_sess, decoder_sess, proces
     input_ids = inputs["input_ids"].numpy().astype(np.int64)
     pixel_values = inputs["pixel_values"].numpy().astype(np.float32)
     pixel_attention_mask = inputs["pixel_attention_mask"].numpy().astype(np.int64)
+    spatial_shapes = inputs["spatial_shapes"].numpy().astype(np.int64)
 
     # Get image embeddings
     image_outputs = embed_images_sess.run(
@@ -102,6 +103,7 @@ def run_local_onnx_vl(embed_tokens_sess, embed_images_sess, decoder_sess, proces
         {
             "pixel_values": pixel_values,
             "patch_attention_mask": pixel_attention_mask,
+            "spatial_shapes": spatial_shapes,
         },
     )
     image_embeds = image_outputs[0]

@@ -69,12 +69,14 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, v
     """Verify tiled vision encoder outputs."""
     pixel_values = inputs["pixel_values"]
     pixel_attention_mask = inputs["pixel_attention_mask"]
+    spatial_shapes = inputs["spatial_shapes"]
 
     onnx_outputs = embed_images_sess.run(
         None,
         {
             "pixel_values": pixel_values.numpy().astype(np.float32),
             "patch_attention_mask": pixel_attention_mask.numpy().astype(np.int64),
+            "spatial_shapes": spatial_shapes.numpy().astype(np.int64),
         },
     )
     onnx_embeddings = onnx_outputs[0]
