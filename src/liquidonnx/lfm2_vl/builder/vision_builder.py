@@ -1,106 +1,20 @@
-"""
-LFM2-VL Builder for ONNX export.
+"""Vision encoder builder for LFM2-VL ONNX export.
 
-This builder exports LFM2-VL vision-language models as three ONNX models:
-- embed_tokens.onnx: Token embedding lookup (input_ids -> inputs_embeds)
-- embed_images.onnx: SigLIP2 vision encoder + MLP projector (fused)
-- decoder.onnx: LFM2 language model backbone (takes inputs_embeds, not input_ids)
-
-The separation of embed_tokens allows clean fusion of text and image embeddings:
-1. embed_tokens(input_ids) -> text_embeds
-2. embed_images(pixel_values) -> image_embeds
-3. Concatenate at <image> positions
-4. decoder(inputs_embeds) -> logits
-
-Vision Input Formats:
-- Tiled (-T): Input [batch, num_patches, 768] with pre-extracted patches
-              Requires complex preprocessing (tiling, patch extraction)
-- Conv2d (-C): Input [batch, 3, H, W] with raw normalized image
-              Simple preprocessing (resize + normalize), like llama.cpp
-
-Usage:
-    # Export with tiled input (default, HuggingFace compatible)
-    uv run lfm2_vl.py --model LiquidAI/LFM2-VL-1.6B --output LFM2-VL-1.6B-ONNX -T
-
-    # Export with conv2d input (simpler preprocessing, llama.cpp style)
-    uv run lfm2_vl.py --model LiquidAI/LFM2-VL-1.6B --output LFM2-VL-1.6B-ONNX -C
-
-    # Available models:
-    # - LiquidAI/LFM2-VL-450M  (350M backbone + 86M SigLIP2)
-    # - LiquidAI/LFM2-VL-1.6B  (1.2B backbone + 400M SigLIP2)
-    # - LiquidAI/LFM2-VL-3B    (2.6B backbone + 400M SigLIP2)
+This module contains the VisionEmbedBuilder class which creates an ONNX graph
+combining the SigLIP2 vision encoder with the MLP projector.
 """
 
 import logging
-from dataclasses import dataclass
 
 import numpy as np
 import onnx
 from onnx import TensorProto, helper
 
 from liquidonnx.builder_base import ONNXBuilderBase
-from liquidonnx.lfm2.builder import LFM2Config
 from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
+from liquidonnx.lfm2_vl.builder.config import LFM2VLConfig
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class SigLIP2Config:
-    """Configuration for SigLIP2 vision encoder."""
-
-    hidden_size: int
-    intermediate_size: int
-    num_hidden_layers: int
-    num_attention_heads: int
-    patch_size: int
-    num_channels: int = 3
-    layer_norm_eps: float = 1e-6
-    hidden_act: str = "gelu_pytorch_tanh"
-
-    @classmethod
-    def from_hf_config(cls, vision_config) -> "SigLIP2Config":
-        return cls(
-            hidden_size=vision_config.hidden_size,
-            intermediate_size=vision_config.intermediate_size,
-            num_hidden_layers=vision_config.num_hidden_layers,
-            num_attention_heads=vision_config.num_attention_heads,
-            patch_size=vision_config.patch_size,
-            num_channels=getattr(vision_config, "num_channels", 3),
-            layer_norm_eps=getattr(vision_config, "layer_norm_eps", 1e-6),
-            hidden_act=getattr(vision_config, "hidden_act", "gelu_pytorch_tanh"),
-        )
-
-
-@dataclass
-class LFM2VLConfig:
-    """Configuration for LFM2-VL model."""
-
-    text_config: LFM2Config
-    vision_config: SigLIP2Config
-    projector_hidden_size: int
-    projector_hidden_act: str = "gelu"
-    projector_bias: bool = True
-    projector_use_layernorm: bool = True
-    downsample_factor: int = 2
-    image_token_id: int = 396
-    tile_size: int = 512
-    max_tiles: int = 10
-
-    @classmethod
-    def from_hf_config(cls, config) -> "LFM2VLConfig":
-        return cls(
-            text_config=LFM2Config.from_hf_config(config.text_config),
-            vision_config=SigLIP2Config.from_hf_config(config.vision_config),
-            projector_hidden_size=config.projector_hidden_size,
-            projector_hidden_act=getattr(config, "projector_hidden_act", "gelu"),
-            projector_bias=getattr(config, "projector_bias", True),
-            projector_use_layernorm=getattr(config, "projector_use_layernorm", True),
-            downsample_factor=getattr(config, "downsample_factor", 2),
-            image_token_id=getattr(config, "image_token_id", 396),
-            tile_size=getattr(config, "tile_size", 512),
-            max_tiles=getattr(config, "max_tiles", 10),
-        )
 
 
 class VisionEmbedBuilder(ONNXBuilderBase):
@@ -1168,74 +1082,4 @@ class VisionEmbedBuilder(ONNXBuilderBase):
 
         model = self.build_graph("embed_images", producer_name="lfm2-vl-builder")
         logger.info(f"Vision + projector model built: {len(self.nodes)} nodes")
-        return model
-
-
-class EmbedTokensBuilder(ONNXBuilderBase):
-    """
-    Simple token embedding builder for ONNX export.
-
-    Creates an ONNX graph that maps input_ids to embeddings via Gather.
-    This allows the decoder to take inputs_embeds, enabling clean
-    text/image embedding fusion.
-
-    Graph structure:
-        input_ids [B, S]
-            ↓
-        Gather (weight, axis=0)
-            ↓
-        inputs_embeds [B, S, hidden_size]
-    """
-
-    def __init__(self, config: LFM2VLConfig):
-        super().__init__()
-        self.config = config
-        self.hidden_size = config.text_config.hidden_size
-        self.vocab_size = config.text_config.vocab_size
-        self.embed_weight: np.ndarray | None = None
-
-    def load_weights(self, weights: dict[str, np.ndarray]):
-        """Load embedding weights from model weights dict."""
-        prefixes = [
-            "model.language_model.embed_tokens.weight",
-            "language_model.embed_tokens.weight",
-            "model.embed_tokens.weight",
-        ]
-        for prefix in prefixes:
-            if prefix in weights:
-                self.embed_weight = weights[prefix].astype(np.float32)
-                logger.info(f"Loaded embed_tokens weight: {self.embed_weight.shape}")
-                return
-
-        raise ValueError("Could not find embed_tokens weight in model")
-
-    def build(self) -> onnx.ModelProto:
-        """Build the embed_tokens ONNX model."""
-        logger.info("Building embed_tokens...")
-
-        # Input: input_ids [batch_size, sequence_length]
-        self.inputs.append(
-            helper.make_tensor_value_info(
-                "input_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
-            )
-        )
-
-        # Output: inputs_embeds [batch_size, sequence_length, hidden_size]
-        self.outputs.append(
-            helper.make_tensor_value_info(
-                "inputs_embeds",
-                TensorProto.FLOAT,
-                ["batch_size", "sequence_length", self.hidden_size],
-            )
-        )
-
-        # Add embedding weight and create Gather node
-        self.add_initializer("weight", self.embed_weight)
-        self.make_gather("weight", "input_ids", "inputs_embeds", axis=0)
-
-        model = self.build_graph("embed_tokens", ms_domain=False, producer_name="lfm2-vl-builder")
-        logger.info(
-            f"embed_tokens built: {len(self.nodes)} nodes, "
-            f"vocab_size={self.vocab_size}, hidden_size={self.hidden_size}"
-        )
         return model
