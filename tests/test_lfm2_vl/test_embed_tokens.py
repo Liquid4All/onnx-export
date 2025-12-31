@@ -15,7 +15,7 @@ import torch
 from helpers import skip_if_missing
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
-from liquidonnx.lfm2_vl.generate import get_onnx_dir
+from liquidonnx.lfm2_vl.infer import get_onnx_dir
 from liquidonnx.session import load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, get_tolerances
 

@@ -18,7 +18,7 @@ import torch
 from helpers import skip_if_missing
 
 from liquidonnx.lfm2 import MODELS
-from liquidonnx.lfm2.generate import get_onnx_dir
+from liquidonnx.lfm2.infer import get_onnx_dir
 from liquidonnx.session import get_onnx_file, initialize_cache, load_onnx_session, update_cache
 from liquidonnx.verify import compare_logits_similarity
 
