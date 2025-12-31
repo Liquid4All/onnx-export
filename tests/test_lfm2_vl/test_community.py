@@ -21,7 +21,7 @@ from helpers import get_community_vl_files, get_community_vl_onnx_dir, skip_if_m
 from PIL import Image
 
 from liquidonnx.lfm2_vl import MODELS
-from liquidonnx.lfm2_vl.generate import get_onnx_dir
+from liquidonnx.lfm2_vl.infer import get_onnx_dir
 from liquidonnx.lfm2_vl.preprocessing import get_image_token_id, pad_to_square
 from liquidonnx.session import get_onnx_file, initialize_cache, load_onnx_session
 

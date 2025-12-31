@@ -47,11 +47,6 @@ def get_image_token_id(tokenizer) -> int:
 
 @dataclass
 class VLConfig:
-    """Configuration for VL model inference.
-
-    Matches PyTorch LFM2-VL configuration parameters.
-    """
-
     # Vision encoder
     patch_size: int = 16
     num_channels: int = 3
@@ -75,7 +70,6 @@ class VLConfig:
 
     @classmethod
     def from_hf_config(cls, config) -> "VLConfig":
-        """Create VLConfig from HuggingFace config."""
         return cls(
             patch_size=getattr(config, "encoder_patch_size", 16),
             downsample_factor=getattr(config, "downsample_factor", 2),

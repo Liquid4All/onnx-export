@@ -32,8 +32,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LFM2Config:
-    """Configuration for LFM2 model."""
-
     hidden_size: int
     num_hidden_layers: int
     num_attention_heads: int
@@ -63,12 +61,10 @@ class LFM2Config:
 
 class LFM2Builder(ONNXBuilderBase):
     """
-    LFM2 model builder for ONNX export.
-
-    Creates an optimized ONNX graph with:
+    Builds an optimized ONNX graph with:
     - Conv/SSM layers with gating
     - Full attention layers with GQA
-    - Fused operators for better performance
+    - Fused Microsoft operators (SimplifiedLayerNormalization, RotaryEmbedding, GroupQueryAttention)
     """
 
     def __init__(self, config: LFM2Config, use_integrated_rope: bool = False):
@@ -168,7 +164,6 @@ class LFM2Builder(ONNXBuilderBase):
             )
 
     def build_inputs(self):
-        """Create model inputs."""
         # input_ids
         self.inputs.append(
             helper.make_tensor_value_info(
@@ -228,7 +223,6 @@ class LFM2Builder(ONNXBuilderBase):
             )
 
     def build_outputs(self):
-        """Create model outputs."""
         # Logits
         self.outputs.append(
             helper.make_tensor_value_info(
@@ -276,14 +270,12 @@ class LFM2Builder(ONNXBuilderBase):
             )
 
     def build_embedding(self) -> str:
-        """Build embedding layer, return output name."""
         self.add_initializer("model.embed_tokens.weight", self.weights["model.embed_tokens.weight"])
         return self.make_node(
             "Gather", ["model.embed_tokens.weight", "input_ids"], ["embed_output"], axis=0
         )
 
     def build_rope_cache(self):
-        """Build RoPE cos/sin caches."""
         head_dim = self.head_dim
         max_seq = self.config.max_position_embeddings
         theta = self.config.rope_theta
@@ -374,7 +366,7 @@ class LFM2Builder(ONNXBuilderBase):
         H = self.config.hidden_size
         residual = hidden_state
 
-        # === Operator LayerNorm ===
+        # === LayerNorm ===
         normed = self.make_simple_layernorm(
             hidden_state, f"{prefix}.operator_norm.weight", f"{prefix}/op_norm"
         )
@@ -409,7 +401,7 @@ class LFM2Builder(ONNXBuilderBase):
             group=H,
         )
 
-        # === Dynamic slice for conv output ===
+        # === Dynamic slice ===
         # Get sequence length from Bx shape
         self.make_node("Shape", [Bx], [f"{prefix}/bx_shape"])
         self.add_initializer(f"{prefix}/axis2_idx", np.array(2, dtype=np.int64))
@@ -430,7 +422,7 @@ class LFM2Builder(ONNXBuilderBase):
             [f"present_conv.{layer_idx}"],
         )
 
-        # === Output gating and projection ===
+        # === Output gating + projection ===
         # y = C * conv_out
         y = self.make_mul(f"{prefix}/C", f"{prefix}/conv_out", f"{prefix}/y")
         # Transpose: [B, H, S] → [B, S, H]
@@ -487,7 +479,7 @@ class LFM2Builder(ONNXBuilderBase):
         kv_hidden = nkv * hd
         residual = hidden_state
 
-        # === Operator LayerNorm ===
+        # === LayerNorm ===
         normed = self.make_simple_layernorm(
             hidden_state, f"{prefix}.operator_norm.weight", f"{prefix}/op_norm"
         )
@@ -497,7 +489,7 @@ class LFM2Builder(ONNXBuilderBase):
         k = self.make_matmul(normed, f"{prefix}.self_attn.k_proj.weight", f"{prefix}/k")
         v = self.make_matmul(normed, f"{prefix}.self_attn.v_proj.weight", f"{prefix}/v")
 
-        # === Q/K LayerNorm (per-head normalization) ===
+        # === Q/K LayerNorm (per-head) ===
         # Reshape to [B, -1, head_dim] for per-head norm
         self.add_initializer(f"{prefix}/reshape_for_norm", np.array([0, -1, hd], dtype=np.int64))
         self.add_initializer(f"{prefix}/q_reshape_back", np.array([0, -1, H], dtype=np.int64))
@@ -650,7 +642,6 @@ class LFM2Builder(ONNXBuilderBase):
         return self.make_add(residual, down, f"{prefix}/residual2")
 
     def build_lm_head(self, hidden_state: str) -> str:
-        """Build LM head."""
         # Final LayerNorm using SkipSimplifiedLayerNormalization (fused op)
         # Pass hidden_state as both input and skip for better numerical stability
         self.add_initializer(

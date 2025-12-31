@@ -20,7 +20,7 @@ from helpers import skip_if_missing
 from PIL import Image
 
 from liquidonnx.lfm2_vl import MODELS
-from liquidonnx.lfm2_vl.generate import get_onnx_dir
+from liquidonnx.lfm2_vl.infer import get_onnx_dir
 from liquidonnx.lfm2_vl.preprocessing import pad_to_square
 from liquidonnx.session import get_onnx_file, load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, compare_correlation, get_tolerances

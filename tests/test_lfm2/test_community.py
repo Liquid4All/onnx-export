@@ -20,7 +20,7 @@ import torch
 from helpers import get_community_onnx_dir, get_community_onnx_file, skip_if_missing
 
 from liquidonnx.lfm2 import MODELS
-from liquidonnx.lfm2.generate import get_onnx_dir
+from liquidonnx.lfm2.infer import get_onnx_dir
 from liquidonnx.session import get_onnx_file, load_onnx_session
 
 logger = logging.getLogger(__name__)

@@ -1,106 +1,20 @@
-"""
-LFM2-VL Builder for ONNX export.
+"""Vision encoder builder for LFM2-VL ONNX export.
 
-This builder exports LFM2-VL vision-language models as three ONNX models:
-- embed_tokens.onnx: Token embedding lookup (input_ids -> inputs_embeds)
-- embed_images.onnx: SigLIP2 vision encoder + MLP projector (fused)
-- decoder.onnx: LFM2 language model backbone (takes inputs_embeds, not input_ids)
-
-The separation of embed_tokens allows clean fusion of text and image embeddings:
-1. embed_tokens(input_ids) -> text_embeds
-2. embed_images(pixel_values) -> image_embeds
-3. Concatenate at <image> positions
-4. decoder(inputs_embeds) -> logits
-
-Vision Input Formats:
-- Tiled (-T): Input [batch, num_patches, 768] with pre-extracted patches
-              Requires complex preprocessing (tiling, patch extraction)
-- Conv2d (-C): Input [batch, 3, H, W] with raw normalized image
-              Simple preprocessing (resize + normalize), like llama.cpp
-
-Usage:
-    # Export with tiled input (default, HuggingFace compatible)
-    uv run lfm2_vl.py --model LiquidAI/LFM2-VL-1.6B --output LFM2-VL-1.6B-ONNX -T
-
-    # Export with conv2d input (simpler preprocessing, llama.cpp style)
-    uv run lfm2_vl.py --model LiquidAI/LFM2-VL-1.6B --output LFM2-VL-1.6B-ONNX -C
-
-    # Available models:
-    # - LiquidAI/LFM2-VL-450M  (350M backbone + 86M SigLIP2)
-    # - LiquidAI/LFM2-VL-1.6B  (1.2B backbone + 400M SigLIP2)
-    # - LiquidAI/LFM2-VL-3B    (2.6B backbone + 400M SigLIP2)
+This module contains the VisionEmbedBuilder class which creates an ONNX graph
+combining the SigLIP2 vision encoder with the MLP projector.
 """
 
 import logging
-from dataclasses import dataclass
 
 import numpy as np
 import onnx
 from onnx import TensorProto, helper
 
 from liquidonnx.builder_base import ONNXBuilderBase
-from liquidonnx.lfm2.builder import LFM2Config
 from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
+from liquidonnx.lfm2_vl.builder.config import LFM2VLConfig
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class SigLIP2Config:
-    """Configuration for SigLIP2 vision encoder."""
-
-    hidden_size: int
-    intermediate_size: int
-    num_hidden_layers: int
-    num_attention_heads: int
-    patch_size: int
-    num_channels: int = 3
-    layer_norm_eps: float = 1e-6
-    hidden_act: str = "gelu_pytorch_tanh"
-
-    @classmethod
-    def from_hf_config(cls, vision_config) -> "SigLIP2Config":
-        return cls(
-            hidden_size=vision_config.hidden_size,
-            intermediate_size=vision_config.intermediate_size,
-            num_hidden_layers=vision_config.num_hidden_layers,
-            num_attention_heads=vision_config.num_attention_heads,
-            patch_size=vision_config.patch_size,
-            num_channels=getattr(vision_config, "num_channels", 3),
-            layer_norm_eps=getattr(vision_config, "layer_norm_eps", 1e-6),
-            hidden_act=getattr(vision_config, "hidden_act", "gelu_pytorch_tanh"),
-        )
-
-
-@dataclass
-class LFM2VLConfig:
-    """Configuration for LFM2-VL model."""
-
-    text_config: LFM2Config
-    vision_config: SigLIP2Config
-    projector_hidden_size: int
-    projector_hidden_act: str = "gelu"
-    projector_bias: bool = True
-    projector_use_layernorm: bool = True
-    downsample_factor: int = 2
-    image_token_id: int = 396
-    tile_size: int = 512
-    max_tiles: int = 10
-
-    @classmethod
-    def from_hf_config(cls, config) -> "LFM2VLConfig":
-        return cls(
-            text_config=LFM2Config.from_hf_config(config.text_config),
-            vision_config=SigLIP2Config.from_hf_config(config.vision_config),
-            projector_hidden_size=config.projector_hidden_size,
-            projector_hidden_act=getattr(config, "projector_hidden_act", "gelu"),
-            projector_bias=getattr(config, "projector_bias", True),
-            projector_use_layernorm=getattr(config, "projector_use_layernorm", True),
-            downsample_factor=getattr(config, "downsample_factor", 2),
-            image_token_id=getattr(config, "image_token_id", 396),
-            tile_size=getattr(config, "tile_size", 512),
-            max_tiles=getattr(config, "max_tiles", 10),
-        )
 
 
 class VisionEmbedBuilder(ONNXBuilderBase):
@@ -201,7 +115,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         """
         prefix = "interp"
 
-        # Build sizes tensor: [1, hidden_size, spatial_h, spatial_w]
         self.add_initializer(f"{prefix}/batch_1", np.array([1], dtype=np.int64))
         self.add_initializer(f"{prefix}/hidden", np.array([hidden_size], dtype=np.int64))
         self.add_initializer(f"{prefix}/unsq_0", np.array([0], dtype=np.int64))
@@ -213,6 +126,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             "Unsqueeze", [spatial_w, f"{prefix}/unsq_0"], [f"{prefix}/w_unsq"]
         )
 
+        # sizes: [1, hidden_size, spatial_h, spatial_w]
         sizes = self.make_node(
             "Concat",
             [f"{prefix}/batch_1", f"{prefix}/hidden", spatial_h_unsq, spatial_w_unsq],
@@ -220,10 +134,9 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             axis=0,
         )
 
-        # Empty ROI for Resize
+        # Empty ROI required by ONNX Resize
         self.add_initializer(f"{prefix}/empty_roi", np.array([], dtype=np.float32))
 
-        # ONNX Resize with bilinear interpolation
         resized = self.make_node(
             "Resize",
             [pos_emb_input, f"{prefix}/empty_roi", "", sizes],  # Empty scales, use sizes
@@ -232,12 +145,12 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             coordinate_transformation_mode="half_pixel",
         )
 
-        # Transpose from (1, hidden, h, w) to (1, h*w, hidden)
+        # [1, hidden, h, w] → [1, h, w, hidden]
         transposed = self.make_node(
             "Transpose", [resized], [f"{prefix}/transposed"], perm=[0, 2, 3, 1]
         )
 
-        # Reshape to (1, h*w, hidden)
+        # [1, h, w, hidden] → [1, h*w, hidden]
         self.add_initializer(
             f"{prefix}/reshape_out", np.array([1, -1, hidden_size], dtype=np.int64)
         )
@@ -354,11 +267,8 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             "Unsqueeze", [bias_2d, "attn_mask/axes_unsq"], ["attn_mask/bias_unsq"]
         )
 
-        # Expand to [B, num_heads, N, N]
-        # Get batch_size and seq_len from pixel_attention_mask shape
         shape = self.make_node("Shape", ["pixel_attention_mask"], ["attn_mask/shape"])
 
-        # Gather batch_size (index 0)
         self.add_initializer("attn_mask/idx_0", np.array(0, dtype=np.int64))
         batch_size = self.make_node(
             "Gather", [shape, "attn_mask/idx_0"], ["attn_mask/batch_size"], axis=0
@@ -367,7 +277,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             "Unsqueeze", [batch_size, "attn_mask/idx_0"], ["attn_mask/batch_unsq"]
         )
 
-        # Gather seq_len (index 1)
         self.add_initializer("attn_mask/idx_1", np.array(1, dtype=np.int64))
         seq_len = self.make_node(
             "Gather", [shape, "attn_mask/idx_1"], ["attn_mask/seq_len"], axis=0
@@ -376,7 +285,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             "Unsqueeze", [seq_len, "attn_mask/idx_0"], ["attn_mask/seq_unsq"]
         )
 
-        # Build expand shape: [batch_size, num_heads, seq_len, seq_len]
         self.add_initializer("attn_mask/num_heads", np.array([num_heads], dtype=np.int64))
         expand_shape = self.make_node(
             "Concat",
@@ -385,7 +293,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             axis=0,
         )
 
-        # Expand to full 4D shape
         self.make_node("Expand", [bias_4d, expand_shape], ["attention_bias"])
 
     def build_patch_embedding(self) -> str:
@@ -420,18 +327,16 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         """
         prefix = "vision_model.embeddings.patch_embedding"
         H = self.vision_config.hidden_size
-        P = self.vision_config.patch_size  # 16
-        C = self.vision_config.num_channels  # 3
+        P = self.vision_config.patch_size
+        C = self.vision_config.num_channels
 
-        # Load patch embedding weights
-        linear_weight = self.weights[f"{prefix}.weight"]  # [hidden_size, patch_dim] = [768, 768]
-        linear_bias = self.weights[f"{prefix}.bias"]  # [hidden_size]
+        linear_weight = self.weights[f"{prefix}.weight"]
+        linear_bias = self.weights[f"{prefix}.bias"]
 
         if self.vision_input_format == VISION_MODE_CONV2D:
-            # =====================================================================
-            # Conv2d mode: reshape Linear weights to Conv2d format
-            # Linear: [hidden_size, C*P*P] -> Conv2d: [hidden_size, C, P, P]
-            # =====================================================================
+            # === Conv2d mode ===
+            # Reshape Linear weights to Conv2d format
+            # Linear: [hidden_size, C*P*P] → Conv2d: [hidden_size, C, P, P]
             # Linear weight is [out_features, in_features] = [768, 768]
             # The original model flattens patches as HWC (P*P*C = 16*16*3 = 768)
             # So we first reshape to [H, P, P, C] then transpose to [H, C, P, P]
@@ -450,20 +355,17 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 pads=[0, 0, 0, 0],
             )
 
-            # Reshape from [B, H, h, w] to [B, h*w, H]
-            # First transpose to [B, h, w, H]
+            # [B, H, h, w] → [B, h, w, H] → [B, N, H]
             transposed = self.make_node(
                 "Transpose", [conv_out], ["patch_embed/transposed"], perm=[0, 2, 3, 1]
             )
-            # Then reshape to [B, N, H]
             self.add_initializer("patch_embed/reshape_3d", np.array([0, -1, H], dtype=np.int64))
             patch_embeds = self.make_node(
                 "Reshape", [transposed, "patch_embed/reshape_3d"], ["patch_embed/out"]
             )
         else:
-            # =====================================================================
-            # Tiled mode: Linear projection (original)
-            # =====================================================================
+            # === Tiled mode ===
+            # Linear projection (original)
             self.add_initializer(f"{prefix}.weight", linear_weight.T)  # Transpose for MatMul
             self.add_initializer(f"{prefix}.bias", linear_bias)
 
@@ -475,19 +377,15 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 "Add", [matmul_out, f"{prefix}.bias"], ["patch_embed/out"]
             )
 
-        # =====================================================================
-        # Position embeddings with bilinear interpolation
-        # =====================================================================
-        # Position embedding: (256, 768) = (16*16, 768)
+        # === Position embeddings with bilinear interpolation ===
         pos_emb_prefix = "vision_model.embeddings.position_embedding"
-        pos_emb_weight = self.weights[f"{pos_emb_prefix}.weight"]  # (256, 768)
+        pos_emb_weight = self.weights[f"{pos_emb_prefix}.weight"]
 
         # Reshape to (16, 16, 768) then permute to (1, 768, 16, 16) for Resize
         pos_emb_4d = pos_emb_weight.reshape(16, 16, H).transpose(2, 0, 1)  # (768, 16, 16)
         pos_emb_4d = pos_emb_4d[np.newaxis, ...]  # (1, 768, 16, 16)
         self.add_initializer("pos_emb/4d", pos_emb_4d)
 
-        # Get target spatial size based on input format
         input_shape = self.make_node("Shape", ["pixel_values"], ["pos_emb/input_shape"])
         self.add_initializer("pos_emb/axes_0", np.array([0], dtype=np.int64))
 
@@ -498,7 +396,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             n_merge = self.downsample  # downsample_factor is the n_merge value
             self.add_initializer("pos_emb/n_merge", np.array(n_merge, dtype=np.int64))
 
-            # Compute pre-merge spatial dimensions: spatial_h * n_merge, spatial_w * n_merge
             pre_merge_h = self.make_node(
                 "Mul", ["spatial_h", "pos_emb/n_merge"], ["pos_emb/pre_merge_h"]
             )
@@ -513,7 +410,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             self.add_initializer("pos_emb/idx_0", np.array(0, dtype=np.int64))
             self.add_initializer("pos_emb/idx_1", np.array(1, dtype=np.int64))
 
-            # Get spatial_shapes[0, :] -> [2]
             first_spatial = self.make_node(
                 "Gather",
                 ["spatial_shapes", "pos_emb/idx_0_batch"],
@@ -521,7 +417,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 axis=0,
             )
 
-            # Extract height (index 0) and width (index 1)
             spatial_h = self.make_node(
                 "Gather", [first_spatial, "pos_emb/idx_0"], ["pos_emb/spatial_h"], axis=0
             )
@@ -529,10 +424,8 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 "Gather", [first_spatial, "pos_emb/idx_1"], ["pos_emb/spatial_w"], axis=0
             )
 
-        # =====================================================================
-        # Bilinear interpolation using ONNX Resize
+        # === Bilinear interpolation using ONNX Resize ===
         # For upsampling, PyTorch antialias and regular bilinear are identical
-        # =====================================================================
         pos_emb_final = self._build_pos_embed_resize(
             pos_emb_input="pos_emb/4d",
             spatial_h=spatial_h if self.vision_input_format == VISION_MODE_TILED else pre_merge_h,
@@ -553,12 +446,8 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         )
 
         if self.vision_input_format == VISION_MODE_TILED:
-            # =====================================================================
             # Tiled mode: Handle padding (input may have more patches than H*W)
             # Fill padded positions with first token's position embedding
-            # =====================================================================
-
-            # Get first token's position embedding: (1, 1, hidden)
             self.add_initializer("pos_emb/slice_start", np.array([0], dtype=np.int64))
             self.add_initializer("pos_emb/slice_end", np.array([1], dtype=np.int64))
             self.add_initializer("pos_emb/slice_axis", np.array([1], dtype=np.int64))
@@ -568,12 +457,10 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 ["pos_emb/first_token"],
             )
 
-            # Compute actual_num_patches = H * W from spatial_shapes
             actual_num_patches = self.make_node(
                 "Mul", [spatial_h, spatial_w], ["pos_emb/actual_num_patches"]
             )
 
-            # Create indices: [0, 1, 2, ..., num_patches-1]
             self.add_initializer("pos_emb/zero", np.array(0, dtype=np.int64))
             self.add_initializer("pos_emb/one_step", np.array(1, dtype=np.int64))
             indices = self.make_node(
@@ -588,7 +475,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 "Unsqueeze", [is_valid, "pos_emb/unsq_axes"], ["pos_emb/is_valid_3d"]
             )
 
-            # Expand first_token to (1, num_patches, hidden)
             num_patches_unsq = self.make_node(
                 "Unsqueeze", [num_patches, "pos_emb/axes_0"], ["pos_emb/num_patches_unsq"]
             )
@@ -604,12 +490,9 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 "Expand", [first_token, expand_shape], ["pos_emb/first_token_expanded"]
             )
 
-            # Pad pos_emb_final to (1, num_patches, hidden)
-            # padding_size = num_patches - actual_num_patches
             padding_size = self.make_node(
                 "Sub", [num_patches, actual_num_patches], ["pos_emb/padding_size"]
             )
-            # Build pads tensor: [0, 0, 0, 0, padding_size, 0] for axes [batch, seq, hidden]
             self.add_initializer("pos_emb/zeros_4", np.array([0, 0, 0, 0], dtype=np.int64))
             self.add_initializer("pos_emb/zero_arr", np.array([0], dtype=np.int64))
             padding_size_unsq = self.make_node(
@@ -625,14 +508,12 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 "Pad", [pos_emb_final, pads], ["pos_emb/padded"], mode="constant"
             )
 
-            # Apply Where: valid positions get real embeddings, padded get first_token
             pos_emb_with_padding = self.make_node(
                 "Where",
                 [is_valid_3d, pos_emb_padded, first_token_expanded],
                 ["pos_emb/with_padding"],
             )
 
-            # Tile across batch
             batch_unsq = self.make_node(
                 "Unsqueeze", [batch_size, "pos_emb/axes_0"], ["pos_emb/batch_unsq"]
             )
@@ -654,9 +535,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             )
             pos_emb_tiled = self.make_node("Tile", [pos_emb_final, tile_repeats], ["pos_emb/tiled"])
 
-        # =====================================================================
-        # Add patch embeddings + position embeddings
-        # =====================================================================
         return self.make_node("Add", [patch_embeds, pos_emb_tiled], ["patch_embeddings"])
 
     def build_encoder_layer(self, layer_idx: int, hidden_state: str) -> str:
@@ -695,8 +573,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         nh = self.vision_config.num_attention_heads
         hd = self.head_dim
 
-        # Load weights
-        # Layer norm 1
         self.add_initializer(
             f"{prefix}.layer_norm1.weight", self.weights[f"{prefix}.layer_norm1.weight"]
         )
@@ -704,7 +580,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             f"{prefix}.layer_norm1.bias", self.weights[f"{prefix}.layer_norm1.bias"]
         )
 
-        # Self attention
         self.add_initializer(
             f"{prefix}.self_attn.q_proj.weight", self.weights[f"{prefix}.self_attn.q_proj.weight"].T
         )
@@ -731,7 +606,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             f"{prefix}.self_attn.out_proj.bias", self.weights[f"{prefix}.self_attn.out_proj.bias"]
         )
 
-        # Layer norm 2
         self.add_initializer(
             f"{prefix}.layer_norm2.weight", self.weights[f"{prefix}.layer_norm2.weight"]
         )
@@ -739,7 +613,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             f"{prefix}.layer_norm2.bias", self.weights[f"{prefix}.layer_norm2.bias"]
         )
 
-        # MLP
         self.add_initializer(f"{prefix}.mlp.fc1.weight", self.weights[f"{prefix}.mlp.fc1.weight"].T)
         self.add_initializer(f"{prefix}.mlp.fc1.bias", self.weights[f"{prefix}.mlp.fc1.bias"])
         self.add_initializer(f"{prefix}.mlp.fc2.weight", self.weights[f"{prefix}.mlp.fc2.weight"].T)
@@ -747,7 +620,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
 
         residual = hidden_state
 
-        # Layer norm 1
         normed = self.make_vision_layernorm(
             hidden_state,
             f"{prefix}.layer_norm1.weight",
@@ -755,8 +627,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             f"{prefix}/ln1",
         )
 
-        # Self attention
-        # Q, K, V projections
         q = self.make_node(
             "MatMul", [normed, f"{prefix}.self_attn.q_proj.weight"], [f"{prefix}/q_matmul"]
         )
@@ -787,7 +657,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             scale=scale,
         )
 
-        # Output projection
         out_proj = self.make_node(
             "MatMul",
             [attn_out_reshaped, f"{prefix}.self_attn.out_proj.weight"],
@@ -797,10 +666,8 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             "Add", [out_proj, f"{prefix}.self_attn.out_proj.bias"], [f"{prefix}/out_proj"]
         )
 
-        # Residual 1
         hidden_state = self.make_node("Add", [residual, out_proj], [f"{prefix}/residual1"])
 
-        # Layer norm 2
         residual2 = hidden_state
         normed2 = self.make_vision_layernorm(
             hidden_state,
@@ -809,7 +676,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             f"{prefix}/ln2",
         )
 
-        # MLP
         fc1 = self.make_node(
             "MatMul", [normed2, f"{prefix}.mlp.fc1.weight"], [f"{prefix}/fc1_matmul"]
         )
@@ -821,7 +687,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         )
         fc2 = self.make_node("Add", [fc2, f"{prefix}.mlp.fc2.bias"], [f"{prefix}/fc2"])
 
-        # Residual 2
         return self.make_node("Add", [residual2, fc2], [f"{prefix}/residual2"])
 
     def build_post_layernorm(self, hidden_state: str) -> str:
@@ -877,11 +742,9 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         in Lfm2VlMultiModalProjector.pixel_unshuffle().
         """
         ds = self.downsample
-        C = self.vision_hidden  # 768
-        input_dim = C * ds * ds  # 3072 after pixel unshuffle
+        C = self.vision_hidden
+        input_dim = C * ds * ds
 
-        # Load weights
-        # Layer norm (optional based on config)
         use_layernorm = getattr(self.config, "projector_use_layernorm", True)
         if use_layernorm:
             self.add_initializer(
@@ -893,7 +756,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 self.weights["multi_modal_projector.layer_norm.bias"],
             )
 
-        # Linear layers
         self.add_initializer(
             "multi_modal_projector.linear_1.weight",
             self.weights["multi_modal_projector.linear_1.weight"].T,
@@ -914,12 +776,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 self.weights["multi_modal_projector.linear_2.bias"],
             )
 
-        # Step 1: Reshape from (B, N, C) to (B, H, W, C)
-        # For 1024 patches: (B, 1024, 768) -> (B, 32, 32, 768)
-        # Tokens are in row-major order, so we reshape to (B, H, W, C)
-
-        # First get batch size dynamically (use scalar indices)
-        self.add_initializer("proj/shape_indices_batch", np.array(0, dtype=np.int64))  # scalar
+        self.add_initializer("proj/shape_indices_batch", np.array(0, dtype=np.int64))
         batch_size = self.make_node(
             "Gather",
             [
@@ -937,15 +794,12 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             # Conv2d mode: use passed spatial dimensions
             # spatial_h, spatial_w are AFTER n_merge, so we need to multiply by n_merge
             # to get the pre-merge spatial dimensions for the first reshape
-            n_merge = self.downsample  # downsample_factor is the n_merge value
+            n_merge = self.downsample
             self.add_initializer("proj/n_merge", np.array(n_merge, dtype=np.int64))
 
-            # Pre-merge dimensions: spatial_h * n_merge, spatial_w * n_merge
             pre_merge_h = self.make_node("Mul", ["spatial_h", "proj/n_merge"], ["proj/pre_merge_h"])
             pre_merge_w = self.make_node("Mul", ["spatial_w", "proj/n_merge"], ["proj/pre_merge_w"])
 
-            # Build reshape target: [batch, pre_merge_h, pre_merge_w, C]
-            # Match position embedding order: row-major (H first, then W)
             reshape_4d_shape = self.make_node(
                 "Concat",
                 [
@@ -962,23 +816,18 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 axis=0,
             )
 
-            # Store for use in pixel_unshuffle (now H comes first in the 4D tensor)
             spatial_h_name = pre_merge_h
-            half_spatial_h_name = "spatial_h"  # Already the post-merge size
-            half_spatial_w_name = "spatial_w"  # Already the post-merge size
+            half_spatial_h_name = "spatial_h"
+            half_spatial_w_name = "spatial_w"
         else:
-            # Tiled mode: extract spatial dimensions from spatial_shapes input
-            # spatial_shapes: [batch, 2] with (height, width) in patch units
             self.add_initializer("proj/idx_0_batch", np.array(0, dtype=np.int64))
             self.add_initializer("proj/idx_0", np.array(0, dtype=np.int64))
             self.add_initializer("proj/idx_1", np.array(1, dtype=np.int64))
 
-            # Get spatial_shapes[0, :] -> [2]
             first_spatial = self.make_node(
                 "Gather", ["spatial_shapes", "proj/idx_0_batch"], ["proj/first_spatial"], axis=0
             )
 
-            # Extract height (index 0) and width (index 1)
             spatial_h = self.make_node(
                 "Gather", [first_spatial, "proj/idx_0"], ["proj/spatial_h"], axis=0
             )
@@ -986,7 +835,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 "Gather", [first_spatial, "proj/idx_1"], ["proj/spatial_w"], axis=0
             )
 
-            # Build reshape target: [batch, spatial_h, spatial_w, C]
             reshape_4d_shape = self.make_node(
                 "Concat",
                 [
@@ -1003,7 +851,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 axis=0,
             )
 
-            # Compute half_spatial_h and half_spatial_w for pixel unshuffle
             self.add_initializer("proj/two_tiled", np.array(2, dtype=np.int64))
             half_spatial_h = self.make_node(
                 "Div", [spatial_h, "proj/two_tiled"], ["proj/half_spatial_h_tiled"]
@@ -1015,12 +862,10 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             half_spatial_h_name = half_spatial_h
             half_spatial_w_name = half_spatial_w
 
-            # Tiled mode: slice out only valid patches (first H*W) before reshaping
-            # Input may be padded: (B, num_patches, C) where num_patches > H*W
+            # Slice out only valid patches before reshaping (input may be padded)
             actual_num_patches = self.make_node(
                 "Mul", [spatial_h, spatial_w], ["proj/actual_num_patches"]
             )
-            # Slice: vision_embeddings[:, :actual_num_patches, :]
             self.add_initializer("proj/slice_start", np.array([0], dtype=np.int64))
             self.add_initializer("proj/slice_axes", np.array([1], dtype=np.int64))
             actual_unsq = self.make_node(
@@ -1032,21 +877,11 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 ["proj/valid_embeddings"],
             )
 
-        # Reshape to 4D: (B, N, C) -> (B, H, W, C)
         hidden_4d = self.make_node(
             "Reshape", [vision_embeddings, reshape_4d_shape], ["proj/hidden_4d"]
         )
 
-        # Step 2: Pixel unshuffle (matches PyTorch Lfm2VlMultiModalProjector.pixel_unshuffle)
-        # Input: (B, H, W, C)
-        # Operations:
-        #   reshape:   (B, H, W, C)     -> (B, H, W/2, C*2)
-        #   transpose: (B, H, W/2, C*2) -> (B, W/2, H, C*2)
-        #   reshape:   (B, W/2, H, C*2) -> (B, W/2, H/2, C*4)
-        #   transpose: (B, W/2, H/2, C*4) -> (B, H/2, W/2, C*4)
-        # Output: (B, H/2, W/2, C*4)
-
-        # First reshape: (B, H, W, C) -> (B, H, W/2, C*2)
+        # Pixel unshuffle: (B, H, W, C) -> (B, H/2, W/2, C*4)
         self.add_initializer("proj/c_times_2", np.array([C * ds], dtype=np.int64))
         reshape1_shape = self.make_node(
             "Concat",
@@ -1060,11 +895,8 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             axis=0,
         )
         step1 = self.make_node("Reshape", [hidden_4d, reshape1_shape], ["proj/step1"])
-
-        # First transpose: (B, H, W/2, C*2) -> (B, W/2, H, C*2)
         step2 = self.make_node("Transpose", [step1], ["proj/step2"], perm=[0, 2, 1, 3])
 
-        # Second reshape: (B, W/2, H, C*2) -> (B, W/2, H/2, C*4)
         self.add_initializer("proj/c_times_4", np.array([input_dim], dtype=np.int64))
         reshape2_shape = self.make_node(
             "Concat",
@@ -1078,15 +910,11 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             axis=0,
         )
         step3 = self.make_node("Reshape", [step2, reshape2_shape], ["proj/step3"])
-
-        # Second transpose: (B, W/2, H/2, C*4) -> (B, H/2, W/2, C*4)
         step4 = self.make_node("Transpose", [step3], ["proj/step4"], perm=[0, 2, 1, 3])
 
-        # Flatten to 3D: (B, H/2, W/2, C*4) -> (B, N/4, C*4)
         self.add_initializer("proj/reshape_3d", np.array([0, -1, input_dim], dtype=np.int64))
         unshuffled = self.make_node("Reshape", [step4, "proj/reshape_3d"], ["proj/unshuffled"])
 
-        # Step 3: Layer norm (optional)
         if use_layernorm:
             normed = self.make_node(
                 "LayerNormalization",
@@ -1101,17 +929,14 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         else:
             normed = unshuffled
 
-        # Step 4: Linear 1
         fc1 = self.make_node(
             "MatMul", [normed, "multi_modal_projector.linear_1.weight"], ["proj/fc1_matmul"]
         )
         if self.config.projector_bias:
             fc1 = self.make_node("Add", [fc1, "multi_modal_projector.linear_1.bias"], ["proj/fc1"])
 
-        # GELU (exact, not tanh approximation - projector uses "gelu" not "gelu_pytorch_tanh")
         fc1_act = self.make_gelu(fc1, "proj/fc1_act", approximate="none")
 
-        # Step 5: Linear 2
         fc2 = self.make_node(
             "MatMul", [fc1_act, "multi_modal_projector.linear_2.weight"], ["proj/fc2_matmul"]
         )
@@ -1125,9 +950,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         return "image_embeddings"
 
     def load_weights(self, weights: dict[str, np.ndarray]):
-        """Load weights from dict."""
-        # Filter vision model and projector weights
-        # Handle different prefixes: model.vision_tower.vision_model.* -> vision_model.*
         for name, weight in weights.items():
             if name.startswith("model.vision_tower.vision_model."):
                 new_name = name.replace("model.vision_tower.", "")
@@ -1143,99 +965,23 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         logger.info(f"Loaded {len(self.weights)} vision + projector weights")
 
     def build(self) -> onnx.ModelProto:
-        """Build the fused vision encoder + projector ONNX model."""
         logger.info("Building fused vision encoder + projector...")
 
-        # Build graph structure
         self.build_inputs()
         self.build_outputs()
         self.build_attention_mask()
 
-        # Patch embedding
         hidden_state = self.build_patch_embedding()
 
-        # Encoder layers
         for layer_idx in range(self.vision_config.num_hidden_layers):
             logger.info(f"Building vision layer {layer_idx}...")
             hidden_state = self.build_encoder_layer(layer_idx, hidden_state)
 
-        # Post layer norm
         vision_embeddings = self.build_post_layernorm(hidden_state)
 
-        # Projector (fused)
         logger.info("Building projector...")
         self.build_projector(vision_embeddings)
 
         model = self.build_graph("embed_images", producer_name="lfm2-vl-builder")
         logger.info(f"Vision + projector model built: {len(self.nodes)} nodes")
-        return model
-
-
-class EmbedTokensBuilder(ONNXBuilderBase):
-    """
-    Simple token embedding builder for ONNX export.
-
-    Creates an ONNX graph that maps input_ids to embeddings via Gather.
-    This allows the decoder to take inputs_embeds, enabling clean
-    text/image embedding fusion.
-
-    Graph structure:
-        input_ids [B, S]
-            ↓
-        Gather (weight, axis=0)
-            ↓
-        inputs_embeds [B, S, hidden_size]
-    """
-
-    def __init__(self, config: LFM2VLConfig):
-        super().__init__()
-        self.config = config
-        self.hidden_size = config.text_config.hidden_size
-        self.vocab_size = config.text_config.vocab_size
-        self.embed_weight: np.ndarray | None = None
-
-    def load_weights(self, weights: dict[str, np.ndarray]):
-        """Load embedding weights from model weights dict."""
-        prefixes = [
-            "model.language_model.embed_tokens.weight",
-            "language_model.embed_tokens.weight",
-            "model.embed_tokens.weight",
-        ]
-        for prefix in prefixes:
-            if prefix in weights:
-                self.embed_weight = weights[prefix].astype(np.float32)
-                logger.info(f"Loaded embed_tokens weight: {self.embed_weight.shape}")
-                return
-
-        raise ValueError("Could not find embed_tokens weight in model")
-
-    def build(self) -> onnx.ModelProto:
-        """Build the embed_tokens ONNX model."""
-        logger.info("Building embed_tokens...")
-
-        # Input: input_ids [batch_size, sequence_length]
-        self.inputs.append(
-            helper.make_tensor_value_info(
-                "input_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
-            )
-        )
-
-        # Output: inputs_embeds [batch_size, sequence_length, hidden_size]
-        self.outputs.append(
-            helper.make_tensor_value_info(
-                "inputs_embeds",
-                TensorProto.FLOAT,
-                ["batch_size", "sequence_length", self.hidden_size],
-            )
-        )
-
-        # Add embedding weight and create Gather node
-        self.add_initializer("weight", self.embed_weight)
-        self.make_gather("weight", "input_ids", "inputs_embeds", axis=0)
-
-        model = self.build_graph("embed_tokens", ms_domain=False, producer_name="lfm2-vl-builder")
-        logger.info(
-            f"embed_tokens built: {len(self.nodes)} nodes, "
-            f"vocab_size={self.vocab_size}, hidden_size={self.hidden_size}"
-        )
         return model

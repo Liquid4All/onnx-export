@@ -20,7 +20,7 @@ from helpers import skip_if_missing
 from PIL import Image
 
 from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D
-from liquidonnx.lfm2_vl.generate import get_onnx_dir
+from liquidonnx.lfm2_vl.infer import get_onnx_dir
 from liquidonnx.lfm2_vl.preprocessing import (
     detect_vision_format,
     get_image_token_id,

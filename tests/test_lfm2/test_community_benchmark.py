@@ -21,7 +21,7 @@ import pytest
 from helpers import get_community_onnx_dir, get_community_onnx_file, skip_if_missing
 
 from liquidonnx.lfm2 import MODELS
-from liquidonnx.lfm2.generate import get_onnx_dir
+from liquidonnx.lfm2.infer import get_onnx_dir
 from liquidonnx.quantize import get_total_model_size_mb
 from liquidonnx.session import get_onnx_file, initialize_cache, update_cache
 
