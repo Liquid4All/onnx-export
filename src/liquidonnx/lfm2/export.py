@@ -54,7 +54,6 @@ logger = logging.getLogger(__name__)
 
 
 def get_output_dir(size: str, output_base: pathlib.Path) -> pathlib.Path:
-    """Get output directory for a model."""
     return output_base / "exports" / f"LFM2-{size}-ONNX"
 
 
@@ -254,7 +253,7 @@ def main():
     # Export FP32
     if not args.skip_export:
         logger.info("=" * 60)
-        logger.info("EXPORTING MODELS (FP32)")
+        logger.info("Exporting models (FP32)")
         logger.info("=" * 60)
 
         for size in sizes:
@@ -268,9 +267,8 @@ def main():
 
     # Quantize
     for bits in quant_bits:
-        logger.info("")
         logger.info("=" * 60)
-        logger.info(f"QUANTIZING TO Q{bits}")
+        logger.info(f"Quantizing to Q{bits}")
         logger.info("=" * 60)
 
         for size in sizes:
@@ -282,9 +280,8 @@ def main():
                 logger.error(f"  {size}: FAILED - {e}")
 
     # Summary
-    logger.info("")
     logger.info("=" * 60)
-    logger.info("OUTPUT")
+    logger.info("Output summary")
     logger.info("=" * 60)
 
     for size in sizes:

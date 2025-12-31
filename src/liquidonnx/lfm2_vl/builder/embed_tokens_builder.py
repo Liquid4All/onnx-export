@@ -40,7 +40,6 @@ class EmbedTokensBuilder(ONNXBuilderBase):
         self.embed_weight: np.ndarray | None = None
 
     def load_weights(self, weights: dict[str, np.ndarray]):
-        """Load embedding weights from model weights dict."""
         prefixes = [
             "model.language_model.embed_tokens.weight",
             "language_model.embed_tokens.weight",
@@ -55,17 +54,14 @@ class EmbedTokensBuilder(ONNXBuilderBase):
         raise ValueError("Could not find embed_tokens weight in model")
 
     def build(self) -> onnx.ModelProto:
-        """Build the embed_tokens ONNX model."""
         logger.info("Building embed_tokens...")
 
-        # Input: input_ids [batch_size, sequence_length]
         self.inputs.append(
             helper.make_tensor_value_info(
                 "input_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
             )
         )
 
-        # Output: inputs_embeds [batch_size, sequence_length, hidden_size]
         self.outputs.append(
             helper.make_tensor_value_info(
                 "inputs_embeds",
@@ -74,7 +70,6 @@ class EmbedTokensBuilder(ONNXBuilderBase):
             )
         )
 
-        # Add embedding weight and create Gather node
         self.add_initializer("weight", self.embed_weight)
         self.make_gather("weight", "input_ids", "inputs_embeds", axis=0)
 

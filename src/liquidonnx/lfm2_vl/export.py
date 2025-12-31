@@ -149,7 +149,6 @@ def convert_to_fp16(
 def get_output_dir(
     size: str, output_base: pathlib.Path, vision_format: str = VISION_MODE_TILED
 ) -> pathlib.Path:
-    """Get output directory for a model."""
     suffix = f"-{vision_format}" if vision_format != VISION_MODE_TILED else ""
     return output_base / "exports" / f"LFM2-VL-{size}-ONNX{suffix}"
 
@@ -199,9 +198,7 @@ def export_vl_model(
     onnx_dir = output_dir / "onnx"
     onnx_dir.mkdir(exist_ok=True)
 
-    # =========================================================================
-    # 1. Export embed_tokens (token embedding lookup)
-    # =========================================================================
+    # === 1. Export embed_tokens ===
     logger.info("Exporting embed_tokens...")
     embed_tokens_builder = EmbedTokensBuilder(vl_config)
     embed_tokens_builder.load_weights(weights)
@@ -213,9 +210,7 @@ def export_vl_model(
     del embed_tokens_model
     del embed_tokens_builder
 
-    # =========================================================================
-    # 2. Export embed_images (vision encoder + projector)
-    # =========================================================================
+    # === 2. Export embed_images ===
     logger.info(
         f"Exporting embed_images (vision encoder + projector) [{vision_input_format} mode]..."
     )
@@ -241,9 +236,7 @@ def export_vl_model(
     del vision_builder
     gc.collect()
 
-    # =========================================================================
-    # 3. Export decoder (takes inputs_embeds, not input_ids)
-    # =========================================================================
+    # === 3. Export decoder ===
     logger.info("Exporting decoder (with inputs_embeds input)...")
     if use_integrated_rope:
         logger.info("Using integrated RoPE in GroupQueryAttention")
@@ -447,7 +440,6 @@ def do_export(
 def do_quantize(
     onnx_dir: pathlib.Path, decoder_bits: int, vision_bits: int = 8, block_size: int = 32
 ):
-    """Quantize a VL model."""
     if not onnx_dir.exists():
         raise FileNotFoundError(f"ONNX directory not found: {onnx_dir}")
 

@@ -9,8 +9,15 @@
 * Use `logger` instead of `print` for output
 * Use f-strings for formatting
 * Prefer `pathlib` over `os.path` for path operations
-* Don't include comments that just restate the code
 * Don't re-throw or silence errors unless documented
+
+## Comments
+* Section headers: `# === Section Name ===`
+* Numbered steps: `# === 1. Step description ===`
+* Shape annotations with arrows: `# [B, S, H] → [B, S, 3H]`
+* Keep ASCII diagrams in docstrings for architecture documentation
+* Don't include comments that just restate the code
+* Don't add redundant docstrings (e.g., `"""Configuration for X."""` when class is `XConfig`)
 
 ## Docstrings
 * Executable examples must use `uv run`:

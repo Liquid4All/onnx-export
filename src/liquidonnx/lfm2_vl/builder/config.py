@@ -7,8 +7,6 @@ from liquidonnx.lfm2.builder import LFM2Config
 
 @dataclass
 class SigLIP2Config:
-    """Configuration for SigLIP2 vision encoder."""
-
     hidden_size: int
     intermediate_size: int
     num_hidden_layers: int
@@ -34,8 +32,6 @@ class SigLIP2Config:
 
 @dataclass
 class LFM2VLConfig:
-    """Configuration for LFM2-VL model."""
-
     text_config: LFM2Config
     vision_config: SigLIP2Config
     projector_hidden_size: int
