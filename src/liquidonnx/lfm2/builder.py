@@ -297,11 +297,26 @@ class LFM2Builder(ONNXBuilderBase):
         self.add_initializer("sin_cache", np.sin(freqs).astype(np.float32))
 
     def build_attention_mask_subgraph(self):
-        """Build attention mask preprocessing for GroupQueryAttention."""
+        """Build attention mask preprocessing for GroupQueryAttention.
+
+        The -1 offset in seqlens_k is intentional for KV cache semantics:
+        - seqlens_k represents the number of past tokens already in the KV cache
+        - During generation, attention_mask is all-ones with length cur_len
+        - sum(attention_mask) = cur_len (total tokens including current)
+        - seqlens_k = cur_len - 1 (past tokens, excluding current being processed)
+
+        Example for a 10-token prompt generating 2 tokens:
+        - Prefill:   cur_len=10, seqlens_k=9  (processing 10 tokens, 0 cached before)
+        - Decode 1:  cur_len=11, seqlens_k=10 (processing 1 token, 10 cached)
+        - Decode 2:  cur_len=12, seqlens_k=11 (processing 1 token, 11 cached)
+
+        Note: This assumes attention_mask is always all-ones (no padding).
+        If padding were introduced, this calculation would be incorrect.
+        """
         # Compute seqlens_k and total_seq_len from attention_mask
         self.add_initializer("const_1", np.array([1], dtype=np.int64))
 
-        # seqlens_k = sum of attention_mask per batch - 1
+        # seqlens_k = sum of attention_mask per batch - 1 (see docstring for rationale)
         self.make_node(
             "ReduceSum", ["attention_mask", "const_1"], ["/attn_mask/reduce_sum"], keepdims=0
         )

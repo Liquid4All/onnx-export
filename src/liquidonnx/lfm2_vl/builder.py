@@ -290,10 +290,10 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 )
             )
 
-            # patch_attention_mask only needed for tiled mode
+            # pixel_attention_mask: 1=valid, 0=padded (matches onnx-community naming)
             self.inputs.append(
                 helper.make_tensor_value_info(
-                    "patch_attention_mask", TensorProto.INT64, ["batch_size", "num_patches"]
+                    "pixel_attention_mask", TensorProto.INT64, ["batch_size", "num_patches"]
                 )
             )
 
@@ -315,6 +315,78 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 ["batch_size", "num_image_tokens", self.text_hidden],
             )
         )
+
+    def build_attention_mask(self):
+        """Build attention mask preprocessing for tiled mode.
+
+        Converts pixel_attention_mask to additive attention bias:
+            - Input: 1=valid, 0=padded [B, N] int64
+            - Output: 0=valid, -inf=masked [B, num_heads, N, N] float32
+
+        Matches the community ONNX approach which uses attention_bias (6th input)
+        to MultiHeadAttention rather than key_padding_mask (5th input).
+        """
+        if self.vision_input_format != VISION_MODE_TILED:
+            return
+
+        num_heads = self.vision_config.num_attention_heads
+
+        # Cast to float32
+        mask_float = self.make_node(
+            "Cast", ["pixel_attention_mask"], ["attn_mask/float"], to=TensorProto.FLOAT
+        )
+
+        # Invert: 1.0 - mask (now 0=valid, 1=masked)
+        self.add_initializer("attn_mask/one_f", np.array(1.0, dtype=np.float32))
+        inverted = self.make_node(
+            "Sub", ["attn_mask/one_f", mask_float], ["attn_mask/inverted"]
+        )
+
+        # Multiply by -inf to create additive bias (0=valid, -inf=masked)
+        self.add_initializer("attn_mask/neg_inf", np.array(-3.4028234663852886e38, dtype=np.float32))
+        bias_2d = self.make_node(
+            "Mul", [inverted, "attn_mask/neg_inf"], ["attn_mask/bias_2d"]
+        )
+
+        # Unsqueeze to [B, 1, 1, N] for broadcasting
+        self.add_initializer("attn_mask/axes_unsq", np.array([1, 2], dtype=np.int64))
+        bias_4d = self.make_node(
+            "Unsqueeze", [bias_2d, "attn_mask/axes_unsq"], ["attn_mask/bias_unsq"]
+        )
+
+        # Expand to [B, num_heads, N, N]
+        # Get batch_size and seq_len from pixel_attention_mask shape
+        shape = self.make_node("Shape", ["pixel_attention_mask"], ["attn_mask/shape"])
+
+        # Gather batch_size (index 0)
+        self.add_initializer("attn_mask/idx_0", np.array(0, dtype=np.int64))
+        batch_size = self.make_node(
+            "Gather", [shape, "attn_mask/idx_0"], ["attn_mask/batch_size"], axis=0
+        )
+        batch_unsq = self.make_node(
+            "Unsqueeze", [batch_size, "attn_mask/idx_0"], ["attn_mask/batch_unsq"]
+        )
+
+        # Gather seq_len (index 1)
+        self.add_initializer("attn_mask/idx_1", np.array(1, dtype=np.int64))
+        seq_len = self.make_node(
+            "Gather", [shape, "attn_mask/idx_1"], ["attn_mask/seq_len"], axis=0
+        )
+        seq_unsq = self.make_node(
+            "Unsqueeze", [seq_len, "attn_mask/idx_0"], ["attn_mask/seq_unsq"]
+        )
+
+        # Build expand shape: [batch_size, num_heads, seq_len, seq_len]
+        self.add_initializer("attn_mask/num_heads", np.array([num_heads], dtype=np.int64))
+        expand_shape = self.make_node(
+            "Concat",
+            [batch_unsq, "attn_mask/num_heads", seq_unsq, seq_unsq],
+            ["attn_mask/expand_shape"],
+            axis=0,
+        )
+
+        # Expand to full 4D shape
+        self.make_node("Expand", [bias_4d, expand_shape], ["attention_bias"])
 
     def build_patch_embedding(self) -> str:
         """Build patch embedding layer with position embeddings.
@@ -704,9 +776,11 @@ class VisionEmbedBuilder(ONNXBuilderBase):
 
         # Fused MultiHeadAttention (com.microsoft)
         # Inputs: query, key, value, bias, key_padding_mask, attention_bias, past_key, past_value
+        # attention_bias: 4D additive mask [B, num_heads, N, N] with 0=valid, -inf=masked
+        attn_bias = "attention_bias" if self.vision_input_format == VISION_MODE_TILED else ""
         attn_out_reshaped = self.make_node(
             "MultiHeadAttention",
-            [q, k, v, "", "", "", "", ""],
+            [q, k, v, "", "", attn_bias, "", ""],
             [f"{prefix}/attn_out"],
             domain="com.microsoft",
             num_heads=nh,
@@ -1075,6 +1149,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         # Build graph structure
         self.build_inputs()
         self.build_outputs()
+        self.build_attention_mask()
 
         # Patch embedding
         hidden_state = self.build_patch_embedding()

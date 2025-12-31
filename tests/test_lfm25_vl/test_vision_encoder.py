@@ -81,7 +81,7 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, v
         None,
         {
             "pixel_values": pixel_values.numpy().astype(np.float32),
-            "patch_attention_mask": pixel_attention_mask.numpy().astype(np.int64),
+            "pixel_attention_mask": pixel_attention_mask.numpy().astype(np.int64),
             "spatial_shapes": spatial_shapes.numpy().astype(np.int64),
         },
     )

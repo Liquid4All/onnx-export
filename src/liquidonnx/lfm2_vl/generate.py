@@ -106,14 +106,14 @@ class VLModelInference:
                     },
                 )
             else:
-                pixel_values, patch_attention_mask, spatial_shapes = preprocess_tiled(
+                pixel_values, pixel_attention_mask, spatial_shapes = preprocess_tiled(
                     image, self.processor, do_pad_to_square=True
                 )
                 outputs = self.embed_images_sess.run(
                     None,
                     {
                         "pixel_values": pixel_values,
-                        "patch_attention_mask": patch_attention_mask,
+                        "pixel_attention_mask": pixel_attention_mask,
                         "spatial_shapes": spatial_shapes,
                     },
                 )
