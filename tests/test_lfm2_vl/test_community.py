@@ -105,9 +105,8 @@ def run_local_onnx_vl(embed_tokens_sess, embed_images_sess, decoder_sess, proces
             "spatial_shapes": spatial_shapes,
         },
     )
-    image_embeds = image_outputs[0]
-    num_tiles, tokens_per_tile, hidden = image_embeds.shape
-    image_embeds_flat = image_embeds.reshape(-1, hidden)
+    # Output is 2D [total_tokens, hidden] after Compress
+    image_embeds_flat = image_outputs[0]
 
     # Get text embeddings
     text_embeds = embed_tokens_sess.run(None, {"input_ids": input_ids})[0][0]

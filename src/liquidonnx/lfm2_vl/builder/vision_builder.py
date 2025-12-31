@@ -154,9 +154,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         self.add_initializer(
             f"{prefix}/reshape_out", np.array([1, -1, hidden_size], dtype=np.int64)
         )
-        output = self.make_node(
-            "Reshape", [transposed, f"{prefix}/reshape_out"], ["pos_emb/final"]
-        )
+        output = self.make_node("Reshape", [transposed, f"{prefix}/reshape_out"], ["pos_emb/final"])
 
         return output
 
@@ -220,14 +218,25 @@ class VisionEmbedBuilder(ONNXBuilderBase):
 
     def build_outputs(self):
         """Create model outputs."""
-        # Image embeddings in text space: [batch, num_image_tokens, text_hidden_size]
-        self.outputs.append(
-            helper.make_tensor_value_info(
-                "image_embeddings",
-                TensorProto.FLOAT,
-                ["batch_size", "num_image_tokens", self.text_hidden],
+        if self.vision_input_format == VISION_MODE_TILED:
+            # Tiled mode: 2D output after Compress [total_tokens, hidden]
+            # Supports different-sized images in same batch (tokens concatenated)
+            self.outputs.append(
+                helper.make_tensor_value_info(
+                    "image_embeddings",
+                    TensorProto.FLOAT,
+                    ["num_image_tokens", self.text_hidden],
+                )
             )
-        )
+        else:
+            # Conv2d mode: 3D output [batch, num_image_tokens, hidden]
+            self.outputs.append(
+                helper.make_tensor_value_info(
+                    "image_embeddings",
+                    TensorProto.FLOAT,
+                    ["batch_size", "num_image_tokens", self.text_hidden],
+                )
+            )
 
     def build_attention_mask(self):
         """Build attention mask preprocessing for tiled mode.
@@ -251,15 +260,13 @@ class VisionEmbedBuilder(ONNXBuilderBase):
 
         # Invert: 1.0 - mask (now 0=valid, 1=masked)
         self.add_initializer("attn_mask/one_f", np.array(1.0, dtype=np.float32))
-        inverted = self.make_node(
-            "Sub", ["attn_mask/one_f", mask_float], ["attn_mask/inverted"]
-        )
+        inverted = self.make_node("Sub", ["attn_mask/one_f", mask_float], ["attn_mask/inverted"])
 
         # Multiply by -inf to create additive bias (0=valid, -inf=masked)
-        self.add_initializer("attn_mask/neg_inf", np.array(-3.4028234663852886e38, dtype=np.float32))
-        bias_2d = self.make_node(
-            "Mul", [inverted, "attn_mask/neg_inf"], ["attn_mask/bias_2d"]
+        self.add_initializer(
+            "attn_mask/neg_inf", np.array(-3.4028234663852886e38, dtype=np.float32)
         )
+        bias_2d = self.make_node("Mul", [inverted, "attn_mask/neg_inf"], ["attn_mask/bias_2d"])
 
         # Unsqueeze to [B, 1, 1, N] for broadcasting
         self.add_initializer("attn_mask/axes_unsq", np.array([1, 2], dtype=np.int64))
@@ -281,9 +288,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         seq_len = self.make_node(
             "Gather", [shape, "attn_mask/idx_1"], ["attn_mask/seq_len"], axis=0
         )
-        seq_unsq = self.make_node(
-            "Unsqueeze", [seq_len, "attn_mask/idx_0"], ["attn_mask/seq_unsq"]
-        )
+        seq_unsq = self.make_node("Unsqueeze", [seq_len, "attn_mask/idx_0"], ["attn_mask/seq_unsq"])
 
         self.add_initializer("attn_mask/num_heads", np.array([num_heads], dtype=np.int64))
         expand_shape = self.make_node(
@@ -403,25 +408,26 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 "Mul", ["spatial_w", "pos_emb/n_merge"], ["pos_emb/pre_merge_w"]
             )
         else:
-            # Tiled mode: extract spatial dimensions from spatial_shapes input
+            # Tiled mode: extract max spatial dimensions from spatial_shapes input
             # spatial_shapes: [batch, 2] with (height, width) in patch units
-            # Use first batch item (all have same spatial dims in a batch)
-            self.add_initializer("pos_emb/idx_0_batch", np.array(0, dtype=np.int64))
+            # Use ReduceMax to support different-sized images in same batch
+            self.add_initializer("pos_emb/reduce_axis", np.array([0], dtype=np.int64))
             self.add_initializer("pos_emb/idx_0", np.array(0, dtype=np.int64))
             self.add_initializer("pos_emb/idx_1", np.array(1, dtype=np.int64))
 
-            first_spatial = self.make_node(
-                "Gather",
-                ["spatial_shapes", "pos_emb/idx_0_batch"],
-                ["pos_emb/first_spatial"],
-                axis=0,
+            # ReduceMax across batch dimension: [B, 2] → [2]
+            max_spatial = self.make_node(
+                "ReduceMax",
+                ["spatial_shapes", "pos_emb/reduce_axis"],
+                ["pos_emb/max_spatial"],
+                keepdims=0,
             )
 
             spatial_h = self.make_node(
-                "Gather", [first_spatial, "pos_emb/idx_0"], ["pos_emb/spatial_h"], axis=0
+                "Gather", [max_spatial, "pos_emb/idx_0"], ["pos_emb/spatial_h"], axis=0
             )
             spatial_w = self.make_node(
-                "Gather", [first_spatial, "pos_emb/idx_1"], ["pos_emb/spatial_w"], axis=0
+                "Gather", [max_spatial, "pos_emb/idx_1"], ["pos_emb/spatial_w"], axis=0
             )
 
         # === Bilinear interpolation using ONNX Resize ===
@@ -820,19 +826,24 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             half_spatial_h_name = "spatial_h"
             half_spatial_w_name = "spatial_w"
         else:
-            self.add_initializer("proj/idx_0_batch", np.array(0, dtype=np.int64))
+            # Tiled mode: use max spatial dimensions across batch
+            self.add_initializer("proj/reduce_axis", np.array([0], dtype=np.int64))
             self.add_initializer("proj/idx_0", np.array(0, dtype=np.int64))
             self.add_initializer("proj/idx_1", np.array(1, dtype=np.int64))
 
-            first_spatial = self.make_node(
-                "Gather", ["spatial_shapes", "proj/idx_0_batch"], ["proj/first_spatial"], axis=0
+            # ReduceMax across batch dimension: [B, 2] → [2]
+            max_spatial = self.make_node(
+                "ReduceMax",
+                ["spatial_shapes", "proj/reduce_axis"],
+                ["proj/max_spatial"],
+                keepdims=0,
             )
 
             spatial_h = self.make_node(
-                "Gather", [first_spatial, "proj/idx_0"], ["proj/spatial_h"], axis=0
+                "Gather", [max_spatial, "proj/idx_0"], ["proj/spatial_h"], axis=0
             )
             spatial_w = self.make_node(
-                "Gather", [first_spatial, "proj/idx_1"], ["proj/spatial_w"], axis=0
+                "Gather", [max_spatial, "proj/idx_1"], ["proj/spatial_w"], axis=0
             )
 
             reshape_4d_shape = self.make_node(
@@ -942,9 +953,100 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         )
         if self.config.projector_bias:
             fc2 = self.make_node(
-                "Add", [fc2, "multi_modal_projector.linear_2.bias"], ["image_embeddings"]
+                "Add", [fc2, "multi_modal_projector.linear_2.bias"], ["proj/fc2_out"]
             )
         else:
+            fc2 = self.make_node("Identity", [fc2], ["proj/fc2_out"])
+
+        if self.vision_input_format == VISION_MODE_TILED:
+            # === Flatten output across batch using Compress ===
+            # This allows different-sized images in the same batch
+            # Output: [total_valid_tokens, hidden] instead of [B, N/4, hidden]
+
+            # Downsample attention mask to match projector output (N → N/4)
+            # n_merge=2 means 2x2 spatial reduction = 4x token reduction
+            # Reshape mask [B, N] → [B, H, W] → [B, H/2, 2, W/2, 2]
+            # Use ReduceMin to merge 2x2 (valid only if all 4 patches are valid)
+            ds = self.downsample
+
+            # Reshape pixel_attention_mask [B, N] → [B, H, W]
+            mask_shape_4d = self.make_node(
+                "Concat",
+                [
+                    self.make_node(
+                        "Unsqueeze", [batch_size, "proj/axes_0"], ["compress/batch_unsq"]
+                    ),
+                    self.make_node(
+                        "Unsqueeze", [spatial_h, "proj/axes_0"], ["compress/spatial_h_unsq"]
+                    ),
+                    self.make_node(
+                        "Unsqueeze", [spatial_w, "proj/axes_0"], ["compress/spatial_w_unsq"]
+                    ),
+                ],
+                ["compress/mask_shape_4d"],
+                axis=0,
+            )
+
+            # Slice mask to actual patches first (same as embeddings)
+            mask_sliced = self.make_node(
+                "Slice",
+                ["pixel_attention_mask", "proj/slice_start", actual_unsq, "proj/slice_axes"],
+                ["compress/mask_sliced"],
+            )
+            mask_3d = self.make_node("Reshape", [mask_sliced, mask_shape_4d], ["compress/mask_3d"])
+
+            # Reshape [B, H, W] → [B, H/2, 2, W/2, 2] for 2x2 pooling
+            self.add_initializer("compress/two", np.array([2], dtype=np.int64))
+            pool_shape = self.make_node(
+                "Concat",
+                [
+                    self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["compress/b_pool"]),
+                    self.make_node(
+                        "Unsqueeze", [half_spatial_h_name, "proj/axes_0"], ["compress/h_half"]
+                    ),
+                    "compress/two",
+                    self.make_node(
+                        "Unsqueeze", [half_spatial_w_name, "proj/axes_0"], ["compress/w_half"]
+                    ),
+                    "compress/two",
+                ],
+                ["compress/pool_shape"],
+                axis=0,
+            )
+            mask_5d = self.make_node("Reshape", [mask_3d, pool_shape], ["compress/mask_5d"])
+
+            # ReduceMin over the 2x2 regions (axes 2, 4) - valid only if all 4 are valid
+            self.add_initializer("compress/reduce_axes", np.array([2, 4], dtype=np.int64))
+            mask_pooled = self.make_node(
+                "ReduceMin",
+                [mask_5d, "compress/reduce_axes"],
+                ["compress/mask_pooled"],
+                keepdims=0,
+            )
+
+            # Flatten mask [B, H/2, W/2] → [B * H/2 * W/2]
+            self.add_initializer("compress/neg_one", np.array([-1], dtype=np.int64))
+            mask_flat = self.make_node(
+                "Reshape", [mask_pooled, "compress/neg_one"], ["compress/mask_flat"]
+            )
+
+            # Flatten embeddings [B, N/4, hidden] → [B * N/4, hidden]
+            self.add_initializer(
+                "compress/embed_shape", np.array([-1, self.text_hidden], dtype=np.int64)
+            )
+            embeds_flat = self.make_node(
+                "Reshape", [fc2, "compress/embed_shape"], ["compress/embeds_flat"]
+            )
+
+            # Cast mask to bool for Compress
+            mask_bool = self.make_node(
+                "Cast", [mask_flat], ["compress/mask_bool"], to=TensorProto.BOOL
+            )
+
+            # Compress: select only valid tokens → [total_valid_tokens, hidden]
+            self.make_node("Compress", [embeds_flat, mask_bool], ["image_embeddings"], axis=0)
+        else:
+            # Conv2d mode: single image, keep 3D output
             self.make_node("Identity", [fc2], ["image_embeddings"])
 
         return "image_embeddings"
