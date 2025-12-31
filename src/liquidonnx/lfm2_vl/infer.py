@@ -21,6 +21,7 @@ from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.preprocessing import (
     build_inputs_embeds,
     detect_vision_format,
+    pad_to_square,
     preprocess_conv2d,
     preprocess_tiled,
 )
@@ -149,6 +150,11 @@ class VLModelInference:
         images = images or []
 
         if images:
+            # Pad images to square for consistent tiling between processor and ONNX model
+            # This ensures the number of <image> tokens matches the number of patch embeddings
+            if self.vision_format == VISION_MODE_TILED:
+                images = [pad_to_square(img) for img in images]
+
             # Images are added to the LAST user message only (current turn)
             messages_with_images = []
             last_user_idx = max(
