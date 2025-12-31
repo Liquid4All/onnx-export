@@ -101,7 +101,7 @@ def run_local_onnx_vl(embed_tokens_sess, embed_images_sess, decoder_sess, proces
         None,
         {
             "pixel_values": pixel_values,
-            "patch_attention_mask": pixel_attention_mask,
+            "pixel_attention_mask": pixel_attention_mask,
             "spatial_shapes": spatial_shapes,
         },
     )

@@ -266,9 +266,9 @@ def preprocess_tiled(
                           (recommended for ONNX models that assume square input)
 
     Returns:
-        (pixel_values, patch_attention_mask, spatial_shapes) where:
+        (pixel_values, pixel_attention_mask, spatial_shapes) where:
         - pixel_values: [num_tiles, num_patches, patch_dim] float32 array
-        - patch_attention_mask: [num_tiles, num_patches] int64 array
+        - pixel_attention_mask: [num_tiles, num_patches] int64 array
         - spatial_shapes: [num_tiles, 2] int64 array with (H, W) per tile
     """
     if do_pad_to_square:
@@ -281,10 +281,10 @@ def preprocess_tiled(
     inputs = processor.image_processor(**kwargs)
 
     pixel_values = inputs["pixel_values"].numpy().astype(np.float32)
-    patch_attention_mask = inputs["pixel_attention_mask"].numpy().astype(np.int64)
+    pixel_attention_mask = inputs["pixel_attention_mask"].numpy().astype(np.int64)
     spatial_shapes = inputs["spatial_shapes"].numpy().astype(np.int64)
 
-    return pixel_values, patch_attention_mask, spatial_shapes
+    return pixel_values, pixel_attention_mask, spatial_shapes
 
 
 def get_image_embeddings(
@@ -341,7 +341,7 @@ def get_image_embeddings(
             if processor is None:
                 raise ValueError("processor is required for tiled format")
 
-            pixel_values, patch_attention_mask, spatial_shapes = preprocess_tiled(
+            pixel_values, pixel_attention_mask, spatial_shapes = preprocess_tiled(
                 image,
                 processor,
                 do_image_splitting=do_image_splitting,
@@ -352,7 +352,7 @@ def get_image_embeddings(
                 None,
                 {
                     "pixel_values": pixel_values,
-                    "patch_attention_mask": patch_attention_mask,
+                    "pixel_attention_mask": pixel_attention_mask,
                     "spatial_shapes": spatial_shapes,
                 },
             )

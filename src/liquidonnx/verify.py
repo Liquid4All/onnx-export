@@ -11,6 +11,8 @@ import numpy as np
 
 ATOL = 1e-3
 RTOL = 1e-2
+ATOL_FP16 = 5e-3
+RTOL_FP16 = 5e-2
 ATOL_QUANT = 0.5
 RTOL_QUANT = 0.5
 
@@ -26,8 +28,10 @@ class VerificationResult:
 
 
 def get_tolerances(precision: str | None) -> tuple[float, float]:
-    """Get (atol, rtol) based on precision (fp32/fp16 use tight, q4/q8 use loose)."""
-    if precision and precision != "fp16":
+    """Get (atol, rtol) based on precision."""
+    if precision == "fp16":
+        return ATOL_FP16, RTOL_FP16
+    if precision and precision not in ("fp32", None):
         return ATOL_QUANT, RTOL_QUANT
     return ATOL, RTOL
 

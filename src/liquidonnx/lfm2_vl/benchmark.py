@@ -200,17 +200,14 @@ class VLBenchmark:
                 "spatial_w": np.array(spatial_w, dtype=np.int64),
             }
 
-        pixel_values, patch_attention_mask, spatial_shapes = preprocess_tiled(
+        pixel_values, pixel_attention_mask, spatial_shapes = preprocess_tiled(
             image, self.processor, do_image_splitting=False, do_pad_to_square=True
         )
 
         inputs = {"pixel_values": pixel_values}
 
-        # Handle different naming conventions for attention mask
-        if "patch_attention_mask" in input_names:
-            inputs["patch_attention_mask"] = patch_attention_mask
-        elif "pixel_attention_mask" in input_names:
-            inputs["pixel_attention_mask"] = patch_attention_mask
+        if "pixel_attention_mask" in input_names:
+            inputs["pixel_attention_mask"] = pixel_attention_mask
 
         # Handle spatial_shapes (optional for some models)
         if "spatial_shapes" in input_names:
