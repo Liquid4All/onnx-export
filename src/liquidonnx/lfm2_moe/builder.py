@@ -209,7 +209,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             name: Base name for initializers
 
         Returns:
-            Tuple of (quant_name, scales_name, zp_name) for initializer references
+            Tuple of (quant_name, scales_name, zp_name, K, N) for initializer references
+
+        Uses community 3D layout for quant weights: (N, n_blocks, block_size//2)
         """
         K, N = weight.shape
         block_size = self.qmoe_block_size
@@ -219,11 +221,16 @@ class LFM2MoEBuilder(ONNXBuilderBase):
 
         quant, scales, zp = quantize_int4_block(weight_t, block_size)
 
+        # Reshape quant from 2D (N, K//2) to 3D (N, n_blocks, block_size//2)
+        # to match community layout
+        n_blocks = (K + block_size - 1) // block_size
+        quant_3d = quant.reshape(N, n_blocks, block_size // 2)
+
         quant_name = f"{name}_quant"
         scales_name = f"{name}_scales"
         zp_name = f"{name}_zp"
 
-        self.add_initializer(quant_name, quant, dtype=np.uint8)
+        self.add_initializer(quant_name, quant_3d, dtype=np.uint8)
         self.add_initializer(scales_name, scales)
         self.add_initializer(zp_name, zp, dtype=np.uint8)
 
@@ -685,9 +692,11 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             group=H,
         )
 
-        self.make_node("Shape", [Bx], [f"{prefix}/bx_shape"])
+        # Extract seq_len from LayerNorm output (shape [B, S, H]) at axis 1
+        # This matches community approach and avoids needing constant 2
+        self.make_node("Shape", [normed], [f"{prefix}/normed_shape"])
         self.make_node(
-            "Gather", [f"{prefix}/bx_shape", self.get_constant(2)], [f"{prefix}/seq_len"], axis=0
+            "Gather", [f"{prefix}/normed_shape", self.get_constant(1)], [f"{prefix}/seq_len"], axis=0
         )
         self.make_slice_last_n(conv_out_full, f"{prefix}/seq_len", f"{prefix}/conv_out", axis=2)
 
