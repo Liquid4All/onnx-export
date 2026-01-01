@@ -327,26 +327,39 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             prefix: Layer prefix (e.g., "model.layers.2")
             gate_up: Interleaved gate_up_proj [n_experts, 2*intermediate, hidden]
             down: down_proj [n_experts, hidden, intermediate]
+
+        Uses community naming convention with underscores:
+        model_layers_X_moe_experts_gate_up_proj_weight_quant
         """
         block_size = self.qmoe_block_size
+        # Convert prefix to underscore format for community naming
+        prefix_underscore = prefix.replace(".", "_")
 
         # Quantize gate_up_proj along last dimension (hidden_size)
         gate_up_quant, gate_up_scales, gate_up_zp = quantize_int4_block(gate_up, block_size)
         self.add_initializer(
-            f"{prefix}.moe.experts.gate_up_proj.weight_quant", gate_up_quant, dtype=np.uint8
+            f"{prefix_underscore}_moe_experts_gate_up_proj_weight_quant",
+            gate_up_quant,
+            dtype=np.uint8,
         )
-        self.add_initializer(f"{prefix}.moe.experts.gate_up_proj.weight_scales", gate_up_scales)
         self.add_initializer(
-            f"{prefix}.moe.experts.gate_up_proj.weight_zp", gate_up_zp, dtype=np.uint8
+            f"{prefix_underscore}_moe_experts_gate_up_proj_weight_scales", gate_up_scales
+        )
+        self.add_initializer(
+            f"{prefix_underscore}_moe_experts_gate_up_proj_weight_zp", gate_up_zp, dtype=np.uint8
         )
 
         # Quantize down_proj along last dimension (intermediate_size)
         down_quant, down_scales, down_zp = quantize_int4_block(down, block_size)
         self.add_initializer(
-            f"{prefix}.moe.experts.down_proj.weight_quant", down_quant, dtype=np.uint8
+            f"{prefix_underscore}_moe_experts_down_proj_weight_quant", down_quant, dtype=np.uint8
         )
-        self.add_initializer(f"{prefix}.moe.experts.down_proj.weight_scales", down_scales)
-        self.add_initializer(f"{prefix}.moe.experts.down_proj.weight_zp", down_zp, dtype=np.uint8)
+        self.add_initializer(
+            f"{prefix_underscore}_moe_experts_down_proj_weight_scales", down_scales
+        )
+        self.add_initializer(
+            f"{prefix_underscore}_moe_experts_down_proj_weight_zp", down_zp, dtype=np.uint8
+        )
 
     def make_simple_layernorm(self, input_name: str, weight_name: str, output_name: str) -> str:
         return self.make_layernorm(
@@ -369,14 +382,22 @@ class LFM2MoEBuilder(ONNXBuilderBase):
 
         In Q4 mode, linear weights are quantized on-the-fly by make_matmul_nbits.
         Only LayerNorm weights and conv kernels are added here.
+
+        Uses community naming convention:
+        - ffn_norm -> ffn_layernorm
+        - operator_norm -> operator_layernorm
+        - conv.weight -> conv.conv.weight
+        - self_attn.q_layernorm -> attn.q_norm.layernorm
         """
         prefix = f"model.layers.{layer_idx}"
 
-        # LayerNorm weights are always FP32
+        # LayerNorm weights are always FP32 (community naming)
         self.add_initializer(
-            f"{prefix}.operator_norm.weight", self.weights[f"{prefix}.operator_norm.weight"]
+            f"{prefix}.operator_layernorm.weight", self.weights[f"{prefix}.operator_norm.weight"]
         )
-        self.add_initializer(f"{prefix}.ffn_norm.weight", self.weights[f"{prefix}.ffn_norm.weight"])
+        self.add_initializer(
+            f"{prefix}.ffn_layernorm.weight", self.weights[f"{prefix}.ffn_norm.weight"]
+        )
 
         if self.is_moe_layer(layer_idx):
             # === MoE weights ===
@@ -422,45 +443,48 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                 )
 
         if layer_type == "conv":
-            # Conv kernel is not quantized (kept FP32)
+            # Conv kernel is not quantized (kept FP32) - community naming: conv.conv.weight
             self.add_initializer(
-                f"{prefix}.conv.weight", self.weights[f"{prefix}.conv.conv.weight"]
+                f"{prefix}.conv.conv.weight", self.weights[f"{prefix}.conv.conv.weight"]
             )
             if not self.use_q4:
                 # Conv projections only in non-Q4 mode (Q4 quantizes on-the-fly)
                 self.add_initializer(
-                    f"{prefix}.conv.in_proj.weight", self.weights[f"{prefix}.conv.in_proj.weight"].T
+                    f"{prefix}.conv.in_proj.MatMul.weight",
+                    self.weights[f"{prefix}.conv.in_proj.weight"].T,
                 )
                 self.add_initializer(
-                    f"{prefix}.conv.out_proj.weight", self.weights[f"{prefix}.conv.out_proj.weight"].T
+                    f"{prefix}.conv.out_proj.MatMul.weight",
+                    self.weights[f"{prefix}.conv.out_proj.weight"].T,
                 )
         else:
             # === Attention weights ===
-            # LayerNorm weights are always FP32
+            # LayerNorm weights (community naming: attn.q_norm.layernorm)
             self.add_initializer(
-                f"{prefix}.self_attn.q_layernorm.weight",
+                f"{prefix}.attn.q_norm.layernorm.weight",
                 self.weights[f"{prefix}.self_attn.q_layernorm.weight"],
             )
             self.add_initializer(
-                f"{prefix}.self_attn.k_layernorm.weight",
+                f"{prefix}.attn.k_norm.layernorm.weight",
                 self.weights[f"{prefix}.self_attn.k_layernorm.weight"],
             )
             if not self.use_q4:
                 # Attention projections only in non-Q4 mode (Q4 quantizes on-the-fly)
+                # Community naming: attn.*_proj.MatMul.weight
                 self.add_initializer(
-                    f"{prefix}.self_attn.q_proj.weight",
+                    f"{prefix}.attn.q_proj.MatMul.weight",
                     self.weights[f"{prefix}.self_attn.q_proj.weight"].T,
                 )
                 self.add_initializer(
-                    f"{prefix}.self_attn.k_proj.weight",
+                    f"{prefix}.attn.k_proj.MatMul.weight",
                     self.weights[f"{prefix}.self_attn.k_proj.weight"].T,
                 )
                 self.add_initializer(
-                    f"{prefix}.self_attn.v_proj.weight",
+                    f"{prefix}.attn.v_proj.MatMul.weight",
                     self.weights[f"{prefix}.self_attn.v_proj.weight"].T,
                 )
                 self.add_initializer(
-                    f"{prefix}.self_attn.out_proj.weight",
+                    f"{prefix}.attn.o_proj.MatMul.weight",
                     self.weights[f"{prefix}.self_attn.out_proj.weight"].T,
                 )
 
@@ -600,20 +624,21 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         self.add_initializer("sin_cache", torch.sin(freqs).numpy())
 
     def build_attention_mask_subgraph(self):
-        self.add_initializer("const_1", np.array([1], dtype=np.int64))
+        # Use community constant naming
+        const_1_arr = self.get_constant([1])  # /model/constants/INT64/[1]
+        const_1_scalar = self.get_constant(1)  # /model/constants/INT64/1
 
         self.make_node(
-            "ReduceSum", ["attention_mask", "const_1"], ["/attn_mask/reduce_sum"], keepdims=0
+            "ReduceSum", ["attention_mask", const_1_arr], ["/attn_mask/reduce_sum"], keepdims=0
         )
-        self.make_node("Sub", ["/attn_mask/reduce_sum", "const_1"], ["/attn_mask/seqlens_k_i64"])
+        self.make_node("Sub", ["/attn_mask/reduce_sum", const_1_arr], ["/attn_mask/seqlens_k_i64"])
         self.make_node(
             "Cast", ["/attn_mask/seqlens_k_i64"], ["/attn_mask/seqlens_k"], to=TensorProto.INT32
         )
 
-        self.add_initializer("const_1_scalar", np.array(1, dtype=np.int64))
         self.make_node("Shape", ["attention_mask"], ["/attn_mask/shape"])
         self.make_node(
-            "Gather", ["/attn_mask/shape", "const_1_scalar"], ["/attn_mask/total_seq_i64"], axis=0
+            "Gather", ["/attn_mask/shape", const_1_scalar], ["/attn_mask/total_seq_i64"], axis=0
         )
         self.make_node(
             "Cast", ["/attn_mask/total_seq_i64"], ["/attn_mask/total_seq"], to=TensorProto.INT32
@@ -626,7 +651,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         residual = hidden_state
 
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.operator_norm.weight", f"{prefix}/op_norm"
+            hidden_state, f"{prefix}.operator_layernorm.weight", f"{prefix}/op_norm"
         )
 
         if self.use_q4:
@@ -637,7 +662,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                 f"/model/layers.{layer_idx}/conv/in_proj/MatMul/output_0",
             )
         else:
-            in_proj = self.make_matmul(normed, f"{prefix}.conv.in_proj.weight", f"{prefix}/in_proj")
+            in_proj = self.make_matmul(
+                normed, f"{prefix}.conv.in_proj.MatMul.weight", f"{prefix}/in_proj"
+            )
         in_proj_t = self.make_node("Transpose", [in_proj], [f"{prefix}/in_proj_t"], perm=[0, 2, 1])
         self.make_node(
             "Split",
@@ -652,7 +679,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         )
         conv_out_full = self.make_node(
             "Conv",
-            [conv_input, f"{prefix}.conv.weight"],
+            [conv_input, f"{prefix}.conv.conv.weight"],
             [f"{prefix}/conv_out_full"],
             kernel_shape=[L],
             group=H,
@@ -686,7 +713,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                 f"/model/layers.{layer_idx}/conv/out_proj/MatMul/output_0",
             )
         else:
-            out_proj = self.make_matmul(y_t, f"{prefix}.conv.out_proj.weight", f"{prefix}/out_proj")
+            out_proj = self.make_matmul(
+                y_t, f"{prefix}.conv.out_proj.MatMul.weight", f"{prefix}/out_proj"
+            )
 
         hidden_state = self.make_add(residual, out_proj, f"{prefix}/residual1")
         return self.build_ffn(layer_idx, hidden_state)
@@ -701,7 +730,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         residual = hidden_state
 
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.operator_norm.weight", f"{prefix}/op_norm"
+            hidden_state, f"{prefix}.operator_layernorm.weight", f"{prefix}/op_norm"
         )
 
         if self.use_q4:
@@ -724,9 +753,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                 f"/model/layers.{layer_idx}/attn/v_proj/MatMul/output_0",
             )
         else:
-            q = self.make_matmul(normed, f"{prefix}.self_attn.q_proj.weight", f"{prefix}/q")
-            k = self.make_matmul(normed, f"{prefix}.self_attn.k_proj.weight", f"{prefix}/k")
-            v = self.make_matmul(normed, f"{prefix}.self_attn.v_proj.weight", f"{prefix}/v")
+            q = self.make_matmul(normed, f"{prefix}.attn.q_proj.MatMul.weight", f"{prefix}/q")
+            k = self.make_matmul(normed, f"{prefix}.attn.k_proj.MatMul.weight", f"{prefix}/k")
+            v = self.make_matmul(normed, f"{prefix}.attn.v_proj.MatMul.weight", f"{prefix}/v")
 
         reshape_for_norm = self.get_constant([0, -1, hd])
         q_reshape_back = self.get_constant([0, -1, H])
@@ -734,13 +763,13 @@ class LFM2MoEBuilder(ONNXBuilderBase):
 
         q_for_norm = self.make_node("Reshape", [q, reshape_for_norm], [f"{prefix}/q_for_norm"])
         q_normed = self.make_simple_layernorm(
-            q_for_norm, f"{prefix}.self_attn.q_layernorm.weight", f"{prefix}/q_normed"
+            q_for_norm, f"{prefix}.attn.q_norm.layernorm.weight", f"{prefix}/q_normed"
         )
         q_3d = self.make_node("Reshape", [q_normed, q_reshape_back], [f"{prefix}/q_3d"])
 
         k_for_norm = self.make_node("Reshape", [k, reshape_for_norm], [f"{prefix}/k_for_norm"])
         k_normed = self.make_simple_layernorm(
-            k_for_norm, f"{prefix}.self_attn.k_layernorm.weight", f"{prefix}/k_normed"
+            k_for_norm, f"{prefix}.attn.k_norm.layernorm.weight", f"{prefix}/k_normed"
         )
         k_3d = self.make_node("Reshape", [k_normed, k_reshape_back], [f"{prefix}/k_3d"])
 
@@ -823,7 +852,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             )
         else:
             o_proj = self.make_matmul(
-                f"{prefix}/attn_out", f"{prefix}.self_attn.out_proj.weight", f"{prefix}/o_proj"
+                f"{prefix}/attn_out", f"{prefix}.attn.o_proj.MatMul.weight", f"{prefix}/o_proj"
             )
         hidden_state = self.make_add(residual, o_proj, f"{prefix}/residual1")
         return self.build_ffn(layer_idx, hidden_state)
@@ -842,7 +871,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         residual = hidden_state
 
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.ffn_norm.weight", f"{prefix}/ffn_norm"
+            hidden_state, f"{prefix}.ffn_layernorm.weight", f"{prefix}/ffn_norm"
         )
 
         if self.use_q4:
@@ -913,7 +942,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
 
         # === FFN LayerNorm ===
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.ffn_norm.weight", f"{prefix}/ffn_layernorm/output_0"
+            hidden_state, f"{prefix}.ffn_layernorm.weight", f"{prefix}/ffn_layernorm/output_0"
         )
 
         # === Router subgraph ===
@@ -1057,7 +1086,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
 
         # === FFN LayerNorm ===
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.ffn_norm.weight", f"{prefix}/ffn_layernorm/output_0"
+            hidden_state, f"{prefix}.ffn_layernorm.weight", f"{prefix}/ffn_layernorm/output_0"
         )
 
         # === Router subgraph ===
@@ -1146,23 +1175,25 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         )
 
         # === QMoE operator with 14 inputs ===
+        # Use underscore naming for MoE weights (community convention)
+        prefix_underscore = prefix.replace(".", "_")
         qmoe_out = self.make_node(
             "QMoE",
             [
-                normed,                                                   # [0] hidden_state
-                router_probs,                                             # [1] router_probs
-                f"{prefix}.moe.experts.gate_up_proj.weight_quant",        # [2] gate_up quant
-                f"{prefix}.moe.experts.gate_up_proj.weight_scales",       # [3] gate_up scales
-                "",                                                       # [4] gate_up bias (empty)
-                f"{prefix}.moe.experts.down_proj.weight_quant",           # [5] down quant
-                f"{prefix}.moe.experts.down_proj.weight_scales",          # [6] down scales
-                "",                                                       # [7] down bias (empty)
-                "",                                                       # [8] fc1_experts_bias (empty)
-                "",                                                       # [9] fc2_experts_bias (empty)
-                "",                                                       # [10] empty
-                f"{prefix}.moe.experts.gate_up_proj.weight_zp",           # [11] gate_up zp
-                f"{prefix}.moe.experts.down_proj.weight_zp",              # [12] down zp
-                "",                                                       # [13] empty
+                normed,                                                        # [0] hidden_state
+                router_probs,                                                  # [1] router_probs
+                f"{prefix_underscore}_moe_experts_gate_up_proj_weight_quant",  # [2] gate_up quant
+                f"{prefix_underscore}_moe_experts_gate_up_proj_weight_scales", # [3] gate_up scales
+                "",                                                            # [4] gate_up bias (empty)
+                f"{prefix_underscore}_moe_experts_down_proj_weight_quant",     # [5] down quant
+                f"{prefix_underscore}_moe_experts_down_proj_weight_scales",    # [6] down scales
+                "",                                                            # [7] down bias (empty)
+                "",                                                            # [8] fc1_experts_bias (empty)
+                "",                                                            # [9] fc2_experts_bias (empty)
+                "",                                                            # [10] empty
+                f"{prefix_underscore}_moe_experts_gate_up_proj_weight_zp",     # [11] gate_up zp
+                f"{prefix_underscore}_moe_experts_down_proj_weight_zp",        # [12] down zp
+                "",                                                            # [13] empty
             ],
             [f"{prefix}/moe/QMoE/output_0"],
             domain="com.microsoft",
@@ -1177,12 +1208,16 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         return self.make_add(residual, qmoe_out, f"{prefix}/residual2")
 
     def build_lm_head(self, hidden_state: str) -> str:
+        # Community naming: model.layers.24.final_norm_layernorm.weight
         self.add_initializer(
-            "model.embedding_norm.weight", self.weights["model.embedding_norm.weight"]
+            "model.layers.24.final_norm_layernorm.weight",
+            self.weights["model.embedding_norm.weight"],
         )
         normed = self.make_skip_layernorm(
-            hidden_state, hidden_state, "model.embedding_norm.weight",
-            "/model/layers.24/final_norm_layernorm/output_0"
+            hidden_state,
+            hidden_state,
+            "model.layers.24.final_norm_layernorm.weight",
+            "/model/layers.24/final_norm_layernorm/output_0",
         )
 
         if self.use_q4:
