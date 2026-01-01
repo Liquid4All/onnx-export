@@ -34,6 +34,7 @@ QUANT_CONFIGS = [
     pytest.param(None, id="fp32"),
     pytest.param("fp16", id="fp16"),
     pytest.param("q4", id="q4"),
+    pytest.param("q4f16", id="q4f16"),
 ]
 
 PROMPTS = ["Hello, how are", "The sky is", "1 + 1 ="]
@@ -138,7 +139,7 @@ def test_community_comparison(
                 inputs[inp.name] = np.zeros(shape, dtype=dtype)
         return inputs
 
-    use_fp16 = precision == "fp16"
+    use_fp16 = precision in ("fp16", "q4f16")
     local_inputs = build_inputs_for_session(local_sess, available_inputs, use_fp16)
     community_inputs = build_inputs_for_session(community_sess, available_inputs, use_fp16)
 
@@ -175,7 +176,7 @@ def test_community_comparison(
     logger.info(f"  Winner: {winner} (lower max_diff)")
 
     # Assert both produce reasonable results (top-5 match with PyTorch)
-    # Q4 has more aggressive quantization, so lower threshold
+    # Q4/Q4F16 have more aggressive quantization, so lower threshold
     min_overlap = 4 if precision in (None, "fp16") else 2
 
     assert local_metrics["top5_overlap"] >= min_overlap, (

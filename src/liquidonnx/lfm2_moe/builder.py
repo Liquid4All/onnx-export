@@ -44,6 +44,13 @@ from liquidonnx.builder_base import ONNXBuilderBase
 
 logger = logging.getLogger(__name__)
 
+# === Constants ===
+INT4_BITS = 4
+INT4_MAX = (1 << INT4_BITS) - 1  # 15, max value for unsigned 4-bit
+DEFAULT_BLOCK_SIZE = 32  # Default block size for INT4 quantization
+SCALE_EPS = 1e-10  # Threshold for clamping small quantization scales
+MASK_VALUE = float(np.finfo(np.float32).min)  # Large negative value for attention masking
+
 
 @dataclass
 class LFM2MoEConfig:
@@ -100,7 +107,7 @@ class LFM2MoEConfig:
 
 
 def quantize_int4_block(
-    weight: np.ndarray, block_size: int = 32
+    weight: np.ndarray, block_size: int = DEFAULT_BLOCK_SIZE
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Quantize weight tensor to INT4 with block-wise scales and zero points.
 
@@ -130,16 +137,16 @@ def quantize_int4_block(
     w_min = weight_blocked.min(axis=-1, keepdims=True)
     w_max = weight_blocked.max(axis=-1, keepdims=True)
 
-    # Compute scale and zero point for unsigned 4-bit (0-15)
-    scale = (w_max - w_min) / 15.0
+    # Compute scale and zero point for unsigned 4-bit (0 to INT4_MAX)
+    scale = (w_max - w_min) / float(INT4_MAX)
     # Clamp small scales to 1.0 to match community behavior
     # This handles near-constant blocks (e.g., zero-padding) consistently
-    scale = np.where(scale < 1e-10, 1.0, scale)
-    zero_point = np.round(-w_min / scale).clip(0, 15).astype(np.uint8)
+    scale = np.where(scale < SCALE_EPS, 1.0, scale)
+    zero_point = np.round(-w_min / scale).clip(0, INT4_MAX).astype(np.uint8)
 
     # Quantize using ORT formula: q = round(w/s + zp) to match community
     # This differs from round((w - w_min)/s) due to rounding order
-    quant = np.round(weight_blocked / scale + zero_point).clip(0, 15).astype(np.uint8)
+    quant = np.round(weight_blocked / scale + zero_point).clip(0, INT4_MAX).astype(np.uint8)
 
     # Pack two INT4 values into one UINT8 (low nibble first)
     # Shape: [..., n_blocks, block_size] -> [..., n_blocks, block_size//2]
@@ -183,7 +190,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         config: LFM2MoEConfig,
         use_integrated_rope: bool = False,
         use_qmoe: bool = False,
-        qmoe_block_size: int = 32,
+        qmoe_block_size: int = DEFAULT_BLOCK_SIZE,
         use_q4: bool = False,
     ):
         super().__init__()
@@ -199,9 +206,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
 
     # === Q4 Quantization Methods ===
 
-    def _quantize_for_matmul_nbits(
-        self, weight: np.ndarray, name: str
-    ) -> tuple[str, str, str]:
+    def _quantize_for_matmul_nbits(self, weight: np.ndarray, name: str) -> tuple[str, str, str]:
         """Quantize weight for MatMulNBits operator.
 
         Args:
@@ -319,11 +324,11 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         half = total_intermediate // 2
 
         gate = gate_up[:, :half, :]  # [n_experts, intermediate, hidden]
-        up = gate_up[:, half:, :]    # [n_experts, intermediate, hidden]
+        up = gate_up[:, half:, :]  # [n_experts, intermediate, hidden]
 
         interleaved = np.empty_like(gate_up)
         interleaved[:, 0::2, :] = gate  # Even indices get gate
-        interleaved[:, 1::2, :] = up    # Odd indices get up
+        interleaved[:, 1::2, :] = up  # Odd indices get up
 
         return interleaved
 
@@ -430,7 +435,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                 # Quantize weights for QMoE
                 self._prepare_qmoe_weights(prefix, gate_up_interleaved, down)
             else:
-                self.add_initializer(f"{prefix}.moe.experts.gate_up_proj.weight", gate_up_interleaved)
+                self.add_initializer(
+                    f"{prefix}.moe.experts.gate_up_proj.weight", gate_up_interleaved
+                )
                 self.add_initializer(f"{prefix}.moe.experts.down_proj.weight", down)
         else:
             # === Dense MLP weights ===
@@ -696,7 +703,10 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         # This matches community approach and avoids needing constant 2
         self.make_node("Shape", [normed], [f"{prefix}/normed_shape"])
         self.make_node(
-            "Gather", [f"{prefix}/normed_shape", self.get_constant(1)], [f"{prefix}/seq_len"], axis=0
+            "Gather",
+            [f"{prefix}/normed_shape", self.get_constant(1)],
+            [f"{prefix}/seq_len"],
+            axis=0,
         )
         self.make_slice_last_n(conv_out_full, f"{prefix}/seq_len", f"{prefix}/conv_out", axis=2)
 
@@ -995,10 +1005,8 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         )
 
         # Create negative infinity matrix for scatter
-        self.add_initializer(
-            "/model/constants/FLOAT/[-3.4028234663852886e+38]",
-            np.array([-3.4028234663852886e38], dtype=np.float32),
-        )
+        mask_const_name = f"/model/constants/FLOAT/[{MASK_VALUE}]"
+        self.add_initializer(mask_const_name, np.array([MASK_VALUE], dtype=np.float32))
         self.make_node(
             "Shape",
             [router_logits],
@@ -1006,10 +1014,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         )
         self.make_node(
             "Expand",
-            [
-                "/model/constants/FLOAT/[-3.4028234663852886e+38]",
-                f"{prefix}/moe/router/Shape/output_0",
-            ],
+            [mask_const_name, f"{prefix}/moe/router/Shape/output_0"],
             [f"{prefix}/moe/router/Expand/output_0"],
         )
 
@@ -1141,10 +1146,8 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             [f"{prefix}/moe/router/Log/output_0"],
         )
 
-        self.add_initializer(
-            "/model/constants/FLOAT/[-3.4028234663852886e+38]",
-            np.array([-3.4028234663852886e38], dtype=np.float32),
-        )
+        mask_const_name = f"/model/constants/FLOAT/[{MASK_VALUE}]"
+        self.add_initializer(mask_const_name, np.array([MASK_VALUE], dtype=np.float32))
         self.make_node(
             "Shape",
             [router_logits],
@@ -1152,10 +1155,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         )
         self.make_node(
             "Expand",
-            [
-                "/model/constants/FLOAT/[-3.4028234663852886e+38]",
-                f"{prefix}/moe/router/Shape/output_0",
-            ],
+            [mask_const_name, f"{prefix}/moe/router/Shape/output_0"],
             [f"{prefix}/moe/router/Expand/output_0"],
         )
 
@@ -1189,26 +1189,26 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         qmoe_out = self.make_node(
             "QMoE",
             [
-                normed,                                                        # [0] hidden_state
-                router_probs,                                                  # [1] router_probs
+                normed,  # [0] hidden_state
+                router_probs,  # [1] router_probs
                 f"{prefix_underscore}_moe_experts_gate_up_proj_weight_quant",  # [2] gate_up quant
-                f"{prefix_underscore}_moe_experts_gate_up_proj_weight_scales", # [3] gate_up scales
-                "",                                                            # [4] gate_up bias (empty)
-                f"{prefix_underscore}_moe_experts_down_proj_weight_quant",     # [5] down quant
-                f"{prefix_underscore}_moe_experts_down_proj_weight_scales",    # [6] down scales
-                "",                                                            # [7] down bias (empty)
-                "",                                                            # [8] fc1_experts_bias (empty)
-                "",                                                            # [9] fc2_experts_bias (empty)
-                "",                                                            # [10] empty
-                f"{prefix_underscore}_moe_experts_gate_up_proj_weight_zp",     # [11] gate_up zp
-                f"{prefix_underscore}_moe_experts_down_proj_weight_zp",        # [12] down zp
-                "",                                                            # [13] empty
+                f"{prefix_underscore}_moe_experts_gate_up_proj_weight_scales",  # [3] gate_up scales
+                "",  # [4] gate_up bias (empty)
+                f"{prefix_underscore}_moe_experts_down_proj_weight_quant",  # [5] down quant
+                f"{prefix_underscore}_moe_experts_down_proj_weight_scales",  # [6] down scales
+                "",  # [7] down bias (empty)
+                "",  # [8] fc1_experts_bias (empty)
+                "",  # [9] fc2_experts_bias (empty)
+                "",  # [10] empty
+                f"{prefix_underscore}_moe_experts_gate_up_proj_weight_zp",  # [11] gate_up zp
+                f"{prefix_underscore}_moe_experts_down_proj_weight_zp",  # [12] down zp
+                "",  # [13] empty
             ],
             [f"{prefix}/moe/QMoE/output_0"],
             domain="com.microsoft",
             activation_type="swiglu",
             block_size=self.qmoe_block_size,
-            expert_weight_bits=4,
+            expert_weight_bits=INT4_BITS,
             k=k,
             normalize_routing_weights=1 if self.config.norm_topk_prob else 0,
             swiglu_fusion=1,
@@ -1217,16 +1217,17 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         return self.make_add(residual, qmoe_out, f"{prefix}/residual2")
 
     def build_lm_head(self, hidden_state: str) -> str:
-        # Community naming: model.layers.24.final_norm_layernorm.weight
-        self.add_initializer(
-            "model.layers.24.final_norm_layernorm.weight",
-            self.weights["model.embedding_norm.weight"],
-        )
+        # Community naming: model.layers.{num_layers}.final_norm_layernorm.weight
+        num_layers = self.config.num_hidden_layers
+        final_norm_weight = f"model.layers.{num_layers}.final_norm_layernorm.weight"
+        final_norm_output = f"/model/layers.{num_layers}/final_norm_layernorm/output_0"
+
+        self.add_initializer(final_norm_weight, self.weights["model.embedding_norm.weight"])
         normed = self.make_skip_layernorm(
             hidden_state,
             hidden_state,
-            "model.layers.24.final_norm_layernorm.weight",
-            "/model/layers.24/final_norm_layernorm/output_0",
+            final_norm_weight,
+            final_norm_output,
         )
 
         if self.use_q4:
@@ -1251,14 +1252,22 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             n_blocks = K // self.qmoe_block_size
 
             # Reshape to 3D format for MatMulNBits: [N, n_blocks, block_size/2]
-            embed_quant_matmul = embed_quant.reshape(vocab_size, n_blocks, self.qmoe_block_size // 2)
-            self.add_initializer("model_embed_tokens_weight_quant_matmul", embed_quant_matmul, dtype=np.uint8)
+            embed_quant_matmul = embed_quant.reshape(
+                vocab_size, n_blocks, self.qmoe_block_size // 2
+            )
+            self.add_initializer(
+                "model_embed_tokens_weight_quant_matmul", embed_quant_matmul, dtype=np.uint8
+            )
 
             # Reuse existing scales and zero points from embedding
             return self.make_node(
                 "MatMulNBits",
-                [normed, "model_embed_tokens_weight_quant_matmul",
-                 "model_embed_tokens_weight_scales", "model_embed_tokens_weight_zp"],
+                [
+                    normed,
+                    "model_embed_tokens_weight_quant_matmul",
+                    "model_embed_tokens_weight_scales",
+                    "model_embed_tokens_weight_zp",
+                ],
                 ["logits"],
                 domain="com.microsoft",
                 K=K,
@@ -1268,7 +1277,10 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             )
         else:
             self.make_node(
-                "Transpose", ["model.embed_tokens.weight"], ["lm_head.weight_transposed"], perm=[1, 0]
+                "Transpose",
+                ["model.embed_tokens.weight"],
+                ["lm_head.weight_transposed"],
+                perm=[1, 0],
             )
             return self.make_matmul(normed, "lm_head.weight_transposed", "logits")
 

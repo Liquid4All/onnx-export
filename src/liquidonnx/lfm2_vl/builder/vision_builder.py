@@ -154,9 +154,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         self.add_initializer(
             f"{prefix}/reshape_out", np.array([1, -1, hidden_size], dtype=np.int64)
         )
-        output = self.make_node(
-            "Reshape", [transposed, f"{prefix}/reshape_out"], ["pos_emb/final"]
-        )
+        output = self.make_node("Reshape", [transposed, f"{prefix}/reshape_out"], ["pos_emb/final"])
 
         return output
 
@@ -251,15 +249,13 @@ class VisionEmbedBuilder(ONNXBuilderBase):
 
         # Invert: 1.0 - mask (now 0=valid, 1=masked)
         self.add_initializer("attn_mask/one_f", np.array(1.0, dtype=np.float32))
-        inverted = self.make_node(
-            "Sub", ["attn_mask/one_f", mask_float], ["attn_mask/inverted"]
-        )
+        inverted = self.make_node("Sub", ["attn_mask/one_f", mask_float], ["attn_mask/inverted"])
 
         # Multiply by -inf to create additive bias (0=valid, -inf=masked)
-        self.add_initializer("attn_mask/neg_inf", np.array(-3.4028234663852886e38, dtype=np.float32))
-        bias_2d = self.make_node(
-            "Mul", [inverted, "attn_mask/neg_inf"], ["attn_mask/bias_2d"]
+        self.add_initializer(
+            "attn_mask/neg_inf", np.array(-3.4028234663852886e38, dtype=np.float32)
         )
+        bias_2d = self.make_node("Mul", [inverted, "attn_mask/neg_inf"], ["attn_mask/bias_2d"])
 
         # Unsqueeze to [B, 1, 1, N] for broadcasting
         self.add_initializer("attn_mask/axes_unsq", np.array([1, 2], dtype=np.int64))
@@ -281,9 +277,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         seq_len = self.make_node(
             "Gather", [shape, "attn_mask/idx_1"], ["attn_mask/seq_len"], axis=0
         )
-        seq_unsq = self.make_node(
-            "Unsqueeze", [seq_len, "attn_mask/idx_0"], ["attn_mask/seq_unsq"]
-        )
+        seq_unsq = self.make_node("Unsqueeze", [seq_len, "attn_mask/idx_0"], ["attn_mask/seq_unsq"])
 
         self.add_initializer("attn_mask/num_heads", np.array([num_heads], dtype=np.int64))
         expand_shape = self.make_node(

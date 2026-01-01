@@ -56,36 +56,82 @@ logger = logging.getLogger(__name__)
 def convert_to_fp16(
     input_path: pathlib.Path,
     output_path: pathlib.Path,
-    keep_io_types: bool = True,
 ):
     """Convert ONNX model from FP32 to FP16.
+
+    Matches community convention:
+    - All float32 weights become float16
+    - KV cache inputs/outputs become float16
+    - logits output stays float32 (added Cast node)
+    - input_ids and attention_mask stay int64
 
     Args:
         input_path: Path to FP32 ONNX model
         output_path: Path for FP16 output model
-        keep_io_types: Keep inputs/outputs as FP32 for compatibility
     """
+    import numpy as np
+    from onnx import TensorProto, helper, numpy_helper
     from onnx.external_data_helper import load_external_data_for_model
-    from onnxruntime.transformers.float16 import convert_float_to_float16
 
     logger.info(f"Converting {input_path.name} to FP16...")
 
     model = onnx.load(str(input_path), load_external_data=False)
     load_external_data_for_model(model, str(input_path.parent))
 
-    model_fp16 = convert_float_to_float16(
-        model,
-        keep_io_types=keep_io_types,
-        force_fp16_initializers=True,
-        disable_shape_infer=True,
-    )
+    graph = model.graph
+
+    # === 1. Convert all float32 initializers to float16 ===
+    new_initializers = []
+    for init in graph.initializer:
+        if init.data_type == TensorProto.FLOAT:
+            arr = numpy_helper.to_array(init)
+            arr_fp16 = arr.astype(np.float16)
+            new_init = numpy_helper.from_array(arr_fp16, init.name)
+            new_initializers.append(new_init)
+        else:
+            new_initializers.append(init)
+
+    del graph.initializer[:]
+    graph.initializer.extend(new_initializers)
+
+    # === 2. Convert KV cache inputs to FP16 (keep int64 inputs) ===
+    for inp in graph.input:
+        if inp.type.tensor_type.elem_type == TensorProto.FLOAT:
+            inp.type.tensor_type.elem_type = TensorProto.FLOAT16
+
+    # === 3. Convert KV cache outputs to FP16 (except logits) ===
+    for out in graph.output:
+        if out.type.tensor_type.elem_type == TensorProto.FLOAT:
+            if out.name != "logits":
+                out.type.tensor_type.elem_type = TensorProto.FLOAT16
+
+    # === 4. Add Cast node for logits (fp16 internal -> fp32 output) ===
+    for output in graph.output:
+        if output.name == "logits":
+            cast_input = "logits_fp16"
+            cast_node = helper.make_node(
+                "Cast",
+                inputs=[cast_input],
+                outputs=["logits"],
+                to=TensorProto.FLOAT,
+            )
+
+            # Find the node producing logits and rename its output
+            for node in graph.node:
+                for j, out in enumerate(node.output):
+                    if out == "logits":
+                        node.output[j] = cast_input
+                        break
+
+            graph.node.append(cast_node)
+            break
 
     output_data_path = output_path.parent / f"{output_path.stem}.onnx_data"
     if output_data_path.exists():
         output_data_path.unlink()
 
     onnx.save_model(
-        model_fp16,
+        model,
         str(output_path),
         save_as_external_data=True,
         all_tensors_to_one_file=True,
@@ -96,6 +142,124 @@ def convert_to_fp16(
     fp16_mb = get_total_model_size_mb(output_path)
     ratio = orig_mb / fp16_mb if fp16_mb > 0 else 0
     logger.info(f"  {input_path.name}: {orig_mb:.1f} -> {fp16_mb:.1f} MB ({ratio:.1f}x)")
+
+    return output_path
+
+
+def convert_q4_to_fp16(
+    input_path: pathlib.Path,
+    output_path: pathlib.Path,
+):
+    """Convert Q4 ONNX model to Q4F16 (FP16 non-quantized weights).
+
+    Matches community Q4F16 convention:
+    - Quantization scales stay float32 (needed for precision)
+    - Zero points stay uint8
+    - Quant weights stay uint8
+    - LayerNorm weights become float16
+    - RoPE caches become float16
+    - Conv weights become float16
+    - Expert biases become float16
+    - KV cache inputs/outputs become float16
+    - logits output stays float32 (added Cast node)
+
+    Args:
+        input_path: Path to Q4 ONNX model
+        output_path: Path for Q4F16 output model
+    """
+    import numpy as np
+    from onnx import TensorProto, helper, numpy_helper
+    from onnx.external_data_helper import load_external_data_for_model
+
+    logger.info(f"Converting {input_path.name} to Q4F16...")
+
+    model = onnx.load(str(input_path), load_external_data=False)
+    load_external_data_for_model(model, str(input_path.parent))
+
+    graph = model.graph
+
+    # Convert appropriate initializers to FP16
+    new_initializers = []
+    for init in graph.initializer:
+        if init.data_type == TensorProto.FLOAT:
+            name = init.name
+            # Keep scales as FP32 (needed for quantization precision)
+            if "_scales" in name:
+                new_initializers.append(init)
+            else:
+                # Convert to FP16: LayerNorm, caches, conv weights, expert_bias, constants
+                arr = numpy_helper.to_array(init)
+                arr_fp16 = arr.astype(np.float16)
+                new_init = numpy_helper.from_array(arr_fp16, name)
+                new_initializers.append(new_init)
+        else:
+            # Keep int64, uint8 as-is
+            new_initializers.append(init)
+
+    # Replace initializers
+    del graph.initializer[:]
+    graph.initializer.extend(new_initializers)
+
+    # Update float constants name (FLOAT -> FLOAT16) to match community
+    for init in graph.initializer:
+        if "/model/constants/FLOAT/" in init.name and init.data_type == TensorProto.FLOAT16:
+            old_name = init.name
+            new_name = old_name.replace("/model/constants/FLOAT/", "/model/constants/FLOAT16/")
+            init.name = new_name
+            # Update all node references
+            for node in graph.node:
+                for i, inp in enumerate(node.input):
+                    if inp == old_name:
+                        node.input[i] = new_name
+
+    # Convert KV cache inputs to FP16
+    for inp in graph.input:
+        if inp.type.tensor_type.elem_type == TensorProto.FLOAT:
+            if "past_" in inp.name or "key" in inp.name or "value" in inp.name:
+                inp.type.tensor_type.elem_type = TensorProto.FLOAT16
+
+    # Convert KV cache outputs to FP16 (except logits)
+    for out in graph.output:
+        if out.type.tensor_type.elem_type == TensorProto.FLOAT:
+            if out.name != "logits":
+                out.type.tensor_type.elem_type = TensorProto.FLOAT16
+
+    # Add Cast node for logits (fp16 -> fp32) matching community
+    for output in graph.output:
+        if output.name == "logits":
+            cast_input = "logits_fp16"
+            cast_node = helper.make_node(
+                "Cast",
+                inputs=[cast_input],
+                outputs=["logits"],
+                to=TensorProto.FLOAT,
+            )
+
+            # Find node producing logits and rename its output
+            for node in graph.node:
+                for j, out in enumerate(node.output):
+                    if out == "logits":
+                        node.output[j] = cast_input
+                        break
+
+            graph.node.append(cast_node)
+            break
+
+    output_data_path = output_path.parent / f"{output_path.stem}.onnx_data"
+    if output_data_path.exists():
+        output_data_path.unlink()
+
+    onnx.save_model(
+        model,
+        str(output_path),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=f"{output_path.stem}.onnx_data",
+    )
+
+    orig_mb = get_total_model_size_mb(input_path)
+    fp16_mb = get_total_model_size_mb(output_path)
+    logger.info(f"  {input_path.name}: {orig_mb:.1f} -> {fp16_mb:.1f} MB")
 
     return output_path
 
@@ -239,7 +403,7 @@ def do_quantize(onnx_dir: pathlib.Path, bits: int, exclude_lm_head: bool, block_
 
 
 def do_fp16(onnx_dir: pathlib.Path):
-    """Convert model to FP16."""
+    """Convert FP32 model to FP16."""
     if not onnx_dir.exists():
         raise FileNotFoundError(f"ONNX directory not found: {onnx_dir}")
 
@@ -252,6 +416,24 @@ def do_fp16(onnx_dir: pathlib.Path):
 
     if model_fp32.exists():
         convert_to_fp16(model_fp32, model_fp16)
+
+
+def do_q4f16(onnx_dir: pathlib.Path):
+    """Convert Q4 model to Q4F16."""
+    if not onnx_dir.exists():
+        raise FileNotFoundError(f"ONNX directory not found: {onnx_dir}")
+
+    model_q4 = onnx_dir / "model_q4.onnx"
+    model_q4f16 = onnx_dir / "model_q4f16.onnx"
+
+    if model_q4f16.exists():
+        logger.info("Skipping q4f16 (already exists)")
+        return
+
+    if not model_q4.exists():
+        raise FileNotFoundError(f"model_q4.onnx not found in {onnx_dir}")
+
+    convert_q4_to_fp16(model_q4, model_q4f16)
 
 
 def main():
@@ -285,7 +467,7 @@ def main():
         "--precision",
         nargs="*",
         metavar="PRECISION",
-        help="Output precisions: fp16, q4, q8, or all (default if no args)",
+        help="Output precisions: fp16, q4, q4f16, q8, or all (default if no args)",
     )
     parser.add_argument(
         "--no-exclude-lm-head",
@@ -331,19 +513,23 @@ def main():
 
     quant_bits = []
     do_fp16_conversion = False
+    do_q4f16_conversion = False
     if args.precision is not None:
         if len(args.precision) == 0:
             quant_bits = [4, 8]
             do_fp16_conversion = True
+            do_q4f16_conversion = True
         else:
             for p in args.precision:
                 p = p.lower()
                 if p == "fp16":
                     do_fp16_conversion = True
+                elif p == "q4f16":
+                    do_q4f16_conversion = True
                 elif p in ("q4", "q8"):
                     quant_bits.append(int(p[1]))
                 else:
-                    parser.error(f"Invalid precision: {p}. Use fp16, q4, or q8.")
+                    parser.error(f"Invalid precision: {p}. Use fp16, q4, q4f16, or q8.")
 
     exclude_lm_head = not args.no_exclude_lm_head
 
@@ -397,6 +583,19 @@ def main():
             onnx_dir = get_output_dir(size, args.output_dir) / "onnx"
             try:
                 do_quantize(onnx_dir, bits, exclude_lm_head, args.block_size)
+                logger.info(f"  {size}: OK")
+            except Exception as e:
+                logger.error(f"  {size}: FAILED - {e}")
+
+    if do_q4f16_conversion:
+        logger.info("=" * 60)
+        logger.info("Converting Q4 to Q4F16")
+        logger.info("=" * 60)
+
+        for size in sizes:
+            onnx_dir = get_output_dir(size, args.output_dir) / "onnx"
+            try:
+                do_q4f16(onnx_dir)
                 logger.info(f"  {size}: OK")
             except Exception as e:
                 logger.error(f"  {size}: FAILED - {e}")
