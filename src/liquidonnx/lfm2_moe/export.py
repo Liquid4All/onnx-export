@@ -14,8 +14,8 @@ Output Structure (Transformers.js compatible):
             ├── model_fp16.onnx_data
             ├── model_q4.onnx        # --precision q4
             ├── model_q4.onnx_data
-            ├── model_q8.onnx        # --precision q8
-            └── model_q8.onnx_data
+            ├── model_q4f16.onnx     # --precision q4f16
+            └── model_q4f16.onnx_data
 
 Usage:
     # Export single model (FP32 only)
@@ -24,12 +24,12 @@ Usage:
     # Export all models
     uv run lfm2-moe-export --sizes all
 
-    # Export with all precisions (fp16, q4, q8)
+    # Export with all precisions (fp16, q4, q4f16)
     uv run lfm2-moe-export --sizes all --precision
 
     # Export with specific precisions
     uv run lfm2-moe-export --sizes 8B-A1B --precision q4
-    uv run lfm2-moe-export --sizes 8B-A1B --precision fp16 q4 q8
+    uv run lfm2-moe-export --sizes 8B-A1B --precision fp16 q4 q4f16
 
     # Convert existing exports (skip FP32 export)
     uv run lfm2-moe-export --sizes all --precision --skip-export
@@ -491,7 +491,7 @@ def main():
         "--precision",
         nargs="*",
         metavar="PRECISION",
-        help="Output precisions: fp16, q4, q4f16, q8, or all (default if no args)",
+        help="Output precisions: fp16, q4, q4f16, or all (default if no args)",
     )
     parser.add_argument(
         "--no-exclude-lm-head",
@@ -540,7 +540,7 @@ def main():
     do_q4f16_conversion = False
     if args.precision is not None:
         if len(args.precision) == 0:
-            quant_bits = [4, 8]
+            quant_bits = [4]
             do_fp16_conversion = True
             do_q4f16_conversion = True
         else:
@@ -550,10 +550,10 @@ def main():
                     do_fp16_conversion = True
                 elif p == "q4f16":
                     do_q4f16_conversion = True
-                elif p in ("q4", "q8"):
-                    quant_bits.append(int(p[1]))
+                elif p == "q4":
+                    quant_bits.append(4)
                 else:
-                    parser.error(f"Invalid precision: {p}. Use fp16, q4, q4f16, or q8.")
+                    parser.error(f"Invalid precision: {p}. Use fp16, q4, or q4f16.")
 
     exclude_lm_head = not args.no_exclude_lm_head
 

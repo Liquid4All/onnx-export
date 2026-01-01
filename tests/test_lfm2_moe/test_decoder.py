@@ -35,7 +35,6 @@ QUANT_CONFIGS = [
     pytest.param("fp16", ["top_k"], id="fp16"),
     pytest.param("q4", ["top_k"], id="q4"),
     pytest.param("q4f16", ["top_k"], id="q4f16"),
-    pytest.param("q8", ["top_k"], id="q8"),
 ]
 
 
