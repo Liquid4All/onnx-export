@@ -49,7 +49,8 @@ INT4_BITS = 4
 INT4_MAX = (1 << INT4_BITS) - 1  # 15, max value for unsigned 4-bit
 DEFAULT_BLOCK_SIZE = 32  # Default block size for INT4 quantization
 SCALE_EPS = 1e-10  # Threshold for clamping small quantization scales
-MASK_VALUE = float(np.finfo(np.float32).min)  # Large negative value for attention masking
+# Use FP32 min for masking in FP32 models (matches community); FP16 conversion will handle FP16 models
+MASK_VALUE = float(np.finfo(np.float32).min)  # -3.4028234663852886e+38
 
 
 @dataclass

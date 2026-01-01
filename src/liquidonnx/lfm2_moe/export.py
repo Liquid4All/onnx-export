@@ -81,18 +81,40 @@ def convert_to_fp16(
     graph = model.graph
 
     # === 1. Convert all float32 initializers to float16 ===
+    # Track renamed constants for node input updates
+    renamed_constants = {}
+    fp16_min = np.finfo(np.float16).min  # -65504.0
+    fp16_max = np.finfo(np.float16).max  # 65504.0
     new_initializers = []
     for init in graph.initializer:
         if init.data_type == TensorProto.FLOAT:
             arr = numpy_helper.to_array(init)
-            arr_fp16 = arr.astype(np.float16)
-            new_init = numpy_helper.from_array(arr_fp16, init.name)
+            # Clamp to FP16 range before conversion to avoid -inf/+inf
+            arr_clamped = np.clip(arr, fp16_min, fp16_max)
+            arr_fp16 = arr_clamped.astype(np.float16)
+            new_name = init.name
+
+            # Rename /model/constants/FLOAT/... to /model/constants/FLOAT16/... with FP16 value
+            if init.name.startswith("/model/constants/FLOAT/"):
+                # Format the FP16 value to match community naming
+                value_str = str(arr_fp16.tolist())
+                new_name = f"/model/constants/FLOAT16/{value_str}"
+                renamed_constants[init.name] = new_name
+
+            new_init = numpy_helper.from_array(arr_fp16, new_name)
             new_initializers.append(new_init)
         else:
             new_initializers.append(init)
 
     del graph.initializer[:]
     graph.initializer.extend(new_initializers)
+
+    # Update node inputs that reference renamed constants
+    if renamed_constants:
+        for node in graph.node:
+            for i, inp in enumerate(node.input):
+                if inp in renamed_constants:
+                    node.input[i] = renamed_constants[inp]
 
     # === 2. Convert KV cache inputs to FP16 (keep int64 inputs) ===
     for inp in graph.input:
@@ -179,6 +201,8 @@ def convert_q4_to_fp16(
     graph = model.graph
 
     # Convert appropriate initializers to FP16
+    fp16_min = np.finfo(np.float16).min  # -65504.0
+    fp16_max = np.finfo(np.float16).max  # 65504.0
     new_initializers = []
     for init in graph.initializer:
         if init.data_type == TensorProto.FLOAT:
@@ -189,7 +213,9 @@ def convert_q4_to_fp16(
             else:
                 # Convert to FP16: LayerNorm, caches, conv weights, expert_bias, constants
                 arr = numpy_helper.to_array(init)
-                arr_fp16 = arr.astype(np.float16)
+                # Clamp to FP16 range before conversion to avoid -inf/+inf
+                arr_clamped = np.clip(arr, fp16_min, fp16_max)
+                arr_fp16 = arr_clamped.astype(np.float16)
                 new_init = numpy_helper.from_array(arr_fp16, name)
                 new_initializers.append(new_init)
         else:
@@ -200,11 +226,14 @@ def convert_q4_to_fp16(
     del graph.initializer[:]
     graph.initializer.extend(new_initializers)
 
-    # Update float constants name (FLOAT -> FLOAT16) to match community
+    # Update float constants name (FLOAT -> FLOAT16) with FP16 value to match community
     for init in graph.initializer:
         if "/model/constants/FLOAT/" in init.name and init.data_type == TensorProto.FLOAT16:
             old_name = init.name
-            new_name = old_name.replace("/model/constants/FLOAT/", "/model/constants/FLOAT16/")
+            # Get the FP16 value and format it to match community naming
+            arr = numpy_helper.to_array(init)
+            value_str = str(arr.tolist())
+            new_name = f"/model/constants/FLOAT16/{value_str}"
             init.name = new_name
             # Update all node references
             for node in graph.node:
