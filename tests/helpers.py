@@ -60,3 +60,17 @@ def get_local_vl_files(onnx_dir: pathlib.Path, use_fp16: bool = False) -> dict[s
         "embed_images": onnx_dir / f"embed_images{suffix}.onnx",
         "decoder": onnx_dir / f"decoder{suffix}.onnx",
     }
+
+
+def get_community_moe_onnx_dir(community_dir: pathlib.Path, size: str) -> pathlib.Path:
+    """Get onnx-community MoE model directory."""
+    return community_dir / f"LFM2-{size}-ONNX" / "onnx"
+
+
+def get_community_moe_onnx_file(onnx_dir: pathlib.Path, precision: str | None) -> pathlib.Path:
+    """Get onnx-community MoE model file."""
+    if precision is None:
+        return onnx_dir / "model.onnx"
+    if precision == "fp16":
+        return onnx_dir / "model_fp16.onnx"
+    return onnx_dir / f"model_{precision}.onnx"

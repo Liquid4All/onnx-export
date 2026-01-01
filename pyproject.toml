@@ -2,16 +2,17 @@
 name = "liquidonnx"
 version = "0.1.0"
 description = "LFM2 ONNX export and inference tools"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 dependencies = [
-    "onnx",           # @latest from git (see [tool.uv.sources])
-    "onnxruntime",
+    "onnx",
+    "onnxruntime>=1.24.0.dev",  # Nightly for QMoE 14-input support
     "transformers>=5.0.0.dev0",
     "numpy>=2.2.0",
     "torch>=2.0.0",
     "pillow",
     "torchvision>=0.24.1",
+    "onnx-ir>=0.1.13",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +30,9 @@ lfm2-bench = "liquidonnx.lfm2.benchmark:main"
 # LFM2-VL vision-language model tools
 lfm2-vl-export = "liquidonnx.lfm2_vl.export:main"
 lfm2-vl-infer = "liquidonnx.lfm2_vl.infer:main"
+
+# LFM2-MoE (Mixture of Experts) model tools
+lfm2-moe-export = "liquidonnx.lfm2_moe.export:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -65,6 +69,13 @@ quote-style = "double"
 
 [tool.uv]
 # For bleeding-edge packages from git
+prerelease = "if-necessary-or-explicit"
+
+[[tool.uv.index]]
+name = "ort-nightly"
+url = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/"
+explicit = true
+
 [tool.uv.sources]
-onnx = { git = "https://github.com/onnx/onnx.git" }
 transformers = { git = "ssh://git@github.com/Liquid4All/transformers_private.git", branch = "lfm2-config" }
+onnxruntime = { index = "ort-nightly" }

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Export LFM2 models to ONNX with optional quantization and FP16 conversion.
+Export LFM2-MoE models to ONNX with optional quantization and FP16 conversion.
 
 Output Structure (Transformers.js compatible):
     exports/
-    └── LFM2-{size}-ONNX/
+    └── LFM2-MoE-{size}-ONNX/
         ├── config.json
         ├── tokenizer.json
         └── onnx/
@@ -19,23 +19,23 @@ Output Structure (Transformers.js compatible):
 
 Usage:
     # Export single model (FP32 only)
-    uv run lfm2-export --sizes 350M
+    uv run lfm2-moe-export --sizes 8B-A1B
 
     # Export all models
-    uv run lfm2-export --sizes all
+    uv run lfm2-moe-export --sizes all
 
     # Export with all precisions (fp16, q4, q8)
-    uv run lfm2-export --sizes all --precision
+    uv run lfm2-moe-export --sizes all --precision
 
     # Export with specific precisions
-    uv run lfm2-export --sizes 350M --precision q4
-    uv run lfm2-export --sizes 350M --precision fp16 q4 q8
+    uv run lfm2-moe-export --sizes 8B-A1B --precision q4
+    uv run lfm2-moe-export --sizes 8B-A1B --precision fp16 q4 q8
 
     # Convert existing exports (skip FP32 export)
-    uv run lfm2-export --sizes all --precision --skip-export
+    uv run lfm2-moe-export --sizes all --precision --skip-export
 
     # Quantize with lm_head included
-    uv run lfm2-export --sizes 350M --precision q4 --no-exclude-lm-head
+    uv run lfm2-moe-export --sizes 8B-A1B --precision q4 --no-exclude-lm-head
 """
 
 import argparse
@@ -46,8 +46,8 @@ import pathlib
 import onnx
 from transformers import AutoConfig, AutoTokenizer
 
-from liquidonnx.lfm2 import MODELS
-from liquidonnx.lfm2.builder import LFM2Builder, LFM2Config
+from liquidonnx.lfm2_moe import MODELS
+from liquidonnx.lfm2_moe.builder import LFM2MoEBuilder, LFM2MoEConfig
 from liquidonnx.quantize import get_model_size, get_total_model_size_mb, quantize_model
 
 logger = logging.getLogger(__name__)
@@ -101,11 +101,18 @@ def convert_to_fp16(
 
 
 def get_output_dir(size: str, output_base: pathlib.Path) -> pathlib.Path:
-    return output_base / "exports" / f"LFM2-{size}-ONNX"
+    return output_base / "exports" / f"LFM2-MoE-{size}-ONNX"
 
 
-def export_model(model_path: str, output_dir: pathlib.Path | str):
-    """Export LFM2 model to ONNX.
+def export_model(
+    model_path: str,
+    output_dir: pathlib.Path | str,
+    integrated_rope: bool = False,
+    use_qmoe: bool = False,
+    qmoe_block_size: int = 32,
+    use_q4: bool = False,
+):
+    """Export LFM2-MoE model to ONNX.
 
     Creates output structure:
         output_dir/
@@ -115,23 +122,43 @@ def export_model(model_path: str, output_dir: pathlib.Path | str):
         ├── generation_config.json
         ├── chat_template.jinja
         └── onnx/
-            ├── model.onnx
+            ├── model.onnx (or model_q4.onnx in Q4 mode)
             └── model.onnx_data
+
+    Args:
+        model_path: HuggingFace model path
+        output_dir: Output directory
+        integrated_rope: Use RoPE integrated in GQA (matches onnx-community style)
+        use_qmoe: Use QMoE operator with INT4 quantized expert weights
+        qmoe_block_size: Block size for QMoE quantization
+        use_q4: Full Q4 quantization matching onnx-community Q4 structure
     """
     output_dir = pathlib.Path(output_dir)
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    lfm2_config = LFM2Config.from_hf_config(config)
+    lfm2_config = LFM2MoEConfig.from_hf_config(config)
 
-    builder = LFM2Builder(lfm2_config)
+    # Always use integrated RoPE to match community structure
+    # Community models use RoPE integrated in GroupQueryAttention (do_rotary=1)
+    effective_integrated_rope = True
+
+    builder = LFM2MoEBuilder(
+        lfm2_config,
+        use_integrated_rope=effective_integrated_rope,
+        use_qmoe=use_qmoe,
+        qmoe_block_size=qmoe_block_size,
+        use_q4=use_q4,
+    )
     model = builder.build(model_path)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     onnx_dir = output_dir / "onnx"
     onnx_dir.mkdir(exist_ok=True)
 
-    output_path = onnx_dir / "model.onnx"
+    # Use model_q4.onnx for Q4 mode to match community naming
+    model_name = "model_q4" if use_q4 else "model"
+    output_path = onnx_dir / f"{model_name}.onnx"
 
-    external_data_path = onnx_dir / "model.onnx_data"
+    external_data_path = onnx_dir / f"{model_name}.onnx_data"
     if external_data_path.exists():
         external_data_path.unlink()
 
@@ -140,7 +167,7 @@ def export_model(model_path: str, output_dir: pathlib.Path | str):
         str(output_path),
         save_as_external_data=True,
         all_tensors_to_one_file=True,
-        location="model.onnx_data",
+        location=f"{model_name}.onnx_data",
     )
 
     logger.info(f"Model saved to {output_path}")
@@ -229,7 +256,7 @@ def do_fp16(onnx_dir: pathlib.Path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Export LFM2 models to ONNX",
+        description="Export LFM2-MoE models to ONNX",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -238,7 +265,7 @@ def main():
         "--sizes",
         nargs="+",
         required=True,
-        help="Model sizes: 350M, 700M, 1.2B, 2.6B, or 'all'",
+        help="Model sizes: 8B-A1B, or 'all'",
     )
 
     parser.add_argument(
@@ -271,6 +298,27 @@ def main():
         default=32,
         help="Block size for quantization (default: 32)",
     )
+    parser.add_argument(
+        "--integrated-rope",
+        action="store_true",
+        help="Use RoPE integrated in GQA (matches onnx-community structure)",
+    )
+    parser.add_argument(
+        "--qmoe",
+        action="store_true",
+        help="Use QMoE operator with INT4 quantized expert weights (matches onnx-community Q4)",
+    )
+    parser.add_argument(
+        "--qmoe-block-size",
+        type=int,
+        default=32,
+        help="Block size for QMoE quantization (default: 32)",
+    )
+    parser.add_argument(
+        "--q4",
+        action="store_true",
+        help="Full Q4 quantization matching onnx-community Q4 structure (includes QMoE)",
+    )
 
     args = parser.parse_args()
 
@@ -301,17 +349,31 @@ def main():
 
     if not args.skip_export:
         logger.info("=" * 60)
-        logger.info("Exporting models (FP32)")
+        if args.q4:
+            precision_label = "Q4 (full INT4 quantization)"
+        elif args.qmoe:
+            precision_label = "QMoE (INT4 experts only)"
+        else:
+            precision_label = "FP32"
+        logger.info(f"Exporting models ({precision_label})")
         logger.info("=" * 60)
 
         for size in sizes:
             output_path = get_output_dir(size, args.output_dir)
             logger.info(f"Exporting {MODELS[size]} to {output_path}...")
             try:
-                export_model(MODELS[size], str(output_path))
+                export_model(
+                    MODELS[size],
+                    str(output_path),
+                    integrated_rope=args.integrated_rope,
+                    use_qmoe=args.qmoe,
+                    qmoe_block_size=args.qmoe_block_size,
+                    use_q4=args.q4,
+                )
                 logger.info(f"  {size}: OK")
             except Exception as e:
                 logger.error(f"  {size}: FAILED - {e}")
+                raise
 
     if do_fp16_conversion:
         logger.info("=" * 60)

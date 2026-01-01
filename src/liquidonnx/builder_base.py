@@ -38,8 +38,10 @@ class ONNXBuilderBase:
         self.inputs: list[onnx.ValueInfoProto] = []
         self.outputs: list[onnx.ValueInfoProto] = []
         self.initializers: list[onnx.TensorProto] = []
+        self._initializer_names: set[str] = set()
         self.weights: dict[str, np.ndarray] = {}
         self._node_count = 0
+        self._constants: dict[tuple, str] = {}  # (value_bytes, dtype) -> name
 
     def _unique_name(self, prefix: str) -> str:
         """Generate unique node name."""
@@ -53,13 +55,52 @@ class ONNXBuilderBase:
             name: Initializer name
             tensor: Weight tensor
             dtype: Override dtype (default: float32 for floats, preserve int types)
+
+        Note: Skips if initializer with same name already exists.
         """
+        if name in self._initializer_names:
+            return
+        self._initializer_names.add(name)
+
         if dtype is None:
             if tensor.dtype not in [np.int32, np.int64]:
                 tensor = tensor.astype(np.float32)
         else:
             tensor = tensor.astype(dtype)
         self.initializers.append(numpy_helper.from_array(tensor, name))
+
+    def get_constant(self, value: int | float | list | np.ndarray, dtype=np.int64) -> str:
+        """Get or create a shared constant initializer.
+
+        Returns the name of a shared constant. If the same value was already
+        added, returns the existing name (deduplication).
+
+        Args:
+            value: Scalar or array value
+            dtype: NumPy dtype (default: int64)
+
+        Returns:
+            Initializer name like "/model/constants/INT64/[2]"
+        """
+        arr = np.asarray(value, dtype=dtype)
+
+        # Create cache key from bytes + dtype + shape
+        key = (arr.tobytes(), str(arr.dtype), arr.shape)
+
+        if key in self._constants:
+            return self._constants[key]
+
+        # Generate name matching community convention
+        dtype_name = str(arr.dtype).upper().replace("FLOAT32", "FLOAT").replace("FLOAT64", "FLOAT")
+        if arr.ndim == 0:
+            value_str = str(arr.item())
+        else:
+            value_str = str(arr.tolist())
+        name = f"/model/constants/{dtype_name}/{value_str}"
+
+        self.add_initializer(name, arr)
+        self._constants[key] = name
+        return name
 
     def make_node(
         self,
@@ -244,16 +285,16 @@ class ONNXBuilderBase:
             Output tensor name
         """
         prefix = f"{output_name}_slice"
-        self.add_initializer(f"{prefix}/neg1", np.array(-1, dtype=np.int64))
-        neg_n = self.make_mul(n_elements, f"{prefix}/neg1", f"{prefix}/neg_n")
+        neg_n = self.make_mul(n_elements, self.get_constant(-1), f"{prefix}/neg_n")
+        start = self.make_unsqueeze(neg_n, self.get_constant([0]), f"{prefix}/start")
 
-        self.add_initializer(f"{prefix}/axes0", np.array([0], dtype=np.int64))
-        start = self.make_unsqueeze(neg_n, f"{prefix}/axes0", f"{prefix}/start")
-
-        self.add_initializer(f"{prefix}/end", SLICE_END.copy())
-        self.add_initializer(f"{prefix}/axis", np.array([axis], dtype=np.int64))
-
-        return self.make_slice(input_name, start, f"{prefix}/end", f"{prefix}/axis", output_name)
+        return self.make_slice(
+            input_name,
+            start,
+            self.get_constant([np.iinfo(np.int64).max]),
+            self.get_constant([axis]),
+            output_name,
+        )
 
     def build_graph(
         self,
