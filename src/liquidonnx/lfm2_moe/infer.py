@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-ONNX inference script for LFM2 text models.
+ONNX inference script for LFM2-MoE models.
 
 Usage:
-    uv run lfm2-infer --model exports/LFM2-1.2B-ONNX
-    uv run lfm2-infer --model exports/LFM2-1.2B-ONNX --prompt "Hello"
-    uv run lfm2-infer --model exports/LFM2-1.2B-ONNX/onnx/model_q4.onnx
+    uv run lfm2-moe-infer --model exports/LFM2-MoE-8B-A1B-ONNX
+    uv run lfm2-moe-infer --model exports/LFM2-MoE-8B-A1B-ONNX --prompt "Hello"
+    uv run lfm2-moe-infer --model exports/LFM2-MoE-8B-A1B-ONNX/onnx/model_q4.onnx
 """
 
 import argparse
@@ -15,7 +15,7 @@ from liquidonnx.session import ONNXTextModel, run_chat_loop
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ONNX inference for LFM2 text models")
+    parser = argparse.ArgumentParser(description="ONNX inference for LFM2-MoE models")
     parser.add_argument("--model", required=True, help="Path to ONNX model directory or file")
     parser.add_argument("--prompt", default=None, help="Initial prompt (optional)")
     parser.add_argument("--max-tokens", type=int, default=100, help="Max tokens to generate")

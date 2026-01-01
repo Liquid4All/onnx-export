@@ -312,9 +312,15 @@ class VLBenchmark:
             image = Image.new("RGB", (384, 384), color="blue")
 
         # Prepare inputs
-        messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.processor(text=text, images=[image], return_tensors="pt", do_image_splitting=False)
+        messages = [
+            {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}
+        ]
+        text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = self.processor(
+            text=text, images=[image], return_tensors="pt", do_image_splitting=False
+        )
         input_ids = inputs["input_ids"].numpy()
 
         # Warmup

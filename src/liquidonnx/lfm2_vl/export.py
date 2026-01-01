@@ -611,7 +611,9 @@ def main():
             if s not in MODELS:
                 parser.error(f"Unknown size: {s}. Available: {', '.join(MODELS.keys())}")
         for size in sizes:
-            exports.append((MODELS[size], get_output_dir(size, args.output_dir, args.vision_format)))
+            exports.append(
+                (MODELS[size], get_output_dir(size, args.output_dir, args.vision_format))
+            )
 
     # Export
     if not args.skip_export:
