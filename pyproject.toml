@@ -16,6 +16,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gpu = [
+    "onnxruntime-gpu>=1.24.0.dev",  # CUDA support (replaces onnxruntime)
+]
 dev = [
     "pytest",
     "ruff",
@@ -79,3 +82,4 @@ explicit = true
 [tool.uv.sources]
 transformers = { git = "ssh://git@github.com/Liquid4All/transformers_private.git", branch = "lfm2-config" }
 onnxruntime = { index = "ort-nightly" }
+onnxruntime-gpu = { index = "ort-nightly" }

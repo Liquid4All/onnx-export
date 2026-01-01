@@ -62,7 +62,7 @@ def test_decoder(
     try:
         onnx_sess = load_onnx_session(onnx_file)
     except Exception as e:
-        pytest.skip(f"ONNX model failed to load: {e}")
+        pytest.skip(f"ONNX model failed to load (may need CUDA for {precision}): {e}")
 
     input_ids = tokenizer.encode(prompt, return_tensors="pt")
     seq_len = input_ids.shape[1]

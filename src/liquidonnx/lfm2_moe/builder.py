@@ -966,15 +966,11 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         )
 
         # === Router subgraph ===
-        # router_logits = normed @ gate.weight
         router_logits = self.make_matmul(
             normed, f"{prefix}.moe.router.MatMul.weight", f"{prefix}/moe/router/MatMul/output_0"
         )
-
-        # routing_weights = sigmoid(router_logits)
         routing_weights = self.make_sigmoid(router_logits, f"{prefix}/moe/router/Sigmoid/output_0")
 
-        # scores_for_routing = routing_weights + expert_bias
         if self.config.use_expert_bias:
             scores_for_routing = self.make_add(
                 routing_weights, f"{prefix}.moe.expert_bias", f"{prefix}/moe/router/Add/output_0"
@@ -982,30 +978,25 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         else:
             scores_for_routing = routing_weights
 
-        # TopK to select top-k experts
         self.add_initializer(f"/model/constants/INT64/[{k}]", np.array([k], dtype=np.int64))
         self.make_node(
             "TopK",
             [scores_for_routing, f"/model/constants/INT64/[{k}]"],
             [f"{prefix}/moe/router/TopK/output_0", f"{prefix}/moe/router/TopK/output_1"],
         )
-
-        # Gather actual routing weights at selected indices
         self.make_node(
             "GatherElements",
             [routing_weights, f"{prefix}/moe/router/TopK/output_1"],
             [f"{prefix}/moe/router/Gather/output_0"],
             axis=-1,
         )
-
-        # Log of gathered weights
         self.make_node(
             "Log",
             [f"{prefix}/moe/router/Gather/output_0"],
             [f"{prefix}/moe/router/Log/output_0"],
         )
 
-        # Create negative infinity matrix for scatter
+        # Negative infinity matrix for scatter (masks non-selected experts)
         mask_const_name = f"/model/constants/FLOAT/[{MASK_VALUE}]"
         self.add_initializer(mask_const_name, np.array([MASK_VALUE], dtype=np.float32))
         self.make_node(
@@ -1018,8 +1009,6 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             [mask_const_name, f"{prefix}/moe/router/Shape/output_0"],
             [f"{prefix}/moe/router/Expand/output_0"],
         )
-
-        # Scatter log weights into matrix
         self.make_node(
             "ScatterElements",
             [
@@ -1031,7 +1020,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             axis=-1,
         )
 
-        # Reshape to [-1, num_experts]
+        # Reshape to [batch * seq_len, num_experts] for MoE operator
         self.add_initializer(
             f"/model/constants/INT64/[-1, {num_experts}]",
             np.array([-1, num_experts], dtype=np.int64),
@@ -1046,7 +1035,6 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         )
 
         # === MoE operator ===
-        # Inputs: hidden_state, router_probs, gate_up_proj, gate_up_proj_bias, down_proj, down_proj_bias, fc1_experts_bias, fc2_experts_bias
         moe_out = self.make_node(
             "MoE",
             [
@@ -1184,8 +1172,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             [f"{prefix}/moe/router/Reshape/output_0"],
         )
 
-        # === QMoE operator with 14 inputs ===
-        # Use underscore naming for MoE weights (community convention)
+        # === QMoE operator ===
         prefix_underscore = prefix.replace(".", "_")
         qmoe_out = self.make_node(
             "QMoE",

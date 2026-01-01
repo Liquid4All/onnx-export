@@ -200,24 +200,19 @@ def convert_q4_to_fp16(
 
     graph = model.graph
 
-    # Convert appropriate initializers to FP16
+    # Convert all float32 initializers to FP16 (including scales for MatMulNBits type consistency)
     fp16_min = np.finfo(np.float16).min  # -65504.0
     fp16_max = np.finfo(np.float16).max  # 65504.0
     new_initializers = []
     for init in graph.initializer:
         if init.data_type == TensorProto.FLOAT:
             name = init.name
-            # Keep scales as FP32 (needed for quantization precision)
-            if "_scales" in name:
-                new_initializers.append(init)
-            else:
-                # Convert to FP16: LayerNorm, caches, conv weights, expert_bias, constants
-                arr = numpy_helper.to_array(init)
-                # Clamp to FP16 range before conversion to avoid -inf/+inf
-                arr_clamped = np.clip(arr, fp16_min, fp16_max)
-                arr_fp16 = arr_clamped.astype(np.float16)
-                new_init = numpy_helper.from_array(arr_fp16, name)
-                new_initializers.append(new_init)
+            arr = numpy_helper.to_array(init)
+            # Clamp to FP16 range before conversion to avoid -inf/+inf
+            arr_clamped = np.clip(arr, fp16_min, fp16_max)
+            arr_fp16 = arr_clamped.astype(np.float16)
+            new_init = numpy_helper.from_array(arr_fp16, name)
+            new_initializers.append(new_init)
         else:
             # Keep int64, uint8 as-is
             new_initializers.append(init)
@@ -602,6 +597,7 @@ def main():
                 logger.info(f"  {size}: OK")
             except Exception as e:
                 logger.error(f"  {size}: FAILED - {e}")
+                raise
 
     for bits in quant_bits:
         logger.info("=" * 60)
@@ -615,6 +611,7 @@ def main():
                 logger.info(f"  {size}: OK")
             except Exception as e:
                 logger.error(f"  {size}: FAILED - {e}")
+                raise
 
     if do_q4f16_conversion:
         logger.info("=" * 60)
@@ -628,6 +625,7 @@ def main():
                 logger.info(f"  {size}: OK")
             except Exception as e:
                 logger.error(f"  {size}: FAILED - {e}")
+                raise
 
     logger.info("=" * 60)
     logger.info("Output summary")

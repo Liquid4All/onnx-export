@@ -313,6 +313,9 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
+gpu = [
+    { name = "onnxruntime-gpu" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -320,6 +323,7 @@ requires-dist = [
     { name = "onnx" },
     { name = "onnx-ir", specifier = ">=0.1.13" },
     { name = "onnxruntime", specifier = ">=1.24.0.dev0", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/" },
+    { name = "onnxruntime-gpu", marker = "extra == 'gpu'", specifier = ">=1.24.0.dev0", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/" },
     { name = "pillow" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
@@ -327,7 +331,7 @@ requires-dist = [
     { name = "torchvision", specifier = ">=0.24.1" },
     { name = "transformers", git = "ssh://git@github.com/Liquid4All/transformers_private.git?branch=lfm2-config" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["gpu", "dev"]
 
 [[package]]
 name = "markupsafe"
@@ -723,7 +727,7 @@ wheels = [
 
 [[package]]
 name = "onnxruntime"
-version = "1.24.0.dev20251230002"
+version = "1.24.0.dev20251231004"
 source = { registry = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/" }
 dependencies = [
     { name = "coloredlogs" },
@@ -734,24 +738,49 @@ dependencies = [
     { name = "sympy" },
 ]
 wheels = [
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:b589e1a04e03d7062d89de44af060221f9c9875c08c6004b9eb3b9ed90f965bc" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:656f4a650d48b2c26c8ecbe9e5e395f2d0eb32087b4dc7356ce8fd75aa94036a" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e076f3abe3f416553943408a59cab7bc5af8d8f44584de6fac9937b83ad22c98" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp311-cp311-win_amd64.whl", hash = "sha256:4443b04414a9310ff8e91816d52389da14a58d3ddc8972cd93934ab546cd69a3" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:782cc9c2e10f708f2e8d236e5e638774918db38899431f19155704b932545c4c" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:5524237dad2e1e8edc96f4fe4da092812a22e8e9714d63944cd7e197e361a0b8" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:c092ccc1efea99929d95b453d433ac0ae6679af5a8162b997a0303b760dc7bf6" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp312-cp312-win_amd64.whl", hash = "sha256:b38a0b39ccd0ec24b34b5c904eb0d5e3726632514494f7504a72ffc1e297b6c8" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:235bcd373a1ddfaa7119f92cd4567255c778c9c5c605e71f194754f78caf9258" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:286438d3fba0b5617abe3c6643079b415941f9f21b4f677c9e0d5adf0a759651" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp313-cp313-win_amd64.whl", hash = "sha256:3c5fa476ce0a3c015c6cb4673a152b87fff48c593e90f5c62e0bf028d626cafb" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp313-cp313t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a84d49e796ff1b48484740d12df4202309d12a25b22adfbe470cf6c5cb23bbd8" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp313-cp313t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f6f19f99aedc1fc2360b7fa448cfd370b221c5005f545301037316e31b3f22fa" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:638c959db130cec716328347d66b03e7e16831adbc7cc7507406d4322041cdc5" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:77535d1e5ecaf49bbf7858ace976e543d04054ac1764a9f27f21e739d220c019" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp314-cp314-win_amd64.whl", hash = "sha256:3370ff9f6ab2f00a21b528bf8a00433570e11d63a0283445d6f12862719914ba" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:60e375232f65b782f8cbd2dcc200d87d53e9b56f403524fedb9cef80fb6a5f4c" },
-    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251230002/onnxruntime-1.24.0.dev20251230002-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9662804a50b8e3ad99cb1a165d7aca6e5e8e50799d1cf54f0a7a084080e63e08" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:57607bb17617f726748219830576c9b7c84520c2aa62f8532e227134f8bef2ce" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:5a3023843787441c0b9a91b7b523e9ea91ba41913c5a7f0e4e14a0c9655d11dd" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1f84c6379dc07c74253bfc38719f3e5967b58e89434a635635b628f53add7103" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp311-cp311-win_amd64.whl", hash = "sha256:33ff84fec7e1ebb2dadff70571c906d4a437aa0f8108bf3252312abc6144fd18" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:402f3a137c01e200c123a118e82837b452a71b082302ebb3cf9eab34aa97ae84" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:2628c958c6dc7a5513c07594297482e087fd6c25256dfe1fd0a08653cbea09b1" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a53d561672fb8a9bfcc6695c1f0c1de418037509d4c5113f94691e9cda5d0ee7" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp312-cp312-win_amd64.whl", hash = "sha256:7755bdab36645980a5597b4409801d8d93f17ff70715452ba6fe11c1ff173978" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:d5e228bdb9d88e91dd1f7799436510195667df50dbf48b47ad3ce10383f3337d" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d22ab2de67d883e0592e09e5a243b348a14ac05d9237a951ae5358f833dc9eec" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp313-cp313-win_amd64.whl", hash = "sha256:ba9936c866f4b6688e2a49421461f54f8a7b61dc24b5c497adf156d9c88c8bee" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp313-cp313t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:b4120af48f910039a3b668982c9eb3c8b969d4e17c3b4fa183d040598fada619" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp313-cp313t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e404096d48581cd23ed30e58212c62d13d18a9aa5145fb450c848886f3b15670" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:5203539e46dbc225d3c6012336ec6baf6b5a0fc96e71dba914941790fa211c05" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:632b33df9880531159615cc9155cd89698b08d2e33659fa6a0641e0502b6538d" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp314-cp314-win_amd64.whl", hash = "sha256:abe15cd42d4c02ec3159c0d1344a0e86c828c941ce550976dda7d7d0dfbfd419" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:532c08b74405c419f5aea2adbb392621b0479b2d10751e8f0fb4bcb2c5673cd2" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime/1.24.dev20251231004/onnxruntime-1.24.0.dev20251231004-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8683fc40068225a89d830b1a6750624f53c82cee07a283332dea4be7a1e21eb7" },
+]
+
+[[package]]
+name = "onnxruntime-gpu"
+version = "1.24.0.dev20251127001"
+source = { registry = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/" }
+dependencies = [
+    { name = "coloredlogs" },
+    { name = "flatbuffers" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "protobuf" },
+    { name = "sympy" },
+]
+wheels = [
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.24.dev20251127001/onnxruntime_gpu-1.24.0.dev20251127001-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8ef453af44ef3b7f8035fc9683512e0b5415e2395ce584cd4bd2f81bb528fa5b" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.24.dev20251127001/onnxruntime_gpu-1.24.0.dev20251127001-cp311-cp311-win_amd64.whl", hash = "sha256:bf43cf0a72edfbceb1a5b02fccf82689ef15284710c29aa64e470f504fa69214" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.24.dev20251127001/onnxruntime_gpu-1.24.0.dev20251127001-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:67fa8dc964037bbf6acd8e1fff4b902d7165719c5862f69224be0fc35f34f89a" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.24.dev20251127001/onnxruntime_gpu-1.24.0.dev20251127001-cp312-cp312-win_amd64.whl", hash = "sha256:2fbd84c26a352ebab5621daa7681fb58c64d48b1b079a7e8e1bc2c4693b72584" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.24.dev20251127001/onnxruntime_gpu-1.24.0.dev20251127001-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:99e30ad7114fc94e74a50d06c700add311074eca8008274822c8d55cdfea6743" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.24.dev20251127001/onnxruntime_gpu-1.24.0.dev20251127001-cp313-cp313-win_amd64.whl", hash = "sha256:28b338a7a5090bcc202ad3337d9df7a362aa7599cee116bc1adf79cbb4ffa16f" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.24.dev20251127001/onnxruntime_gpu-1.24.0.dev20251127001-cp313-cp313t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:c79b99c4ba902178a930b2c27693d548b81172d7a68a664fed7aec534a2ca6cd" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.24.dev20251127001/onnxruntime_gpu-1.24.0.dev20251127001-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:0872f47e747ef5d3c6d01a3285d56d2db92382fbc0e280098b3186949dfab998" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.24.dev20251127001/onnxruntime_gpu-1.24.0.dev20251127001-cp314-cp314-win_amd64.whl", hash = "sha256:74c479dcf24617d2063d8344d9713a6bd045b7ec1016ec3b00e92d4b798ca627" },
+    { url = "https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/7982ae20-ed19-4a35-a362-a96ac99897b7/pypi/download/onnxruntime-gpu/1.24.dev20251127001/onnxruntime_gpu-1.24.0.dev20251127001-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e7442af3541a5463961f9949e205ab1860a42432cd3b08efb3d657c0ea789ef4" },
 ]
 
 [[package]]
