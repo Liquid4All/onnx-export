@@ -17,7 +17,7 @@ jobs:
       - uses: actions/create-github-app-token@v2
         id: app-token
         with:
-          app-id: ${{ vars.AUTH_APP_ID }}
+          app-id: ${{ secrets.AUTH_APP_ID }}
           private-key: ${{ secrets.AUTH_APP_SECRET_KEY }}
           owner: ${{ github.repository_owner }}
       - uses: actions/checkout@v5
