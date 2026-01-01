@@ -29,17 +29,8 @@ jobs:
           lfs: true
           fetch-depth: 0
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync
-
-      - name: Check formatting
-        run: uv run ruff format --check src tests
-
-      - name: Lint
-        run: uv run ruff check src tests
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      - run: uv sync
+      - run: uv run ruff format --check src tests
+      - run: uv run ruff check src tests
