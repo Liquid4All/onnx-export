@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-ONNX inference script for LFM2 text models.
+ONNX inference script for LFM2-MoE models.
 
 Usage:
-    uv run lfm2-infer --model exports/LFM2-1.2B-ONNX
-    uv run lfm2-infer --model exports/LFM2-1.2B-ONNX --prompt "Hello"
+    uv run lfm2-moe-infer --model exports/LFM2-MoE-8B-A1B-ONNX
+    uv run lfm2-moe-infer --model exports/LFM2-MoE-8B-A1B-ONNX --prompt "Hello"
 """
 
 import argparse
@@ -20,13 +20,8 @@ from liquidonnx.session import initialize_cache, update_cache
 logger = logging.getLogger(__name__)
 
 
-def get_onnx_dir(exports_dir: pathlib.Path, size: str) -> pathlib.Path:
-    """Get ONNX directory for a model size."""
-    return exports_dir / f"LFM2-{size}-ONNX" / "onnx"
-
-
-class TextModelInference:
-    """ONNX inference for LFM2 text models."""
+class MoEModelInference:
+    """ONNX inference for LFM2-MoE models."""
 
     def __init__(self, model_path: str):
         self.model_path = pathlib.Path(model_path)
@@ -44,14 +39,14 @@ class TextModelInference:
             tokenizer_path = self.model_path.parent.parent
         else:
             tokenizer_path = self.model_path
-            onnx_path = self.model_path / "onnx" / "decoder.onnx"
-            if not onnx_path.exists():
-                onnx_path = self.model_path / "onnx" / "model.onnx"
+            onnx_path = self.model_path / "onnx" / "model.onnx"
 
         if not onnx_path.exists():
             raise FileNotFoundError(f"ONNX file not found: {onnx_path}")
 
-        self.tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path), trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            str(tokenizer_path), trust_remote_code=True
+        )
 
         logger.info(f"Loading ONNX from {onnx_path}...")
         self.session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
@@ -77,7 +72,6 @@ class TextModelInference:
         output_infos = self.session.get_outputs()
 
         seq_len = input_ids.shape[1]
-        position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
 
         generated_tokens = []
         cur_len = seq_len
@@ -85,16 +79,12 @@ class TextModelInference:
         for step in range(max_new_tokens):
             if step == 0:
                 ids = input_ids
-                pos = position_ids
             else:
                 ids = np.array([[generated_tokens[-1]]], dtype=np.int64)
-                pos = np.array([[cur_len - 1]], dtype=np.int64)
 
             attn_mask = np.ones((1, cur_len), dtype=np.int64)
 
             feed = {"input_ids": ids, "attention_mask": attn_mask}
-            if "position_ids" in self.input_names:
-                feed["position_ids"] = pos
             feed.update(cache)
 
             outputs = self.session.run(None, feed)
@@ -120,7 +110,7 @@ class TextModelInference:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ONNX inference for LFM2 text models")
+    parser = argparse.ArgumentParser(description="ONNX inference for LFM2-MoE models")
     parser.add_argument("--model", required=True, help="Path to ONNX model directory")
     parser.add_argument("--prompt", default=None, help="Initial prompt (optional)")
     parser.add_argument("--max-tokens", type=int, default=100, help="Max tokens to generate")
@@ -129,11 +119,11 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
-    model = TextModelInference(args.model)
+    model = MoEModelInference(args.model)
     model.load()
 
     print("\n" + "=" * 50)
-    print("LFM2 Text Model - ONNX Inference")
+    print("LFM2-MoE Model - ONNX Inference")
     print("Type 'quit' or 'exit' to stop")
     print("=" * 50 + "\n")
 

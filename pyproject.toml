@@ -36,6 +36,7 @@ lfm2-vl-infer = "liquidonnx.lfm2_vl.infer:main"
 
 # LFM2-MoE (Mixture of Experts) model tools
 lfm2-moe-export = "liquidonnx.lfm2_moe.export:main"
+lfm2-moe-infer = "liquidonnx.lfm2_moe.infer:main"
 
 [build-system]
 requires = ["hatchling"]
