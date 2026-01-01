@@ -139,3 +139,149 @@ def update_cache(cache: dict, outputs: list, output_infos: list) -> None:
             continue
         if cache_name in cache:
             cache[cache_name] = outputs[i]
+
+
+class ONNXTextModel:
+    """Shared ONNX inference for LFM2 text models (dense and MoE)."""
+
+    def __init__(self, model_path: str):
+        self.model_path = pathlib.Path(model_path)
+        self.tokenizer = None
+        self.session = None
+        self.input_names = set()
+
+    def load(self):
+        """Load tokenizer and ONNX model."""
+        from transformers import AutoTokenizer
+
+        logger.info(f"Loading model from {self.model_path}...")
+
+        # Handle both directory and direct ONNX file paths
+        if self.model_path.suffix == ".onnx":
+            onnx_path = self.model_path
+            tokenizer_path = self.model_path.parent.parent
+        else:
+            tokenizer_path = self.model_path
+            # Try decoder.onnx first (LFM2), then model.onnx
+            onnx_path = self.model_path / "onnx" / "decoder.onnx"
+            if not onnx_path.exists():
+                onnx_path = self.model_path / "onnx" / "model.onnx"
+
+        if not onnx_path.exists():
+            raise FileNotFoundError(f"ONNX file not found: {onnx_path}")
+
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            str(tokenizer_path), trust_remote_code=True
+        )
+
+        logger.info(f"Loading ONNX from {onnx_path}...")
+        self.session = load_onnx_session(onnx_path)
+
+        self.input_names = {inp.name for inp in self.session.get_inputs()}
+        logger.info(f"Model loaded. Inputs: {len(self.input_names)} tensors")
+
+    def generate(
+        self,
+        messages: list,
+        max_new_tokens: int = 100,
+        stream: bool = True,
+    ) -> str:
+        """Generate response for chat messages."""
+        prompt = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        input_ids = np.array(
+            [self.tokenizer.encode(prompt, add_special_tokens=False)], dtype=np.int64
+        )
+
+        cache = initialize_cache(self.session)
+        output_infos = self.session.get_outputs()
+
+        seq_len = input_ids.shape[1]
+        position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
+
+        generated_tokens = []
+        cur_len = seq_len
+
+        for step in range(max_new_tokens):
+            if step == 0:
+                ids = input_ids
+                pos = position_ids
+            else:
+                ids = np.array([[generated_tokens[-1]]], dtype=np.int64)
+                pos = np.array([[cur_len - 1]], dtype=np.int64)
+
+            attn_mask = np.ones((1, cur_len), dtype=np.int64)
+
+            feed = {"input_ids": ids, "attention_mask": attn_mask}
+            if "position_ids" in self.input_names:
+                feed["position_ids"] = pos
+            feed.update(cache)
+
+            outputs = self.session.run(None, feed)
+            logits = outputs[0][0, -1]
+
+            next_token = int(np.argmax(logits))
+            generated_tokens.append(next_token)
+
+            update_cache(cache, outputs, output_infos)
+            cur_len += 1
+
+            if stream:
+                token_str = self.tokenizer.decode([next_token])
+                print(token_str, end="", flush=True)
+
+            if next_token == self.tokenizer.eos_token_id:
+                break
+
+        if stream:
+            print()
+
+        return self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+
+
+def run_chat_loop(model: ONNXTextModel, args) -> None:
+    """Run interactive chat loop."""
+    print("\n" + "=" * 50)
+    print("LFM2 Model - ONNX Inference")
+    print("Type 'quit' or 'exit' to stop")
+    print("=" * 50 + "\n")
+
+    messages = []
+
+    if args.prompt:
+        messages.append({"role": "user", "content": args.prompt})
+        print(f"User: {args.prompt}")
+        print("Assistant: ", end="")
+        response = model.generate(
+            messages, max_new_tokens=args.max_tokens, stream=not args.no_stream
+        )
+        messages.append({"role": "assistant", "content": response})
+        if args.no_stream:
+            print(response)
+
+    while True:
+        try:
+            user_input = input("\nUser: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye!")
+            break
+
+        if not user_input:
+            continue
+        if user_input.lower() in ["quit", "exit"]:
+            print("Goodbye!")
+            break
+        if user_input.lower() == "clear":
+            messages = []
+            print("Chat history cleared.")
+            continue
+
+        messages.append({"role": "user", "content": user_input})
+        print("Assistant: ", end="")
+        response = model.generate(
+            messages, max_new_tokens=args.max_tokens, stream=not args.no_stream
+        )
+        messages.append({"role": "assistant", "content": response})
+        if args.no_stream:
+            print(response)
