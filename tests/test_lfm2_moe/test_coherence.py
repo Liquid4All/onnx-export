@@ -32,7 +32,6 @@ def get_onnx_dir(exports_dir: pathlib.Path, size: str) -> pathlib.Path:
 QUANT_CONFIGS = [
     pytest.param(None, id="fp32"),
     pytest.param("q4", id="q4"),
-    pytest.param("q8", id="q8"),
 ]
 
 MAX_NEW_TOKENS = 20

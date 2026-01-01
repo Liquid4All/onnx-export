@@ -312,9 +312,15 @@ class VLBenchmark:
             image = Image.new("RGB", (384, 384), color="blue")
 
         # Prepare inputs
-        messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.processor(text=text, images=[image], return_tensors="pt", do_image_splitting=False)
+        messages = [
+            {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}
+        ]
+        text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = self.processor(
+            text=text, images=[image], return_tensors="pt", do_image_splitting=False
+        )
         input_ids = inputs["input_ids"].numpy()
 
         # Warmup
@@ -409,12 +415,12 @@ def print_result(result: BenchmarkResult):
     print(f"Load time: {result.load_time_s:.2f}s")
 
     if result.node_counts:
-        print(f"\nNode counts:")
+        print("\nNode counts:")
         for name, count in result.node_counts.items():
             print(f"  {name}: {count}")
         print(f"  Total: {sum(result.node_counts.values())}")
 
-    print(f"\nPerformance:")
+    print("\nPerformance:")
     print(f"  Vision encoder: {result.vision_encoder_ms:.1f} ms")
     print(f"  Decoder prefill: {result.prefill_ms:.1f} ms")
     print(f"  Generation: {result.tokens_per_second:.1f} tok/s")
@@ -422,7 +428,7 @@ def print_result(result: BenchmarkResult):
 
     if result.component_timing:
         ct = result.component_timing
-        print(f"\nComponent breakdown:")
+        print("\nComponent breakdown:")
         print(f"  embed_tokens: {ct.embed_tokens_ms:.2f} ms")
         print(f"  embed_images: {ct.embed_images_ms:.1f} ms")
         print(f"  decoder prefill (100 tok): {ct.decoder_prefill_ms:.1f} ms")
