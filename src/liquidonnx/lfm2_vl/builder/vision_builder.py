@@ -381,21 +381,23 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             tile_repeats = self.make_node(
                 "Concat", [batch_unsq, "pos_emb/ones_2d"], ["pos_emb/tile_repeats"], axis=0
             )
-            pos_emb_tiled = self.make_node(
-                "Tile", [pos_emb_final, tile_repeats], ["pos_emb/tiled"]
-            )
+            pos_emb_tiled = self.make_node("Tile", [pos_emb_final, tile_repeats], ["pos_emb/tiled"])
         else:
-            # Tiled mode: use Resize interpolation (simpler, equivalent results)
-            # Extract max spatial dimensions from spatial_shapes input
+            # === Position embedding interpolation (tiled mode) ===
+            # Strategy: Size position embeddings for the largest image in the batch,
+            # then filter/slice for each image. This trades memory (unused positions
+            # for smaller images) for simplicity (single Resize op instead of per-image).
+            # The Compress operator later removes padding tokens, so extra positions
+            # don't affect the final output.
             self.add_initializer("pos_emb/reduce_axis", np.array([0], dtype=np.int64))
             self.add_initializer("pos_emb/idx_0", np.array(0, dtype=np.int64))
             self.add_initializer("pos_emb/idx_1", np.array(1, dtype=np.int64))
 
-            # ReduceMax across batch dimension: [B, 2] → [2]
+            # ReduceMax across batch: [B, 2] → [2] to get max(H), max(W)
             max_spatial = self.make_node(
                 "ReduceMax",
                 ["spatial_shapes", "pos_emb/reduce_axis"],
-                ["pos_emb/max_spatial"],
+                ["pos_emb/max_spatial"],  # [2] = [max_H, max_W]
                 keepdims=0,
             )
 
@@ -957,64 +959,72 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             # This allows different-sized images in the same batch
             # Output: [total_valid_tokens, hidden] instead of [B, N/4, hidden]
 
-            # Downsample attention mask to match projector output (N → N/4)
+            # === Downsample attention mask to match projector output (N → N/4) ===
             # n_merge=2 means 2x2 spatial reduction = 4x token reduction
             # Reshape mask [B, N] → [B, H, W] → [B, H/2, 2, W/2, 2]
-            # Use ReduceMin to merge 2x2 (valid only if all 4 patches are valid)
+            # Use ReduceMin (AND logic): merged token is valid only if ALL 4 input
+            # patches are valid. This prevents garbage from padding patches from
+            # corrupting the merged representation. ReduceMax (OR logic) would allow
+            # partially-padded tokens which degrades output quality.
             ds = self.downsample
 
-            # Reshape pixel_attention_mask [B, N] → [B, H, W]
+            # Build target shape [B, H, W] for mask reshape
             mask_shape_4d = self.make_node(
                 "Concat",
                 [
                     self.make_node(
                         "Unsqueeze", [batch_size, "proj/axes_0"], ["compress/batch_unsq"]
-                    ),
+                    ),  # [1] ← B
                     self.make_node(
                         "Unsqueeze", [spatial_h, "proj/axes_0"], ["compress/spatial_h_unsq"]
-                    ),
+                    ),  # [1] ← H
                     self.make_node(
                         "Unsqueeze", [spatial_w, "proj/axes_0"], ["compress/spatial_w_unsq"]
-                    ),
+                    ),  # [1] ← W
                 ],
-                ["compress/mask_shape_4d"],
+                ["compress/mask_shape_4d"],  # [3] = [B, H, W]
                 axis=0,
             )
 
-            # Slice mask to actual patches first (same as embeddings)
+            # Slice and reshape mask: [B, N] → [B, H*W] → [B, H, W]
             mask_sliced = self.make_node(
                 "Slice",
                 ["pixel_attention_mask", "proj/slice_start", actual_unsq, "proj/slice_axes"],
-                ["compress/mask_sliced"],
+                ["compress/mask_sliced"],  # [B, H*W]
             )
-            mask_3d = self.make_node("Reshape", [mask_sliced, mask_shape_4d], ["compress/mask_3d"])
+            mask_3d = self.make_node(
+                "Reshape", [mask_sliced, mask_shape_4d], ["compress/mask_3d"]
+            )  # [B, H, W]
 
-            # Reshape [B, H, W] → [B, H/2, 2, W/2, 2] for 2x2 pooling
+            # Build 5D pool shape: [B, H/2, 2, W/2, 2] for 2x2 grouping
             self.add_initializer("compress/two", np.array([2], dtype=np.int64))
             pool_shape = self.make_node(
                 "Concat",
                 [
-                    self.make_node("Unsqueeze", [batch_size, "proj/axes_0"], ["compress/b_pool"]),
+                    self.make_node(
+                        "Unsqueeze", [batch_size, "proj/axes_0"], ["compress/b_pool"]
+                    ),  # [1] ← B
                     self.make_node(
                         "Unsqueeze", [half_spatial_h_name, "proj/axes_0"], ["compress/h_half"]
-                    ),
-                    "compress/two",
+                    ),  # [1] ← H/2
+                    "compress/two",  # [1] ← 2
                     self.make_node(
                         "Unsqueeze", [half_spatial_w_name, "proj/axes_0"], ["compress/w_half"]
-                    ),
-                    "compress/two",
+                    ),  # [1] ← W/2
+                    "compress/two",  # [1] ← 2
                 ],
-                ["compress/pool_shape"],
+                ["compress/pool_shape"],  # [5] = [B, H/2, 2, W/2, 2]
                 axis=0,
             )
+            # [B, H, W] → [B, H/2, 2, W/2, 2]
             mask_5d = self.make_node("Reshape", [mask_3d, pool_shape], ["compress/mask_5d"])
 
-            # ReduceMin over the 2x2 regions (axes 2, 4) - valid only if all 4 are valid
+            # ReduceMin over 2x2 groups (axes 2, 4): [B, H/2, 2, W/2, 2] → [B, H/2, W/2]
             self.add_initializer("compress/reduce_axes", np.array([2, 4], dtype=np.int64))
             mask_pooled = self.make_node(
                 "ReduceMin",
                 [mask_5d, "compress/reduce_axes"],
-                ["compress/mask_pooled"],
+                ["compress/mask_pooled"],  # [B, H/2, W/2]
                 keepdims=0,
             )
 
