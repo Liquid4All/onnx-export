@@ -31,6 +31,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v4
       - run: uv python install 3.12
+      - run: git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "ssh://git@github.com/"
       - run: uv sync
       - run: uv run ruff format --check src tests
       - run: uv run ruff check src tests
