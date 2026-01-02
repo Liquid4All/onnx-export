@@ -134,13 +134,17 @@ def run_local_onnx_vl(embed_tokens_sess, embed_images_sess, decoder_sess, proces
     # Run decoder
     seq_len = inputs_embeds.shape[1]
     attention_mask = np.ones((1, seq_len), dtype=np.int64)
-    position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
 
     decoder_inputs = {
         "inputs_embeds": inputs_embeds,
         "attention_mask": attention_mask,
-        "position_ids": position_ids,
     }
+
+    # Only add position_ids if decoder expects it (not needed with integrated RoPE)
+    input_names = {inp.name for inp in decoder_sess.get_inputs()}
+    if "position_ids" in input_names:
+        position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
+        decoder_inputs["position_ids"] = position_ids
 
     # Initialize KV cache
     cache = initialize_cache(decoder_sess)
@@ -275,13 +279,17 @@ def run_local_onnx_vl_multi(
     # Run decoder
     seq_len = inputs_embeds.shape[1]
     attention_mask = np.ones((1, seq_len), dtype=np.int64)
-    position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
 
     decoder_inputs = {
         "inputs_embeds": inputs_embeds,
         "attention_mask": attention_mask,
-        "position_ids": position_ids,
     }
+
+    # Only add position_ids if decoder expects it (not needed with integrated RoPE)
+    input_names = {inp.name for inp in decoder_sess.get_inputs()}
+    if "position_ids" in input_names:
+        position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
+        decoder_inputs["position_ids"] = position_ids
 
     cache = initialize_cache(decoder_sess)
     decoder_inputs.update(cache)

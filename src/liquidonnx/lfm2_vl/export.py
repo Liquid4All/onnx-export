@@ -157,7 +157,6 @@ def export_vl_model(
     model_path: str,
     output_dir: pathlib.Path | str,
     vision_input_format: str = VISION_MODE_TILED,
-    use_integrated_rope: bool = False,
 ):
     """Export LFM2-VL model to ONNX (embed_tokens + embed_images + decoder).
 
@@ -165,7 +164,6 @@ def export_vl_model(
         model_path: HuggingFace model path
         output_dir: Output directory for ONNX files
         vision_input_format: "tiled" for [B, N, 768] or "conv2d" for [B, 3, H, W]
-        use_integrated_rope: Use RoPE integrated in GroupQueryAttention (better precision)
     """
     import torch
     from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
@@ -238,10 +236,8 @@ def export_vl_model(
 
     # === 3. Export decoder ===
     logger.info("Exporting decoder (with inputs_embeds input)...")
-    if use_integrated_rope:
-        logger.info("Using integrated RoPE in GroupQueryAttention")
 
-    text_builder = LFM2Builder(vl_config.text_config, use_integrated_rope=use_integrated_rope)
+    text_builder = LFM2Builder(vl_config.text_config, use_integrated_rope=True)
 
     # Filter text model weights (they have "model.language_model." prefix in VL model)
     for name, weight in weights.items():
@@ -266,11 +262,6 @@ def export_vl_model(
     text_builder.inputs.append(
         helper.make_tensor_value_info(
             "attention_mask", TensorProto.INT64, ["batch_size", "total_sequence_length"]
-        )
-    )
-    text_builder.inputs.append(
-        helper.make_tensor_value_info(
-            "position_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
         )
     )
 
@@ -316,10 +307,7 @@ def export_vl_model(
     text_builder.build_attention_mask_subgraph()
 
     # Skip build_embedding() - use inputs_embeds directly as hidden_state
-    # But we still need embed_tokens weight for lm_head (tied weights)
-    text_builder.add_initializer(
-        "model.embed_tokens.weight", text_builder.weights["model.embed_tokens.weight"]
-    )
+    # (lm_head weight is added by build_lm_head as lm_head.MatMul.weight)
     hidden_state = "inputs_embeds"
 
     for layer_idx in range(vl_config.text_config.num_hidden_layers):
@@ -425,7 +413,6 @@ def do_export(
     model_path: str,
     output_path: pathlib.Path,
     vision_format: str = VISION_MODE_TILED,
-    use_integrated_rope: bool = False,
 ):
     """Export a single VL model to ONNX (FP32)."""
     logger.info(f"Exporting {model_path} to {output_path}...")
@@ -433,7 +420,6 @@ def do_export(
         model_path,
         output_path,
         vision_input_format=vision_format,
-        use_integrated_rope=use_integrated_rope,
     )
 
 
@@ -560,11 +546,6 @@ def main():
         help="Block size for quantization (default: 32)",
     )
     parser.add_argument(
-        "--integrated-rope",
-        action="store_true",
-        help="Use RoPE integrated in GroupQueryAttention (better precision)",
-    )
-    parser.add_argument(
         "--vision-format",
         choices=[VISION_MODE_TILED, VISION_MODE_CONV2D],
         default=VISION_MODE_TILED,
@@ -618,7 +599,7 @@ def main():
     # Export
     if not args.skip_export:
         for model_path, output_dir in exports:
-            do_export(model_path, output_dir, args.vision_format, args.integrated_rope)
+            do_export(model_path, output_dir, args.vision_format)
 
     # Quantize
     for bits in quant_bits:
