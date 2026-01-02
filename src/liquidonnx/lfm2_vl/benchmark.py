@@ -30,7 +30,7 @@ from liquidonnx.lfm2_vl.preprocessing import (
     preprocess_tiled,
 )
 from liquidonnx.quantize import get_total_model_size_mb
-from liquidonnx.session import initialize_cache, update_cache
+from liquidonnx.session import initialize_cache, load_onnx_session, update_cache
 
 logger = logging.getLogger(__name__)
 
@@ -61,14 +61,6 @@ class BenchmarkResult:
     generated_text: str
     node_counts: dict[str, int] | None = None
     component_timing: ComponentTiming | None = None
-
-
-def load_onnx_session(path: pathlib.Path) -> ort.InferenceSession:
-    """Load ONNX session with optimizations."""
-    opts = ort.SessionOptions()
-    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    opts.log_severity_level = 3
-    return ort.InferenceSession(str(path), opts, providers=["CPUExecutionProvider"])
 
 
 def count_nodes(model_path: pathlib.Path) -> int:

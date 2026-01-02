@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from liquidonnx.quantize import get_total_model_size_mb
-from liquidonnx.session import initialize_cache, update_cache
+from liquidonnx.session import initialize_cache, load_onnx_session, update_cache
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +52,6 @@ class ONNXBenchmark:
 
     def load_onnx_model(self, onnx_path: str):
         """Load ONNX model and return session + load time."""
-        import onnxruntime as ort
-
-        # Resolve path
         onnx_path = pathlib.Path(onnx_path)
         if onnx_path.suffix == ".onnx":
             model_file = onnx_path
@@ -63,12 +60,8 @@ class ONNXBenchmark:
             if not model_file.exists():
                 model_file = onnx_path / "model.onnx"
 
-        if not model_file.exists():
-            raise FileNotFoundError(f"ONNX model not found: {model_file}")
-
-        logger.info(f"Loading ONNX model: {model_file}")
         start = time.perf_counter()
-        sess = ort.InferenceSession(str(model_file), providers=["CPUExecutionProvider"])
+        sess = load_onnx_session(model_file)
         load_time = time.perf_counter() - start
 
         return sess, load_time, model_file

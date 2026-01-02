@@ -515,18 +515,14 @@ class LFM2Builder(ONNXBuilderBase):
         k_reshape_back = self.get_constant([0, -1, kv_hidden])
 
         # Q norm (community naming: attn.q_norm.layernorm.weight)
-        q_for_norm = self.make_node(
-            "Reshape", [q, reshape_for_norm], [f"{prefix}/q_for_norm"]
-        )
+        q_for_norm = self.make_node("Reshape", [q, reshape_for_norm], [f"{prefix}/q_for_norm"])
         q_normed = self.make_simple_layernorm(
             q_for_norm, f"{prefix}.attn.q_norm.layernorm.weight", f"{prefix}/q_normed"
         )
         q_3d = self.make_node("Reshape", [q_normed, q_reshape_back], [f"{prefix}/q_3d"])
 
         # K norm (community naming: attn.k_norm.layernorm.weight)
-        k_for_norm = self.make_node(
-            "Reshape", [k, reshape_for_norm], [f"{prefix}/k_for_norm"]
-        )
+        k_for_norm = self.make_node("Reshape", [k, reshape_for_norm], [f"{prefix}/k_for_norm"])
         k_normed = self.make_simple_layernorm(
             k_for_norm, f"{prefix}.attn.k_norm.layernorm.weight", f"{prefix}/k_normed"
         )
@@ -674,12 +670,17 @@ class LFM2Builder(ONNXBuilderBase):
             hidden_state, hidden_state, final_norm_weight, final_norm_output
         )
 
-        # LM head with tied embeddings - store pre-transposed weight (community approach)
-        self.add_initializer(
-            "lm_head.MatMul.weight", self.weights["model.embed_tokens.weight"].T
+        # LM head with tied embeddings (community approach)
+        # Transpose embed_tokens at runtime instead of storing a copy (saves 256MB)
+        # embed_tokens.weight [vocab, hidden] → [hidden, vocab]
+        lm_head_weight = self.make_node(
+            "Transpose",
+            ["model.embed_tokens.weight"],
+            ["/lm_head/Transpose/output_0"],
+            perm=[1, 0],
         )
 
-        return self.make_matmul(normed, "lm_head.MatMul.weight", "logits")
+        return self.make_matmul(normed, lm_head_weight, "logits")
 
     def load_weights(self, model_path: str):
         """Load weights from HuggingFace model."""
