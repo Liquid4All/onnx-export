@@ -13,7 +13,6 @@ import logging
 from pathlib import Path
 
 import numpy as np
-import onnxruntime as ort
 from PIL import Image
 from transformers import AutoProcessor
 
@@ -25,7 +24,7 @@ from liquidonnx.lfm2_vl.preprocessing import (
     preprocess_conv2d,
     preprocess_tiled,
 )
-from liquidonnx.session import initialize_cache, update_cache
+from liquidonnx.session import initialize_cache, load_onnx_session, update_cache
 
 logger = logging.getLogger(__name__)
 
@@ -73,20 +72,9 @@ class VLModelInference:
 
         onnx_dir = self.model_path / "onnx"
 
-        logger.info("Loading embed_tokens.onnx...")
-        self.embed_tokens_sess = ort.InferenceSession(
-            str(onnx_dir / "embed_tokens.onnx"), providers=["CPUExecutionProvider"]
-        )
-
-        logger.info("Loading embed_images.onnx...")
-        self.embed_images_sess = ort.InferenceSession(
-            str(onnx_dir / "embed_images.onnx"), providers=["CPUExecutionProvider"]
-        )
-
-        logger.info("Loading decoder.onnx...")
-        self.decoder_sess = ort.InferenceSession(
-            str(onnx_dir / "decoder.onnx"), providers=["CPUExecutionProvider"]
-        )
+        self.embed_tokens_sess = load_onnx_session(onnx_dir / "embed_tokens.onnx")
+        self.embed_images_sess = load_onnx_session(onnx_dir / "embed_images.onnx")
+        self.decoder_sess = load_onnx_session(onnx_dir / "decoder.onnx")
 
         self.vision_format = detect_vision_format(self.embed_images_sess)
         logger.info(f"Vision format: {self.vision_format}")

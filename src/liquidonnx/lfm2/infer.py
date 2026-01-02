@@ -10,8 +10,14 @@ Usage:
 
 import argparse
 import logging
+import pathlib
 
 from liquidonnx.session import ONNXTextModel, run_chat_loop
+
+
+def get_onnx_dir(exports_dir: pathlib.Path, size: str) -> pathlib.Path:
+    """Get ONNX directory for a model size."""
+    return exports_dir / f"LFM2-{size}-ONNX" / "onnx"
 
 
 def main():
