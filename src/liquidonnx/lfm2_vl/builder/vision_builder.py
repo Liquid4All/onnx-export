@@ -288,6 +288,10 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         Creates a [B, aligned_h, aligned_w, hidden] canvas filled with zeros,
         then uses ScatterND to place valid features at their (b, y, x) positions.
 
+        INVARIANT: The mask (pixel_attention_mask) must be False for all patches
+        beyond the valid region (patch_idx >= h[b] * w[b]) to prevent ScatterND
+        index collisions. This is guaranteed by the HuggingFace image processor.
+
         Args:
             features: Input features [B, num_patches, hidden]
             grid_indices: Grid indices [B, num_patches, 3]
@@ -369,9 +373,13 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         For each position (b, y, x) in the output grid, it's valid if:
             y < h[b] / downsample AND x < w[b] / downsample
 
+        INVARIANT: Spatial shapes (h_per_batch, w_per_batch) are always even because
+        preprocessing pads images to be divisible by patch_size * downsample_factor (32).
+        This ensures integer division by downsample (2) produces exact results.
+
         Args:
-            h_per_batch: Heights per batch [B, 1]
-            w_per_batch: Widths per batch [B, 1]
+            h_per_batch: Heights per batch [B, 1] - always even
+            w_per_batch: Widths per batch [B, 1] - always even
             aligned_h: Aligned max height (scalar)
             aligned_w: Aligned max width (scalar)
             downsample: Downsample factor (typically 2)
