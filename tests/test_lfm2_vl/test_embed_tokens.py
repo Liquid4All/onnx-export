@@ -14,7 +14,7 @@ import pytest
 import torch
 from helpers import skip_if_missing
 
-from liquidonnx.lfm2_vl import MODELS, VISION_MODE_TILED
+from liquidonnx.lfm2_vl import MODELS
 from liquidonnx.lfm2_vl.infer import get_onnx_dir
 from liquidonnx.session import load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, get_tolerances
@@ -31,7 +31,7 @@ def test_embed_tokens(exports_dir: pathlib.Path, pytorch_model, prompt: str):
     size, model, processor = pytorch_model
     logger.info(f"Testing {size}: '{prompt}'")
 
-    onnx_dir = get_onnx_dir(exports_dir, size, VISION_MODE_TILED)
+    onnx_dir = get_onnx_dir(exports_dir, size)
     skip_if_missing(onnx_dir, "Export not found")
     skip_if_missing(onnx_dir / "embed_tokens.onnx", "embed_tokens not found")
 

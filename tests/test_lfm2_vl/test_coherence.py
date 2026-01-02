@@ -95,9 +95,8 @@ def get_onnx_image_embeddings(embed_images_sess, images, processor):
                     "spatial_shapes": spatial_shapes,
                 },
             )
-            onnx_embeds = outputs[0]
-            num_tiles, tokens_per_tile, hidden = onnx_embeds.shape
-            embeddings.append(onnx_embeds.reshape(-1, hidden))
+            # Output is 2D [total_tokens, hidden] after Compress
+            embeddings.append(outputs[0])
 
     return embeddings
 

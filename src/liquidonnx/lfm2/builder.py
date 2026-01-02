@@ -25,7 +25,7 @@ import numpy as np
 import onnx
 from onnx import TensorProto, helper
 
-from liquidonnx.builder_base import SLICE_END, ONNXBuilderBase
+from liquidonnx.builder_base import ONNXBuilderBase
 
 logger = logging.getLogger(__name__)
 
@@ -105,61 +105,73 @@ class LFM2Builder(ONNXBuilderBase):
         """Prepare and register weights for a layer.
 
         Handles weight transposition and naming for MatMul operations.
-        Call this before building the layer graph.
+        Uses community naming conventions:
+        - operator_norm -> operator_layernorm
+        - ffn_norm -> ffn_layernorm
+        - feed_forward.w1/w2/w3 -> mlp.gate_proj/down_proj/up_proj.MatMul
+        - conv.weight -> conv.conv.weight
+        - self_attn -> attn, with .MatMul suffix
         """
         prefix = f"model.layers.{layer_idx}"
 
-        # Common weights
+        # LayerNorm weights (community naming)
         self.add_initializer(
-            f"{prefix}.operator_norm.weight", self.weights[f"{prefix}.operator_norm.weight"]
+            f"{prefix}.operator_layernorm.weight", self.weights[f"{prefix}.operator_norm.weight"]
         )
-        self.add_initializer(f"{prefix}.ffn_norm.weight", self.weights[f"{prefix}.ffn_norm.weight"])
+        self.add_initializer(
+            f"{prefix}.ffn_layernorm.weight", self.weights[f"{prefix}.ffn_norm.weight"]
+        )
 
-        # MLP weights (transposed for MatMul)
+        # MLP weights (transposed for MatMul, community naming)
         self.add_initializer(
-            f"{prefix}.feed_forward.w1.weight", self.weights[f"{prefix}.feed_forward.w1.weight"].T
+            f"{prefix}.mlp.gate_proj.MatMul.weight",
+            self.weights[f"{prefix}.feed_forward.w1.weight"].T,
         )
         self.add_initializer(
-            f"{prefix}.feed_forward.w3.weight", self.weights[f"{prefix}.feed_forward.w3.weight"].T
+            f"{prefix}.mlp.up_proj.MatMul.weight",
+            self.weights[f"{prefix}.feed_forward.w3.weight"].T,
         )
         self.add_initializer(
-            f"{prefix}.feed_forward.w2.weight", self.weights[f"{prefix}.feed_forward.w2.weight"].T
+            f"{prefix}.mlp.down_proj.MatMul.weight",
+            self.weights[f"{prefix}.feed_forward.w2.weight"].T,
         )
 
         if layer_type == "conv":
             self.add_initializer(
-                f"{prefix}.conv.in_proj.weight", self.weights[f"{prefix}.conv.in_proj.weight"].T
+                f"{prefix}.conv.in_proj.MatMul.weight",
+                self.weights[f"{prefix}.conv.in_proj.weight"].T,
             )
             self.add_initializer(
-                f"{prefix}.conv.weight", self.weights[f"{prefix}.conv.conv.weight"]
+                f"{prefix}.conv.conv.weight", self.weights[f"{prefix}.conv.conv.weight"]
             )
             self.add_initializer(
-                f"{prefix}.conv.out_proj.weight", self.weights[f"{prefix}.conv.out_proj.weight"].T
+                f"{prefix}.conv.out_proj.MatMul.weight",
+                self.weights[f"{prefix}.conv.out_proj.weight"].T,
             )
         else:
-            # Attention weights (transposed for MatMul)
+            # Attention weights (transposed for MatMul, community naming)
             self.add_initializer(
-                f"{prefix}.self_attn.q_proj.weight",
+                f"{prefix}.attn.q_proj.MatMul.weight",
                 self.weights[f"{prefix}.self_attn.q_proj.weight"].T,
             )
             self.add_initializer(
-                f"{prefix}.self_attn.k_proj.weight",
+                f"{prefix}.attn.k_proj.MatMul.weight",
                 self.weights[f"{prefix}.self_attn.k_proj.weight"].T,
             )
             self.add_initializer(
-                f"{prefix}.self_attn.v_proj.weight",
+                f"{prefix}.attn.v_proj.MatMul.weight",
                 self.weights[f"{prefix}.self_attn.v_proj.weight"].T,
             )
             self.add_initializer(
-                f"{prefix}.self_attn.q_layernorm.weight",
+                f"{prefix}.attn.q_norm.layernorm.weight",
                 self.weights[f"{prefix}.self_attn.q_layernorm.weight"],
             )
             self.add_initializer(
-                f"{prefix}.self_attn.k_layernorm.weight",
+                f"{prefix}.attn.k_norm.layernorm.weight",
                 self.weights[f"{prefix}.self_attn.k_layernorm.weight"],
             )
             self.add_initializer(
-                f"{prefix}.self_attn.out_proj.weight",
+                f"{prefix}.attn.o_proj.MatMul.weight",
                 self.weights[f"{prefix}.self_attn.out_proj.weight"].T,
             )
 
@@ -305,23 +317,23 @@ class LFM2Builder(ONNXBuilderBase):
         Note: This assumes attention_mask is always all-ones (no padding).
         If padding were introduced, this calculation would be incorrect.
         """
-        # Compute seqlens_k and total_seq_len from attention_mask
-        self.add_initializer("const_1", np.array([1], dtype=np.int64))
+        # Use community constant naming via get_constant
+        const_1_arr = self.get_constant([1])  # /model/constants/INT64/[1]
+        const_1_scalar = self.get_constant(1)  # /model/constants/INT64/1
 
         # seqlens_k = sum of attention_mask per batch - 1 (see docstring for rationale)
         self.make_node(
-            "ReduceSum", ["attention_mask", "const_1"], ["/attn_mask/reduce_sum"], keepdims=0
+            "ReduceSum", ["attention_mask", const_1_arr], ["/attn_mask/reduce_sum"], keepdims=0
         )
-        self.make_node("Sub", ["/attn_mask/reduce_sum", "const_1"], ["/attn_mask/seqlens_k_i64"])
+        self.make_node("Sub", ["/attn_mask/reduce_sum", const_1_arr], ["/attn_mask/seqlens_k_i64"])
         self.make_node(
             "Cast", ["/attn_mask/seqlens_k_i64"], ["/attn_mask/seqlens_k"], to=TensorProto.INT32
         )
 
         # total_seq_len = shape[1] of attention_mask
-        self.add_initializer("const_1_scalar", np.array(1, dtype=np.int64))
         self.make_node("Shape", ["attention_mask"], ["/attn_mask/shape"])
         self.make_node(
-            "Gather", ["/attn_mask/shape", "const_1_scalar"], ["/attn_mask/total_seq_i64"], axis=0
+            "Gather", ["/attn_mask/shape", const_1_scalar], ["/attn_mask/total_seq_i64"], axis=0
         )
         self.make_node(
             "Cast", ["/attn_mask/total_seq_i64"], ["/attn_mask/total_seq"], to=TensorProto.INT32
@@ -333,7 +345,7 @@ class LFM2Builder(ONNXBuilderBase):
         Graph structure (matches PyTorch Lfm2ShortConv):
             hidden_state
                 ↓
-            LayerNorm (operator_norm)
+            LayerNorm (operator_layernorm)
                 ↓
             Linear (in_proj) → [B, S, 3H]
                 ↓
@@ -366,21 +378,22 @@ class LFM2Builder(ONNXBuilderBase):
         H = self.config.hidden_size
         residual = hidden_state
 
-        # === LayerNorm ===
+        # === LayerNorm (community naming) ===
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.operator_norm.weight", f"{prefix}/op_norm"
+            hidden_state, f"{prefix}.operator_layernorm.weight", f"{prefix}/op_norm"
         )
 
         # === In projection + Split ===
         # in_proj: [B, S, H] → [B, S, 3H]
-        in_proj = self.make_matmul(normed, f"{prefix}.conv.in_proj.weight", f"{prefix}/in_proj")
+        in_proj = self.make_matmul(
+            normed, f"{prefix}.conv.in_proj.MatMul.weight", f"{prefix}/in_proj"
+        )
         # Transpose: [B, S, 3H] → [B, 3H, S]
         in_proj_t = self.make_node("Transpose", [in_proj], [f"{prefix}/in_proj_t"], perm=[0, 2, 1])
-        # Split into B, C, x (each [B, H, S])
-        self.add_initializer(f"{prefix}/split_sizes", np.array([H, H, H], dtype=np.int64))
+        # Split into B, C, x (each [B, H, S]) using shared constant
         self.make_node(
             "Split",
-            [in_proj_t, f"{prefix}/split_sizes"],
+            [in_proj_t, self.get_constant([H, H, H])],
             [f"{prefix}/B", f"{prefix}/C", f"{prefix}/x"],
             axis=1,
         )
@@ -392,33 +405,37 @@ class LFM2Builder(ONNXBuilderBase):
         conv_input = self.make_node(
             "Concat", [f"past_conv.{layer_idx}", Bx], [f"{prefix}/conv_input"], axis=2
         )
-        # Depthwise Conv1D (kernel=3)
+        # Depthwise Conv1D (kernel=3, community naming: conv.conv.weight)
         conv_out_full = self.make_node(
             "Conv",
-            [conv_input, f"{prefix}.conv.weight"],
+            [conv_input, f"{prefix}.conv.conv.weight"],
             [f"{prefix}/conv_out_full"],
             kernel_shape=[L],
             group=H,
         )
 
         # === Dynamic slice ===
-        # Get sequence length from Bx shape
-        self.make_node("Shape", [Bx], [f"{prefix}/bx_shape"])
-        self.add_initializer(f"{prefix}/axis2_idx", np.array(2, dtype=np.int64))
+        # Get sequence length from LayerNorm output shape (axis 1)
+        self.make_node("Shape", [normed], [f"{prefix}/normed_shape"])
         self.make_node(
-            "Gather", [f"{prefix}/bx_shape", f"{prefix}/axis2_idx"], [f"{prefix}/seq_len"], axis=0
+            "Gather",
+            [f"{prefix}/normed_shape", self.get_constant(1)],
+            [f"{prefix}/seq_len"],
+            axis=0,
         )
         # Slice last S elements
         self.make_slice_last_n(conv_out_full, f"{prefix}/seq_len", f"{prefix}/conv_out", axis=2)
 
         # === Cache update ===
-        # Extract last L elements for next iteration
-        self.add_initializer(f"{prefix}/cache_start", np.array([-L], dtype=np.int64))
-        self.add_initializer(f"{prefix}/cache_end", SLICE_END.copy())
-        self.add_initializer(f"{prefix}/cache_axis", np.array([2], dtype=np.int64))
+        # Extract last L elements for next iteration using shared constants
         self.make_node(
             "Slice",
-            [conv_input, f"{prefix}/cache_start", f"{prefix}/cache_end", f"{prefix}/cache_axis"],
+            [
+                conv_input,
+                self.get_constant([-L]),
+                self.get_constant([np.iinfo(np.int64).max]),
+                self.get_constant([2]),
+            ],
             [f"present_conv.{layer_idx}"],
         )
 
@@ -427,8 +444,10 @@ class LFM2Builder(ONNXBuilderBase):
         y = self.make_mul(f"{prefix}/C", f"{prefix}/conv_out", f"{prefix}/y")
         # Transpose: [B, H, S] → [B, S, H]
         y_t = self.make_node("Transpose", [y], [f"{prefix}/y_t"], perm=[0, 2, 1])
-        # out_proj: [B, S, H] → [B, S, H]
-        out_proj = self.make_matmul(y_t, f"{prefix}.conv.out_proj.weight", f"{prefix}/out_proj")
+        # out_proj: [B, S, H] → [B, S, H] (community naming)
+        out_proj = self.make_matmul(
+            y_t, f"{prefix}.conv.out_proj.MatMul.weight", f"{prefix}/out_proj"
+        )
 
         # === Residual + MLP ===
         hidden_state = self.make_add(residual, out_proj, f"{prefix}/residual1")
@@ -440,7 +459,7 @@ class LFM2Builder(ONNXBuilderBase):
         Graph structure (matches PyTorch Lfm2Attention):
             hidden_state
                 ↓
-            LayerNorm (operator_norm)
+            LayerNorm (operator_layernorm)
                 ↓
             ┌─────────────────────────────────────┐
             │  Q/K/V Projections                  │
@@ -479,41 +498,39 @@ class LFM2Builder(ONNXBuilderBase):
         kv_hidden = nkv * hd
         residual = hidden_state
 
-        # === LayerNorm ===
+        # === LayerNorm (community naming) ===
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.operator_norm.weight", f"{prefix}/op_norm"
+            hidden_state, f"{prefix}.operator_layernorm.weight", f"{prefix}/op_norm"
         )
 
-        # === Q/K/V Projections ===
-        q = self.make_matmul(normed, f"{prefix}.self_attn.q_proj.weight", f"{prefix}/q")
-        k = self.make_matmul(normed, f"{prefix}.self_attn.k_proj.weight", f"{prefix}/k")
-        v = self.make_matmul(normed, f"{prefix}.self_attn.v_proj.weight", f"{prefix}/v")
+        # === Q/K/V Projections (community naming) ===
+        q = self.make_matmul(normed, f"{prefix}.attn.q_proj.MatMul.weight", f"{prefix}/q")
+        k = self.make_matmul(normed, f"{prefix}.attn.k_proj.MatMul.weight", f"{prefix}/k")
+        v = self.make_matmul(normed, f"{prefix}.attn.v_proj.MatMul.weight", f"{prefix}/v")
 
         # === Q/K LayerNorm (per-head) ===
-        # Reshape to [B, -1, head_dim] for per-head norm
-        self.add_initializer(f"{prefix}/reshape_for_norm", np.array([0, -1, hd], dtype=np.int64))
-        self.add_initializer(f"{prefix}/q_reshape_back", np.array([0, -1, H], dtype=np.int64))
-        self.add_initializer(
-            f"{prefix}/k_reshape_back", np.array([0, -1, kv_hidden], dtype=np.int64)
-        )
+        # Reshape to [B, -1, head_dim] for per-head norm using shared constants
+        reshape_for_norm = self.get_constant([0, -1, hd])
+        q_reshape_back = self.get_constant([0, -1, H])
+        k_reshape_back = self.get_constant([0, -1, kv_hidden])
 
-        # Q norm
+        # Q norm (community naming: attn.q_norm.layernorm.weight)
         q_for_norm = self.make_node(
-            "Reshape", [q, f"{prefix}/reshape_for_norm"], [f"{prefix}/q_for_norm"]
+            "Reshape", [q, reshape_for_norm], [f"{prefix}/q_for_norm"]
         )
         q_normed = self.make_simple_layernorm(
-            q_for_norm, f"{prefix}.self_attn.q_layernorm.weight", f"{prefix}/q_normed"
+            q_for_norm, f"{prefix}.attn.q_norm.layernorm.weight", f"{prefix}/q_normed"
         )
-        q_3d = self.make_node("Reshape", [q_normed, f"{prefix}/q_reshape_back"], [f"{prefix}/q_3d"])
+        q_3d = self.make_node("Reshape", [q_normed, q_reshape_back], [f"{prefix}/q_3d"])
 
-        # K norm
+        # K norm (community naming: attn.k_norm.layernorm.weight)
         k_for_norm = self.make_node(
-            "Reshape", [k, f"{prefix}/reshape_for_norm"], [f"{prefix}/k_for_norm"]
+            "Reshape", [k, reshape_for_norm], [f"{prefix}/k_for_norm"]
         )
         k_normed = self.make_simple_layernorm(
-            k_for_norm, f"{prefix}.self_attn.k_layernorm.weight", f"{prefix}/k_normed"
+            k_for_norm, f"{prefix}.attn.k_norm.layernorm.weight", f"{prefix}/k_normed"
         )
-        k_3d = self.make_node("Reshape", [k_normed, f"{prefix}/k_reshape_back"], [f"{prefix}/k_3d"])
+        k_3d = self.make_node("Reshape", [k_normed, k_reshape_back], [f"{prefix}/k_3d"])
 
         # === RoPE + GroupQueryAttention ===
         scale = 1.0 / (hd**0.5)
@@ -588,9 +605,9 @@ class LFM2Builder(ONNXBuilderBase):
                 rotary_interleaved=0,
             )
 
-        # === Output projection + Residual + MLP ===
+        # === Output projection + Residual + MLP (community naming) ===
         o_proj = self.make_matmul(
-            f"{prefix}/attn_out", f"{prefix}.self_attn.out_proj.weight", f"{prefix}/o_proj"
+            f"{prefix}/attn_out", f"{prefix}.attn.o_proj.MatMul.weight", f"{prefix}/o_proj"
         )
         hidden_state = self.make_add(residual, o_proj, f"{prefix}/residual1")
         return self.build_mlp(layer_idx, hidden_state)
@@ -601,10 +618,10 @@ class LFM2Builder(ONNXBuilderBase):
         Graph structure (matches PyTorch Lfm2MLP):
             hidden_state
                 ↓
-            LayerNorm (ffn_norm)
+            LayerNorm (ffn_layernorm)
                 ↓
             ┌───────────┬───────────┐
-            │ Linear w1 │ Linear w3 │
+            │ gate_proj │ up_proj   │
             │ (gate)    │ (up)      │
             └─────┬─────┴─────┬─────┘
                   ↓           ↓
@@ -612,7 +629,7 @@ class LFM2Builder(ONNXBuilderBase):
                   ↓           │
                   └─────*─────┘
                         ↓
-                    Linear w2 (down)
+                    down_proj (down)
                         ↓
                     Add (residual)
         """
@@ -620,14 +637,16 @@ class LFM2Builder(ONNXBuilderBase):
 
         residual = hidden_state
 
-        # FFN LayerNorm
+        # FFN LayerNorm (community naming)
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.ffn_norm.weight", f"{prefix}/ffn_norm"
+            hidden_state, f"{prefix}.ffn_layernorm.weight", f"{prefix}/ffn_norm"
         )
 
-        # Gate (w1) and Up (w3)
-        gate = self.make_matmul(normed, f"{prefix}.feed_forward.w1.weight", f"{prefix}/mlp_gate")
-        up = self.make_matmul(normed, f"{prefix}.feed_forward.w3.weight", f"{prefix}/mlp_up")
+        # Gate and Up projections (community naming)
+        gate = self.make_matmul(
+            normed, f"{prefix}.mlp.gate_proj.MatMul.weight", f"{prefix}/mlp_gate"
+        )
+        up = self.make_matmul(normed, f"{prefix}.mlp.up_proj.MatMul.weight", f"{prefix}/mlp_up")
 
         # SiLU on gate
         gate_silu = self.make_silu(gate, f"{prefix}/mlp_gate_silu")
@@ -635,29 +654,32 @@ class LFM2Builder(ONNXBuilderBase):
         # gate * up
         gated = self.make_mul(gate_silu, up, f"{prefix}/mlp_gated")
 
-        # Down projection (w2)
-        down = self.make_matmul(gated, f"{prefix}.feed_forward.w2.weight", f"{prefix}/mlp_down")
+        # Down projection (community naming)
+        down = self.make_matmul(
+            gated, f"{prefix}.mlp.down_proj.MatMul.weight", f"{prefix}/mlp_down"
+        )
 
         # Residual
         return self.make_add(residual, down, f"{prefix}/residual2")
 
     def build_lm_head(self, hidden_state: str) -> str:
         # Final LayerNorm using SkipSimplifiedLayerNormalization (fused op)
-        # Pass hidden_state as both input and skip for better numerical stability
-        self.add_initializer(
-            "model.embedding_norm.weight", self.weights["model.embedding_norm.weight"]
-        )
+        # Community naming: model.layers.{num_layers}.final_norm_layernorm.weight
+        num_layers = self.config.num_hidden_layers
+        final_norm_weight = f"model.layers.{num_layers}.final_norm_layernorm.weight"
+        final_norm_output = f"/model/layers.{num_layers}/final_norm_layernorm/output_0"
+
+        self.add_initializer(final_norm_weight, self.weights["model.embedding_norm.weight"])
         normed = self.make_skip_layernorm(
-            hidden_state, hidden_state, "model.embedding_norm.weight", "final_norm"
+            hidden_state, hidden_state, final_norm_weight, final_norm_output
         )
 
-        # LM head with tied embeddings - use Transpose to share weights
-        # This reuses model.embed_tokens.weight instead of storing a separate copy
-        self.make_node(
-            "Transpose", ["model.embed_tokens.weight"], ["lm_head.weight_transposed"], perm=[1, 0]
+        # LM head with tied embeddings - store pre-transposed weight (community approach)
+        self.add_initializer(
+            "lm_head.MatMul.weight", self.weights["model.embed_tokens.weight"].T
         )
 
-        return self.make_matmul(normed, "lm_head.weight_transposed", "logits")
+        return self.make_matmul(normed, "lm_head.MatMul.weight", "logits")
 
     def load_weights(self, model_path: str):
         """Load weights from HuggingFace model."""

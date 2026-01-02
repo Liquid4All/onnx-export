@@ -79,34 +79,35 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, v
             "spatial_shapes": spatial_shapes.numpy().astype(np.int64),
         },
     )
+    # Output is 2D [total_tokens, hidden] after Compress
     onnx_embeddings = onnx_outputs[0]
+
+    # Concatenate PyTorch embeddings for comparison
+    pytorch_concat = torch.cat(pytorch_embeddings, dim=0).numpy()
+    min_tokens = min(pytorch_concat.shape[0], onnx_embeddings.shape[0])
 
     atol, rtol = get_tolerances(vision_type)
     results = []
-    for tile_idx, pytorch_tile in enumerate(pytorch_embeddings):
-        pytorch_np = pytorch_tile.numpy()
-        onnx_tile = onnx_embeddings[tile_idx]
-        min_tokens = min(pytorch_np.shape[0], onnx_tile.shape[0])
 
-        if "arrays" in checks:
-            results.append(
-                compare_arrays(
-                    f"vision_tile_{tile_idx}",
-                    pytorch_np[:min_tokens],
-                    onnx_tile[:min_tokens],
-                    atol,
-                    rtol,
-                )
+    if "arrays" in checks:
+        results.append(
+            compare_arrays(
+                "vision_embeddings",
+                pytorch_concat[:min_tokens],
+                onnx_embeddings[:min_tokens],
+                atol,
+                rtol,
             )
-        if "correlation" in checks:
-            results.append(
-                compare_correlation(
-                    f"vision_tile_{tile_idx}_corr",
-                    pytorch_np[:min_tokens],
-                    onnx_tile[:min_tokens],
-                    threshold=VISION_CORRELATION_THRESHOLD,
-                )
+        )
+    if "correlation" in checks:
+        results.append(
+            compare_correlation(
+                "vision_embeddings_corr",
+                pytorch_concat[:min_tokens],
+                onnx_embeddings[:min_tokens],
+                threshold=VISION_CORRELATION_THRESHOLD,
             )
+        )
 
     return results
 

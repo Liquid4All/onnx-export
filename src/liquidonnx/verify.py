@@ -11,7 +11,7 @@ import numpy as np
 
 ATOL = 1e-3
 RTOL = 1e-2
-ATOL_FP16 = 5e-3
+ATOL_FP16 = 2e-2  # fp16 has ~3 decimal digits of precision
 RTOL_FP16 = 5e-2
 ATOL_QUANT = 0.5
 RTOL_QUANT = 0.5

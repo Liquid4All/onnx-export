@@ -118,10 +118,8 @@ class VLModelInference:
                         "spatial_shapes": spatial_shapes,
                     },
                 )
-                # Tiled output is [num_tiles, tokens_per_tile, hidden], flatten to [total_patches, hidden]
-                onnx_embeds = outputs[0]
-                num_tiles, tokens_per_tile, hidden = onnx_embeds.shape
-                embeddings.append(onnx_embeds.reshape(-1, hidden))
+                # Tiled output is 2D [total_tokens, hidden] after Compress
+                embeddings.append(outputs[0])
                 continue
             embeddings.append(outputs[0][0])
 
