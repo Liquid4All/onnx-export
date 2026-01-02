@@ -87,141 +87,363 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             epsilon=self.vision_config.layer_norm_eps,
         )
 
+    def _split_spatial_shapes(self, output_prefix: str) -> tuple[str, str]:
+        """Split spatial_shapes into per-batch h and w tensors.
+
+        Args:
+            output_prefix: Output node prefix
+
+        Returns:
+            Tuple of (h_per_batch, w_per_batch) each of shape [B, 1]
+        """
+        p = output_prefix
+        # Split spatial_shapes [B, 2] into h [B, 1] and w [B, 1]
+        self.make_node(
+            "Split",
+            ["spatial_shapes"],
+            [f"{p}/split_shapes/h", f"{p}/split_shapes/w"],
+            axis=1,
+            num_outputs=2,
+        )
+        return f"{p}/split_shapes/h", f"{p}/split_shapes/w"
+
     def _extract_max_spatial_dims(self, output_prefix: str) -> tuple[str, str]:
         """Extract max spatial dimensions from spatial_shapes input.
 
-        Used by both patch embedding and projector to get consistent max(H), max(W)
-        across the batch for tiled mode. Uses ReduceMax to find maximum dimensions
-        across all images in the batch.
+        Returns the maximum H and W across all images in the batch.
+        Used by position embedding which needs max dimensions for Resize.
 
         Args:
-            output_prefix: Output node prefix (e.g., "/model/embeddings/pos_embed",
-                          "/model/multimodal_projector")
+            output_prefix: Output node prefix
 
         Returns:
-            Tuple of (spatial_h_node_name, spatial_w_node_name)
+            Tuple of (max_h, max_w) as scalar int64 tensors
         """
+        p = output_prefix
         # ReduceMax across batch: [B, 2] → [2] to get max(H), max(W)
         max_spatial = self.make_node(
             "ReduceMax",
             ["spatial_shapes", self.get_constant("INT64", [0])],
-            [f"{output_prefix}/max_spatial/output_0"],
+            [f"{p}/max_spatial/output_0"],
             keepdims=0,
         )
 
         spatial_h = self.make_node(
             "Gather",
             [max_spatial, self.get_constant("INT64", 0)],
-            [f"{output_prefix}/spatial_h/output_0"],
+            [f"{p}/spatial_h/output_0"],
             axis=0,
         )
         spatial_w = self.make_node(
             "Gather",
             [max_spatial, self.get_constant("INT64", 1)],
-            [f"{output_prefix}/spatial_w/output_0"],
+            [f"{p}/spatial_w/output_0"],
             axis=0,
         )
 
         return spatial_h, spatial_w
 
-    def _build_mask_downsampling(
-        self,
-        batch_size: str,
-        spatial_h: str,
-        spatial_w: str,
-        half_spatial_h: str,
-        half_spatial_w: str,
-        actual_num_patches: str,
-    ) -> str:
-        """Build mask downsampling for tiled mode Compress operator.
-
-        Downsamples pixel_attention_mask to match projector output (N → N/4).
-        Uses ReduceMin (AND logic) over 2x2 blocks: merged token is valid only
-        if ALL 4 input patches are valid.
-
-        Shape transformations:
-            [B, N_max] → slice → [B, H*W] → reshape → [B, H, W]
-            → reshape → [B, H/2, 2, W/2, 2] → ReduceMin → [B, H/2, W/2]
-            → flatten → [B * H/2 * W/2]
+    def _compute_aligned_max_dims(
+        self, h_per_batch: str, w_per_batch: str, prefix: str
+    ) -> tuple[str, str]:
+        """Compute aligned max dimensions (rounded up to even for pixel unshuffle).
 
         Args:
-            batch_size: Node name for batch size
-            spatial_h: Node name for spatial height
-            spatial_w: Node name for spatial width
-            half_spatial_h: Node name for H/2
-            half_spatial_w: Node name for W/2
-            actual_num_patches: Node name for H * W
+            h_per_batch: Per-batch heights [B, 1]
+            w_per_batch: Per-batch widths [B, 1]
+            prefix: Output node prefix
 
         Returns:
-            Node name for boolean mask ready for Compress operator
+            Tuple of (aligned_max_h, aligned_max_w) as scalar int64
         """
-        # Use subprefix to avoid name collisions with main projector nodes
-        m = "/model/multimodal_projector/mask_ds"
+        p = prefix
+
+        # Get max across batch: [B, 1] → scalar (ReduceMax over all axes with keepdims=0)
+        max_h = self.make_node("ReduceMax", [h_per_batch], [f"{p}/max_h/output_0"], keepdims=0)
+        max_w = self.make_node("ReduceMax", [w_per_batch], [f"{p}/max_w/output_0"], keepdims=0)
+
+        # Align to even: ((x + 1) // 2) * 2
+        two = self.get_constant("INT64", 2)
+        one = self.get_constant("INT64", 1)
+
+        aligned_h = self.make_node(
+            "Mul",
+            [
+                self.make_node(
+                    "Div",
+                    [self.make_node("Add", [max_h, one], [f"{p}/align_max_h_add/output_0"]), two],
+                    [f"{p}/align_max_h_div/output_0"],
+                ),
+                two,
+            ],
+            [f"{p}/align_max_h/output_0"],
+        )
+        aligned_w = self.make_node(
+            "Mul",
+            [
+                self.make_node(
+                    "Div",
+                    [self.make_node("Add", [max_w, one], [f"{p}/align_max_w_add/output_0"]), two],
+                    [f"{p}/align_max_w_div/output_0"],
+                ),
+                two,
+            ],
+            [f"{p}/align_max_w/output_0"],
+        )
+
+        return aligned_h, aligned_w
+
+    def _build_grid_indices(
+        self,
+        batch_size: str,
+        num_patches: str,
+        h_per_batch: str,
+        w_per_batch: str,
+        prefix: str,
+    ) -> str:
+        """Build grid indices for ScatterND: (batch_idx, y, x) for each patch.
+
+        For each patch at position [b, i], compute:
+            y = i // w[b]
+            x = i % w[b]
+            indices[b, i] = [b, y, x]
+
+        Args:
+            batch_size: Scalar batch size
+            num_patches: Scalar number of patches (max across batch)
+            h_per_batch: Heights per batch [B, 1]
+            w_per_batch: Widths per batch [B, 1]
+            prefix: Output node prefix
+
+        Returns:
+            Grid indices tensor of shape [B, num_patches, 3]
+        """
+        p = prefix
+        axes_0 = self.get_constant("INT64", [0])
+        axes_1 = self.get_constant("INT64", [1])
+
+        # Create patch indices [0, 1, 2, ..., num_patches-1]
+        patch_range = self.make_node(
+            "Range",
+            [self.get_constant("INT64", 0), num_patches, self.get_constant("INT64", 1)],
+            [f"{p}/patch_range/output_0"],
+        )
+        # Unsqueeze to [1, num_patches] for broadcasting
+        patch_range_2d = self.make_node(
+            "Unsqueeze", [patch_range, axes_0], [f"{p}/patch_range_2d/output_0"]
+        )
+
+        # w_per_batch is [B, 1], broadcast to [B, num_patches]
+        # y = patch_idx // w
+        grid_y = self.make_node("Div", [patch_range_2d, w_per_batch], [f"{p}/grid_y/output_0"])
+        # x = patch_idx % w
+        grid_x = self.make_node("Mod", [patch_range_2d, w_per_batch], [f"{p}/grid_x/output_0"])
+
+        # Create batch indices [0, 1, ..., B-1] expanded to [B, num_patches]
+        batch_range = self.make_node(
+            "Range",
+            [self.get_constant("INT64", 0), batch_size, self.get_constant("INT64", 1)],
+            [f"{p}/batch_range/output_0"],
+        )
+        batch_range_2d = self.make_node(
+            "Unsqueeze", [batch_range, axes_1], [f"{p}/batch_range_2d/output_0"]
+        )
+        # Broadcast to [B, num_patches] using zeros from patch_range
+        zeros = self.make_node(
+            "Mul", [patch_range_2d, self.get_constant("INT64", 0)], [f"{p}/zeros/output_0"]
+        )
+        grid_b = self.make_node("Add", [batch_range_2d, zeros], [f"{p}/grid_b/output_0"])
+
+        # Stack [b, y, x] -> [B, num_patches, 3]
+        grid_b_3d = self.make_node(
+            "Unsqueeze", [grid_b, self.get_constant("INT64", [-1])], [f"{p}/grid_b_3d/output_0"]
+        )
+        grid_y_3d = self.make_node(
+            "Unsqueeze", [grid_y, self.get_constant("INT64", [-1])], [f"{p}/grid_y_3d/output_0"]
+        )
+        grid_x_3d = self.make_node(
+            "Unsqueeze", [grid_x, self.get_constant("INT64", [-1])], [f"{p}/grid_x_3d/output_0"]
+        )
+
+        return self.make_node(
+            "Concat",
+            [grid_b_3d, grid_y_3d, grid_x_3d],
+            [f"{p}/grid_indices/output_0"],
+            axis=-1,
+        )
+
+    def _build_scatter_canvas(
+        self,
+        features: str,
+        grid_indices: str,
+        mask: str,
+        batch_size: str,
+        aligned_h: str,
+        aligned_w: str,
+        hidden_dim: int,
+        prefix: str,
+    ) -> str:
+        """Build ScatterND canvas to place features at grid positions.
+
+        Creates a [B, aligned_h, aligned_w, hidden] canvas filled with zeros,
+        then uses ScatterND to place valid features at their (b, y, x) positions.
+
+        INVARIANT: The mask (pixel_attention_mask) must be False for all patches
+        beyond the valid region (patch_idx >= h[b] * w[b]) to prevent ScatterND
+        index collisions. This is guaranteed by the HuggingFace image processor.
+
+        Args:
+            features: Input features [B, num_patches, hidden]
+            grid_indices: Grid indices [B, num_patches, 3]
+            mask: Validity mask [B, num_patches] (bool)
+            batch_size: Scalar batch size
+            aligned_h: Aligned max height (scalar)
+            aligned_w: Aligned max width (scalar)
+            hidden_dim: Hidden dimension size
+            prefix: Output node prefix
+
+        Returns:
+            Filled canvas [B, aligned_h, aligned_w, hidden]
+        """
+        p = prefix
         axes_0 = self.get_constant("INT64", [0])
 
-        # Slice end and axis
-        actual_unsq = self.make_node(
-            "Unsqueeze", [actual_num_patches, axes_0], [f"{m}/actual_unsq/output_0"]
+        # Flatten features and indices for Compress
+        flat_features = self.make_node(
+            "Reshape",
+            [features, self.get_constant("INT64", [-1, hidden_dim])],
+            [f"{p}/flat_features/output_0"],
+        )
+        flat_indices = self.make_node(
+            "Reshape",
+            [grid_indices, self.get_constant("INT64", [-1, 3])],
+            [f"{p}/flat_indices/output_0"],
+        )
+        flat_mask = self.make_node(
+            "Reshape", [mask, self.get_constant("INT64", [-1])], [f"{p}/flat_mask/output_0"]
         )
 
-        # Step 1: Slice and reshape to spatial grid [B, N] → [B, H, W]
-        mask_shape_4d = self.make_node(
+        # Compress to get only valid features and indices
+        valid_features = self.make_node(
+            "Compress", [flat_features, flat_mask], [f"{p}/valid_features/output_0"], axis=0
+        )
+        valid_indices = self.make_node(
+            "Compress", [flat_indices, flat_mask], [f"{p}/valid_indices/output_0"], axis=0
+        )
+
+        # Create canvas shape [B, aligned_h, aligned_w, hidden]
+        canvas_shape = self.make_node(
             "Concat",
             [
-                self.make_node("Unsqueeze", [batch_size, axes_0], [f"{m}/batch_unsq/output_0"]),
-                self.make_node("Unsqueeze", [spatial_h, axes_0], [f"{m}/spatial_h_unsq/output_0"]),
-                self.make_node("Unsqueeze", [spatial_w, axes_0], [f"{m}/spatial_w_unsq/output_0"]),
+                self.make_node("Unsqueeze", [batch_size, axes_0], [f"{p}/canv_b/output_0"]),
+                self.make_node("Unsqueeze", [aligned_h, axes_0], [f"{p}/canv_h/output_0"]),
+                self.make_node("Unsqueeze", [aligned_w, axes_0], [f"{p}/canv_w/output_0"]),
+                self.get_constant("INT64", [hidden_dim]),
             ],
-            [f"{m}/mask_shape_4d/output_0"],
+            [f"{p}/canvas_shape/output_0"],
             axis=0,
         )
 
-        mask_sliced = self.make_node(
-            "Slice",
-            [
-                "pixel_attention_mask",
-                self.get_constant("INT64", [0]),
-                actual_unsq,
-                self.get_constant("INT64", [1]),
-            ],
-            [f"{m}/mask_sliced/output_0"],
-        )
-        mask_3d = self.make_node(
-            "Reshape", [mask_sliced, mask_shape_4d], [f"{m}/mask_3d/output_0"]
+        # Create zero-filled canvas
+        canvas = self.make_node(
+            "ConstantOfShape",
+            [canvas_shape],
+            [f"{p}/canvas/output_0"],
+            value=helper.make_tensor("value", TensorProto.FLOAT, [1], [0.0]),
         )
 
-        # Step 2: Reshape for 2x2 pooling [B, H, W] → [B, H/2, 2, W/2, 2]
-        two = self.get_constant("INT64", [2])
-        pool_shape = self.make_node(
-            "Concat",
-            [
-                self.make_node("Unsqueeze", [batch_size, axes_0], [f"{m}/b_pool/output_0"]),
-                self.make_node("Unsqueeze", [half_spatial_h, axes_0], [f"{m}/h_half/output_0"]),
-                two,
-                self.make_node("Unsqueeze", [half_spatial_w, axes_0], [f"{m}/w_half/output_0"]),
-                two,
-            ],
-            [f"{m}/pool_shape/output_0"],
-            axis=0,
-        )
-        mask_5d = self.make_node("Reshape", [mask_3d, pool_shape], [f"{m}/mask_5d/output_0"])
-
-        # Step 3: ReduceMin over 2x2 groups [B, H/2, 2, W/2, 2] → [B, H/2, W/2]
-        mask_pooled = self.make_node(
-            "ReduceMin",
-            [mask_5d, self.get_constant("INT64", [2, 4])],
-            [f"{m}/mask_pooled/output_0"],
-            keepdims=0,
-        )
-
-        # Step 4: Flatten mask [B, H/2, W/2] → [B * H/2 * W/2]
-        mask_flat = self.make_node(
-            "Reshape", [mask_pooled, self.get_constant("INT64", [-1])], [f"{m}/flat_mask/output_0"]
-        )
-
-        # Cast mask to bool for Compress
+        # ScatterND: place valid features into canvas
         return self.make_node(
-            "Cast", [mask_flat], [f"{m}/cast_mask_bool/output_0"], to=TensorProto.BOOL
+            "ScatterND",
+            [canvas, valid_indices, valid_features],
+            [f"{p}/filled_canvas/output_0"],
+        )
+
+    def _build_output_validity_mask(
+        self,
+        h_per_batch: str,
+        w_per_batch: str,
+        aligned_h: str,
+        aligned_w: str,
+        downsample: int,
+        prefix: str,
+    ) -> str:
+        """Build validity mask for output tokens after pixel unshuffle.
+
+        For each position (b, y, x) in the output grid, it's valid if:
+            y < h[b] / downsample AND x < w[b] / downsample
+
+        INVARIANT: Spatial shapes (h_per_batch, w_per_batch) are always even because
+        preprocessing pads images to be divisible by patch_size * downsample_factor (32).
+        This ensures integer division by downsample (2) produces exact results.
+
+        Args:
+            h_per_batch: Heights per batch [B, 1] - always even
+            w_per_batch: Widths per batch [B, 1] - always even
+            aligned_h: Aligned max height (scalar)
+            aligned_w: Aligned max width (scalar)
+            downsample: Downsample factor (typically 2)
+            prefix: Output node prefix
+
+        Returns:
+            Flat validity mask [B * (aligned_h/ds) * (aligned_w/ds)] as bool
+        """
+        p = prefix
+        ds = self.get_constant("INT64", downsample)
+
+        # Output spatial dims after pixel unshuffle
+        out_h = self.make_node("Div", [aligned_h, ds], [f"{p}/out_h/output_0"])
+        out_w = self.make_node("Div", [aligned_w, ds], [f"{p}/out_w/output_0"])
+
+        # Valid dims per batch (after downsampling)
+        valid_h = self.make_node("Div", [h_per_batch, ds], [f"{p}/valid_h/output_0"])
+        valid_w = self.make_node("Div", [w_per_batch, ds], [f"{p}/valid_w/output_0"])
+
+        # Create iota ranges for h and w
+        iota_h = self.make_node(
+            "Range",
+            [self.get_constant("INT64", 0), out_h, self.get_constant("INT64", 1)],
+            [f"{p}/iota_h/output_0"],
+        )
+        iota_w = self.make_node(
+            "Range",
+            [self.get_constant("INT64", 0), out_w, self.get_constant("INT64", 1)],
+            [f"{p}/iota_w/output_0"],
+        )
+
+        # Expand iota_h to [B, out_h, 1] and iota_w to [B, 1, out_w]
+        iota_h_3d = self.make_node(
+            "Unsqueeze",
+            [iota_h, self.get_constant("INT64", [0, 2])],
+            [f"{p}/iota_h_3d/output_0"],
+        )
+        iota_w_3d = self.make_node(
+            "Unsqueeze",
+            [iota_w, self.get_constant("INT64", [0, 1])],
+            [f"{p}/iota_w_3d/output_0"],
+        )
+
+        # Expand valid_h to [B, 1, 1] and valid_w to [B, 1, 1]
+        valid_h_3d = self.make_node(
+            "Unsqueeze", [valid_h, self.get_constant("INT64", [-1])], [f"{p}/valid_h_3d/output_0"]
+        )
+        valid_w_3d = self.make_node(
+            "Unsqueeze", [valid_w, self.get_constant("INT64", [-1])], [f"{p}/valid_w_3d/output_0"]
+        )
+
+        # h_mask: iota_h < valid_h -> [B, out_h, 1]
+        h_mask = self.make_node("Less", [iota_h_3d, valid_h_3d], [f"{p}/h_mask/output_0"])
+        # w_mask: iota_w < valid_w -> [B, 1, out_w]
+        w_mask = self.make_node("Less", [iota_w_3d, valid_w_3d], [f"{p}/w_mask/output_0"])
+
+        # final_mask: h_mask AND w_mask -> [B, out_h, out_w]
+        final_mask = self.make_node("And", [h_mask, w_mask], [f"{p}/final_mask/output_0"])
+
+        # Flatten to [B * out_h * out_w]
+        return self.make_node(
+            "Reshape",
+            [final_mask, self.get_constant("INT64", [-1])],
+            [f"{p}/flat_output_mask/output_0"],
         )
 
     def get_constant(self, dtype: str, value) -> str:
@@ -714,7 +936,9 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 axis=0,
             )
             first_token_expanded = self.make_node(
-                "Expand", [first_token, expand_shape], [f"{pe}/padding/first_token_expanded/output_0"]
+                "Expand",
+                [first_token, expand_shape],
+                [f"{pe}/padding/first_token_expanded/output_0"],
             )
 
             padding_size = self.make_node(
@@ -980,9 +1204,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             [f"{layer}/mlp/fc2/Add/output_0"],
         )
 
-        return self.make_node(
-            "Add", [residual2, fc2], [f"{layer}/mlp_residual/Add/output_0"]
-        )
+        return self.make_node("Add", [residual2, fc2], [f"{layer}/mlp_residual/Add/output_0"])
 
     def build_post_layernorm(self, hidden_state: str) -> str:
         """Build post layer norm."""
@@ -1004,39 +1226,36 @@ class VisionEmbedBuilder(ONNXBuilderBase):
     def build_projector(self, vision_embeddings: str) -> str:
         """Build the MLP projector with pixel unshuffle.
 
+        For tiled mode with variable spatial shapes, uses ScatterND canvas approach:
+            1. Split spatial_shapes into per-batch h and w
+            2. Compute aligned max dims (rounded to even for pixel unshuffle)
+            3. Build grid indices (batch, y, x) for each patch
+            4. Use ScatterND to place features into canvas
+            5. Apply pixel unshuffle on canvas
+            6. Apply projector MLP
+            7. Build per-image validity mask and Compress
+
         Graph structure:
             vision_embeddings [B, N, C]
                 ↓
             ┌─────────────────────────────────────┐
-            │  Reshape to 4D                      │
-            │  [B, N, C] → [B, H, W, C]           │
-            │  (H = W = sqrt(N) for square)       │
+            │  ScatterND Canvas (tiled mode)      │
+            │  [B, N, C] → [B, aligned_H, aligned_W, C] │
             └─────────────────────────────────────┘
                 ↓
             ┌─────────────────────────────────────┐
             │  Pixel Unshuffle (2x2 → 4x channel) │
             │  [B, H, W, C] → [B, H/2, W/2, C*4]  │
-            │                                     │
-            │  Steps:                             │
-            │  1. reshape [B,H,W/2,C*2]           │
-            │  2. transpose [B,W/2,H,C*2]         │
-            │  3. reshape [B,W/2,H/2,C*4]         │
-            │  4. transpose [B,H/2,W/2,C*4]       │
             └─────────────────────────────────────┘
                 ↓
-            Flatten [B, N/4, C*4]
+            LayerNorm → Linear → GELU → Linear
                 ↓
-            LayerNorm
+            ┌─────────────────────────────────────┐
+            │  Validity Mask + Compress           │
+            │  Extract valid tokens per image     │
+            └─────────────────────────────────────┘
                 ↓
-            Linear (C*4 → proj_hidden) + GELU
-                ↓
-            Linear (proj_hidden → text_hidden)
-                ↓
-            image_embeddings [B, N/4, text_hidden]
-
-        The pixel unshuffle operation reduces spatial resolution by 2x while
-        increasing channel dimension by 4x, matching the PyTorch implementation
-        in Lfm2VlMultiModalProjector.pixel_unshuffle().
+            image_embeddings [total_valid_tokens, text_hidden]
         """
         ds = self.downsample
         C = self.vision_hidden
@@ -1078,20 +1297,22 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             )
 
         axes_0 = self.get_constant("INT64", [0])
+        input_shape = self.make_node("Shape", [vision_embeddings], [f"{p}/input_shape/output_0"])
         batch_size = self.make_node(
             "Gather",
-            [
-                self.make_node("Shape", [vision_embeddings], [f"{p}/input_shape/output_0"]),
-                self.get_constant("INT64", 0),
-            ],
+            [input_shape, self.get_constant("INT64", 0)],
             [f"{p}/batch_size/output_0"],
+            axis=0,
+        )
+        num_patches = self.make_node(
+            "Gather",
+            [input_shape, self.get_constant("INT64", 1)],
+            [f"{p}/num_patches/output_0"],
             axis=0,
         )
 
         if self.vision_input_format == VISION_MODE_CONV2D:
             # Conv2d mode: use passed spatial dimensions
-            # spatial_h, spatial_w are AFTER n_merge, so we need to multiply by n_merge
-            # to get the pre-merge spatial dimensions for the first reshape
             n_merge = self.downsample
             self.add_initializer(f"{p}/n_merge", np.array(n_merge, dtype=np.int64))
 
@@ -1118,64 +1339,52 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 axis=0,
             )
 
+            hidden_4d = self.make_node(
+                "Reshape", [vision_embeddings, reshape_4d_shape], [f"{p}/hidden_4d/output_0"]
+            )
+
             spatial_h_name = pre_merge_h
             half_spatial_h_name = "spatial_h"
             half_spatial_w_name = "spatial_w"
         else:
-            # Tiled mode: use max spatial dimensions across batch
-            spatial_h, spatial_w = self._extract_max_spatial_dims(p)
+            # === Tiled mode: ScatterND canvas approach ===
+            # This supports variable spatial shapes per batch element
 
-            reshape_4d_shape = self.make_node(
-                "Concat",
-                [
-                    self.make_node("Unsqueeze", [batch_size, axes_0], [f"{p}/batch_unsq/output_0"]),
-                    self.make_node(
-                        "Unsqueeze", [spatial_h, axes_0], [f"{p}/spatial_h_unsq/output_0"]
-                    ),
-                    self.make_node(
-                        "Unsqueeze", [spatial_w, axes_0], [f"{p}/spatial_w_unsq/output_0"]
-                    ),
-                    self.get_constant("INT64", [C]),
-                ],
-                [f"{p}/reshape_4d_shape/output_0"],
-                axis=0,
+            # Split spatial_shapes into h and w per batch
+            h_per_batch, w_per_batch = self._split_spatial_shapes(p)
+
+            # Compute aligned max dims (rounded to even for pixel unshuffle)
+            aligned_h, aligned_w = self._compute_aligned_max_dims(h_per_batch, w_per_batch, p)
+
+            # Build grid indices (batch, y, x) for each patch
+            grid_indices = self._build_grid_indices(
+                batch_size, num_patches, h_per_batch, w_per_batch, f"{p}/grid"
             )
 
-            half_spatial_h = self.make_node(
-                "Div",
-                [spatial_h, self.get_constant("INT64", 2)],
-                [f"{p}/half_spatial_h/output_0"],
-            )
-            half_spatial_w = self.make_node(
-                "Div",
-                [spatial_w, self.get_constant("INT64", 2)],
-                [f"{p}/half_spatial_w/output_0"],
-            )
-            spatial_h_name = spatial_h
-            half_spatial_h_name = half_spatial_h
-            half_spatial_w_name = half_spatial_w
-
-            # Slice out only valid patches before reshaping (input may be padded)
-            actual_num_patches = self.make_node(
-                "Mul", [spatial_h, spatial_w], [f"{p}/proj_actual_num_patches/output_0"]
-            )
-            actual_unsq = self.make_node(
-                "Unsqueeze", [actual_num_patches, axes_0], [f"{p}/proj_actual_unsq/output_0"]
-            )
-            vision_embeddings = self.make_node(
-                "Slice",
-                [
-                    vision_embeddings,
-                    self.get_constant("INT64", [0]),
-                    actual_unsq,
-                    self.get_constant("INT64", [1]),
-                ],
-                [f"{p}/valid_embeddings/output_0"],
+            # Cast pixel_attention_mask to bool for ScatterND
+            mask_bool = self.make_node(
+                "Cast", ["pixel_attention_mask"], [f"{p}/mask_bool/output_0"], to=TensorProto.BOOL
             )
 
-        hidden_4d = self.make_node(
-            "Reshape", [vision_embeddings, reshape_4d_shape], [f"{p}/hidden_4d/output_0"]
-        )
+            # ScatterND: place features into canvas [B, aligned_h, aligned_w, C]
+            hidden_4d = self._build_scatter_canvas(
+                vision_embeddings,
+                grid_indices,
+                mask_bool,
+                batch_size,
+                aligned_h,
+                aligned_w,
+                C,
+                f"{p}/scatter",
+            )
+
+            spatial_h_name = aligned_h
+            half_spatial_h_name = self.make_node(
+                "Div", [aligned_h, self.get_constant("INT64", 2)], [f"{p}/half_h/output_0"]
+            )
+            half_spatial_w_name = self.make_node(
+                "Div", [aligned_w, self.get_constant("INT64", 2)], [f"{p}/half_w/output_0"]
+            )
 
         # Pixel unshuffle: (B, H, W, C) -> (B, H/2, W/2, C*4)
         reshape1_shape = self.make_node(
@@ -1271,21 +1480,18 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             fc2 = self.make_node("Identity", [fc2], [f"{p}/linear_2/output_0"])
 
         if self.vision_input_format == VISION_MODE_TILED:
-            # === Flatten output across batch using Compress ===
-            # This allows different-sized images in the same batch
-            # Output: [total_valid_tokens, hidden] instead of [B, N/4, hidden]
-
-            # Build downsampled mask for Compress operator
-            mask_bool = self._build_mask_downsampling(
-                batch_size,
-                spatial_h,
-                spatial_w,
-                half_spatial_h_name,
-                half_spatial_w_name,
-                actual_num_patches,
+            # === Build output validity mask and Compress ===
+            # For each position in [B, out_h, out_w], check if y < h[b]/2 AND x < w[b]/2
+            output_mask = self._build_output_validity_mask(
+                h_per_batch,
+                w_per_batch,
+                aligned_h,
+                aligned_w,
+                ds,
+                f"{p}/out_mask",
             )
 
-            # Flatten embeddings [B, N/4, hidden] → [B * N/4, hidden]
+            # Flatten embeddings [B, out_h * out_w, hidden] → [B * out_h * out_w, hidden]
             embeds_flat = self.make_node(
                 "Reshape",
                 [fc2, self.get_constant("INT64", [-1, self.text_hidden])],
@@ -1293,9 +1499,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             )
 
             # Compress: select only valid tokens → [total_valid_tokens, hidden]
-            self.make_node(
-                "Compress", [embeds_flat, mask_bool], ["image_embeddings"], axis=0
-            )
+            self.make_node("Compress", [embeds_flat, output_mask], ["image_embeddings"], axis=0)
         else:
             # Conv2d mode: single image, keep 3D output
             self.make_node("Identity", [fc2], ["image_embeddings"])
