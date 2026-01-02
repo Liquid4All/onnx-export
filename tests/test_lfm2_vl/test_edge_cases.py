@@ -178,7 +178,7 @@ def test_aspect_ratios(
     assert embeddings.shape[1] == expected_hidden
     assert embeddings.shape[0] > 0
 
-    logger.info(f"  {w}x{h} (ratio={w/h:.2f}) -> {embeddings.shape[0]} tokens")
+    logger.info(f"  {w}x{h} (ratio={w / h:.2f}) -> {embeddings.shape[0]} tokens")
 
 
 @pytest.mark.parametrize("pytorch_model", ["450M"], indirect=True)
@@ -211,7 +211,7 @@ def test_batch_different_sizes(
     for i, img in enumerate(images):
         embeddings = run_embed_images(embed_images_sess, processor, img)
         results.append(embeddings)
-        logger.info(f"  Image {i+1} ({img.size[0]}x{img.size[1]}): {embeddings.shape[0]} tokens")
+        logger.info(f"  Image {i + 1} ({img.size[0]}x{img.size[1]}): {embeddings.shape[0]} tokens")
 
     # Verify all processed successfully
     expected_hidden = MODEL_HIDDEN_SIZES.get(model_size, 1024)

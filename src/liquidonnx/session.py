@@ -55,6 +55,7 @@ def get_providers() -> list[str]:
 
             with tempfile.NamedTemporaryFile(suffix=".onnx", delete=True) as f:
                 import onnx
+
                 onnx.save(model, f.name)
                 ort.InferenceSession(f.name, providers=["CUDAExecutionProvider"])
             _cuda_works = True
@@ -68,7 +69,9 @@ def get_providers() -> list[str]:
     return ["CPUExecutionProvider"]
 
 
-def load_onnx_session(path: pathlib.Path, providers: list[str] | None = None) -> ort.InferenceSession:
+def load_onnx_session(
+    path: pathlib.Path, providers: list[str] | None = None
+) -> ort.InferenceSession:
     """Load ONNX model as inference session.
 
     Args:
@@ -170,9 +173,7 @@ class ONNXTextModel:
         if not onnx_path.exists():
             raise FileNotFoundError(f"ONNX file not found: {onnx_path}")
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            str(tokenizer_path), trust_remote_code=True
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path), trust_remote_code=True)
 
         logger.info(f"Loading ONNX from {onnx_path}...")
         self.session = load_onnx_session(onnx_path)
