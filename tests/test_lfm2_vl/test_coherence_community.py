@@ -319,7 +319,9 @@ def run_coherence_comparison(
         else:
             winner = "TIE"
 
-        logger.info(f"  Turn {turn}: local={local_sim:.4f}, community={community_sim:.4f} -> {winner}")
+        logger.info(
+            f"  Turn {turn}: local={local_sim:.4f}, community={community_sim:.4f} -> {winner}"
+        )
         logger.info(f"    Prompt: {prompt[:60]}...")
         logger.info(f"    PyTorch:   {pt_text[:80]}...")
         logger.info(f"    Local:     {local_text[:80]}...")
@@ -347,7 +349,10 @@ def test_coherence_community(
     scenario: str,
     prompts: list[str],
 ):
-    """Compare multi-turn coherence: local vs community ONNX against PyTorch."""
+    """Compare multi-turn coherence: local vs community ONNX against PyTorch.
+
+    Uses fp32 precision for both local and community models.
+    """
     size, model, processor = pytorch_model
 
     # Check local exports
