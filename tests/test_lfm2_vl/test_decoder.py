@@ -77,11 +77,14 @@ def test_decoder(
         },
     )[0]
 
+    # Build inputs based on what the decoder actually expects
+    decoder_input_names = {inp.name for inp in decoder_sess.get_inputs()}
     onnx_inputs = {
         "inputs_embeds": onnx_embeds.astype(np.float32),
         "attention_mask": attention_mask.numpy().astype(np.int64),
-        "position_ids": position_ids.numpy().astype(np.int64),
     }
+    if "position_ids" in decoder_input_names:
+        onnx_inputs["position_ids"] = position_ids.numpy().astype(np.int64)
 
     for inp in decoder_sess.get_inputs():
         if inp.name not in onnx_inputs:
