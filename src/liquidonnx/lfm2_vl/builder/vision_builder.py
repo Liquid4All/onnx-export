@@ -472,20 +472,16 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             val_str = str(list(value)).replace(" ", "")
         else:
             val_str = str(value)
-
-        node_name = f"/model/constant_nodes/{dtype}/{val_str}"
         output_name = f"/model/constants/{dtype}/{val_str}"
 
-        # Only add if not already present
-        if not any(n.name == node_name for n in self.nodes):
+        # Only add if not already present (check initializers)
+        if not any(init.name == output_name for init in self.initializers):
             if dtype == "INT64":
                 arr = np.array(value, dtype=np.int64)
             else:
                 arr = np.array(value, dtype=np.float32)
-            from onnx import numpy_helper
-
-            tensor = numpy_helper.from_array(arr, output_name)
-            self.make_node("Constant", [], [output_name], name=node_name, value=tensor)
+            # Add as initializer (matches community convention)
+            self.add_initializer(output_name, arr)
 
         return output_name
 

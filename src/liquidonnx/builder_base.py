@@ -97,12 +97,10 @@ class ONNXBuilderBase:
             value_str = str(arr.item())
         else:
             value_str = str(arr.tolist())
-        node_name = f"/model/constant_nodes/{dtype_name}/{value_str}"
         output_name = f"/model/constants/{dtype_name}/{value_str}"
 
-        # Create Constant node (output doesn't use /output_0 for constants)
-        tensor = numpy_helper.from_array(arr, output_name)
-        self.make_node("Constant", [], [output_name], name=node_name, value=tensor)
+        # Add as initializer (matches community convention)
+        self.add_initializer(output_name, arr)
 
         self._constants[key] = output_name
         return output_name
