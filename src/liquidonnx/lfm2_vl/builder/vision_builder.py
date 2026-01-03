@@ -447,7 +447,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         )
 
     def get_constant(self, dtype: str, value) -> str:
-        """Get or create a constant with community-style naming.
+        """Get or create a constant with community-style naming via Constant node.
 
         Constants are named: /model/constants/TYPE/value
         Examples:
@@ -460,7 +460,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             value: The constant value (scalar, list, or numpy array)
 
         Returns:
-            The constant name
+            The constant output name
         """
         # Convert value to string representation for naming
         if isinstance(value, np.ndarray):
@@ -473,17 +473,21 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         else:
             val_str = str(value)
 
-        name = f"/model/constants/{dtype}/{val_str}"
+        node_name = f"/model/constant_nodes/{dtype}/{val_str}"
+        output_name = f"/model/constants/{dtype}/{val_str}"
 
         # Only add if not already present
-        if not any(init.name == name for init in self.initializers):
+        if not any(n.name == node_name for n in self.nodes):
             if dtype == "INT64":
                 arr = np.array(value, dtype=np.int64)
             else:
                 arr = np.array(value, dtype=np.float32)
-            self.add_initializer(name, arr)
+            from onnx import numpy_helper
 
-        return name
+            tensor = numpy_helper.from_array(arr, output_name)
+            self.make_node("Constant", [], [output_name], name=node_name, value=tensor)
+
+        return output_name
 
     def build_inputs(self):
         """Create model inputs based on vision_input_format."""
@@ -550,7 +554,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             # Supports different-sized images in same batch (tokens concatenated)
             self.outputs.append(
                 helper.make_tensor_value_info(
-                    "image_embeddings",
+                    "image_features",
                     TensorProto.FLOAT,
                     ["num_image_tokens", self.text_hidden],
                 )
@@ -559,7 +563,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             # Conv2d mode: 3D output [batch, num_image_tokens, hidden]
             self.outputs.append(
                 helper.make_tensor_value_info(
-                    "image_embeddings",
+                    "image_features",
                     TensorProto.FLOAT,
                     ["batch_size", "num_image_tokens", self.text_hidden],
                 )
@@ -1499,12 +1503,12 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             )
 
             # Compress: select only valid tokens → [total_valid_tokens, hidden]
-            self.make_node("Compress", [embeds_flat, output_mask], ["image_embeddings"], axis=0)
+            self.make_node("Compress", [embeds_flat, output_mask], ["image_features"], axis=0)
         else:
             # Conv2d mode: single image, keep 3D output
-            self.make_node("Identity", [fc2], ["image_embeddings"])
+            self.make_node("Identity", [fc2], ["image_features"])
 
-        return "image_embeddings"
+        return "image_features"
 
     def load_weights(self, weights: dict[str, np.ndarray]):
         for name, weight in weights.items():
