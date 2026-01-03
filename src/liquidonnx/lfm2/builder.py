@@ -197,42 +197,43 @@ class LFM2Builder(ONNXBuilderBase):
             )
         )
 
-        # Conv caches
-        for idx in self.conv_indices:
-            self.inputs.append(
-                helper.make_tensor_value_info(
-                    f"past_conv.{idx}",
-                    TensorProto.FLOAT,
-                    ["batch_size", self.config.hidden_size, self.config.conv_L_cache],
+        # Interleave cache inputs by layer index (community convention)
+        conv_set = set(self.conv_indices)
+        attn_set = set(self.attn_indices)
+        for idx in range(self.config.num_hidden_layers):
+            if idx in conv_set:
+                self.inputs.append(
+                    helper.make_tensor_value_info(
+                        f"past_conv.{idx}",
+                        TensorProto.FLOAT,
+                        ["batch_size", self.config.hidden_size, self.config.conv_L_cache],
+                    )
                 )
-            )
-
-        # KV caches
-        for idx in self.attn_indices:
-            self.inputs.append(
-                helper.make_tensor_value_info(
-                    f"past_key_values.{idx}.key",
-                    TensorProto.FLOAT,
-                    [
-                        "batch_size",
-                        self.config.num_key_value_heads,
-                        "past_sequence_length",
-                        self.head_dim,
-                    ],
+            elif idx in attn_set:
+                self.inputs.append(
+                    helper.make_tensor_value_info(
+                        f"past_key_values.{idx}.key",
+                        TensorProto.FLOAT,
+                        [
+                            "batch_size",
+                            self.config.num_key_value_heads,
+                            "past_sequence_length",
+                            self.head_dim,
+                        ],
+                    )
                 )
-            )
-            self.inputs.append(
-                helper.make_tensor_value_info(
-                    f"past_key_values.{idx}.value",
-                    TensorProto.FLOAT,
-                    [
-                        "batch_size",
-                        self.config.num_key_value_heads,
-                        "past_sequence_length",
-                        self.head_dim,
-                    ],
+                self.inputs.append(
+                    helper.make_tensor_value_info(
+                        f"past_key_values.{idx}.value",
+                        TensorProto.FLOAT,
+                        [
+                            "batch_size",
+                            self.config.num_key_value_heads,
+                            "past_sequence_length",
+                            self.head_dim,
+                        ],
+                    )
                 )
-            )
 
     def build_outputs(self):
         # Logits
@@ -244,47 +245,51 @@ class LFM2Builder(ONNXBuilderBase):
             )
         )
 
-        # Conv cache outputs
-        for idx in self.conv_indices:
-            self.outputs.append(
-                helper.make_tensor_value_info(
-                    f"present_conv.{idx}",
-                    TensorProto.FLOAT,
-                    ["batch_size", self.config.hidden_size, self.config.conv_L_cache],
+        # Interleave cache outputs by layer index (community convention)
+        conv_set = set(self.conv_indices)
+        attn_set = set(self.attn_indices)
+        for idx in range(self.config.num_hidden_layers):
+            if idx in conv_set:
+                self.outputs.append(
+                    helper.make_tensor_value_info(
+                        f"present_conv.{idx}",
+                        TensorProto.FLOAT,
+                        ["batch_size", self.config.hidden_size, self.config.conv_L_cache],
+                    )
                 )
-            )
-
-        # KV cache outputs
-        for idx in self.attn_indices:
-            self.outputs.append(
-                helper.make_tensor_value_info(
-                    f"present.{idx}.key",
-                    TensorProto.FLOAT,
-                    [
-                        "batch_size",
-                        self.config.num_key_value_heads,
-                        "total_sequence_length",
-                        self.head_dim,
-                    ],
+            elif idx in attn_set:
+                self.outputs.append(
+                    helper.make_tensor_value_info(
+                        f"present.{idx}.key",
+                        TensorProto.FLOAT,
+                        [
+                            "batch_size",
+                            self.config.num_key_value_heads,
+                            "total_sequence_length",
+                            self.head_dim,
+                        ],
+                    )
                 )
-            )
-            self.outputs.append(
-                helper.make_tensor_value_info(
-                    f"present.{idx}.value",
-                    TensorProto.FLOAT,
-                    [
-                        "batch_size",
-                        self.config.num_key_value_heads,
-                        "total_sequence_length",
-                        self.head_dim,
-                    ],
+                self.outputs.append(
+                    helper.make_tensor_value_info(
+                        f"present.{idx}.value",
+                        TensorProto.FLOAT,
+                        [
+                            "batch_size",
+                            self.config.num_key_value_heads,
+                            "total_sequence_length",
+                            self.head_dim,
+                        ],
+                    )
                 )
-            )
 
     def build_embedding(self) -> str:
         self.add_initializer("model.embed_tokens.weight", self.weights["model.embed_tokens.weight"])
         return self.make_node(
-            "Gather", ["model.embed_tokens.weight", "input_ids"], ["embed_output"], axis=0
+            "Gather",
+            ["model.embed_tokens.weight", "input_ids"],
+            ["/model/embed_tokens/output_0"],
+            axis=0,
         )
 
     def build_rope_cache(self):
@@ -318,25 +323,41 @@ class LFM2Builder(ONNXBuilderBase):
         If padding were introduced, this calculation would be incorrect.
         """
         # Use community constant naming via get_constant
-        const_1_arr = self.get_constant([1])  # /model/constants/INT64/[1]
-        const_1_scalar = self.get_constant(1)  # /model/constants/INT64/1
+        const_1_arr = self.get_constant([1])  # /model/constants/INT64/[1]/output_0
+        const_1_scalar = self.get_constant(1)  # /model/constants/INT64/1/output_0
 
         # seqlens_k = sum of attention_mask per batch - 1 (see docstring for rationale)
         self.make_node(
-            "ReduceSum", ["attention_mask", const_1_arr], ["/attn_mask/reduce_sum"], keepdims=0
+            "ReduceSum",
+            ["attention_mask", const_1_arr],
+            ["/model/attn_mask/ReduceSum/output_0"],
+            keepdims=0,
         )
-        self.make_node("Sub", ["/attn_mask/reduce_sum", const_1_arr], ["/attn_mask/seqlens_k_i64"])
         self.make_node(
-            "Cast", ["/attn_mask/seqlens_k_i64"], ["/attn_mask/seqlens_k"], to=TensorProto.INT32
+            "Sub",
+            ["/model/attn_mask/ReduceSum/output_0", const_1_arr],
+            ["/model/attn_mask/Sub/output_0"],
+        )
+        self.make_node(
+            "Cast",
+            ["/model/attn_mask/Sub/output_0"],
+            ["/model/attn_mask/seqlens_k/output_0"],
+            to=TensorProto.INT32,
         )
 
         # total_seq_len = shape[1] of attention_mask
-        self.make_node("Shape", ["attention_mask"], ["/attn_mask/shape"])
+        self.make_node("Shape", ["attention_mask"], ["/model/attn_mask/Shape/output_0"])
         self.make_node(
-            "Gather", ["/attn_mask/shape", const_1_scalar], ["/attn_mask/total_seq_i64"], axis=0
+            "Gather",
+            ["/model/attn_mask/Shape/output_0", const_1_scalar],
+            ["/model/attn_mask/Gather/output_0"],
+            axis=0,
         )
         self.make_node(
-            "Cast", ["/attn_mask/total_seq_i64"], ["/attn_mask/total_seq"], to=TensorProto.INT32
+            "Cast",
+            ["/model/attn_mask/Gather/output_0"],
+            ["/model/attn_mask/total_seq/output_0"],
+            to=TensorProto.INT32,
         )
 
     def build_conv_layer(self, layer_idx: int, hidden_state: str) -> str:
@@ -373,58 +394,78 @@ class LFM2Builder(ONNXBuilderBase):
 
         Cache: last L elements of concat input → present_conv.{layer_idx}
         """
-        prefix = f"model.layers.{layer_idx}"
+        prefix = f"/model/layers.{layer_idx}"
+        weight_prefix = f"model.layers.{layer_idx}"
         L = self.config.conv_L_cache
         H = self.config.hidden_size
         residual = hidden_state
 
         # === LayerNorm (community naming) ===
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.operator_layernorm.weight", f"{prefix}/op_norm"
+            hidden_state,
+            f"{weight_prefix}.operator_layernorm.weight",
+            f"{prefix}/operator_layernorm/output_0",
         )
 
         # === In projection + Split ===
         # in_proj: [B, S, H] → [B, S, 3H]
         in_proj = self.make_matmul(
-            normed, f"{prefix}.conv.in_proj.MatMul.weight", f"{prefix}/in_proj"
+            normed,
+            f"{weight_prefix}.conv.in_proj.MatMul.weight",
+            f"{prefix}/conv/in_proj/MatMul/output_0",
         )
         # Transpose: [B, S, 3H] → [B, 3H, S]
-        in_proj_t = self.make_node("Transpose", [in_proj], [f"{prefix}/in_proj_t"], perm=[0, 2, 1])
+        in_proj_t = self.make_node(
+            "Transpose", [in_proj], [f"{prefix}/conv/in_proj/Transpose/output_0"], perm=[0, 2, 1]
+        )
         # Split into B, C, x (each [B, H, S]) using shared constant
         self.make_node(
             "Split",
             [in_proj_t, self.get_constant([H, H, H])],
-            [f"{prefix}/B", f"{prefix}/C", f"{prefix}/x"],
+            [
+                f"{prefix}/conv/Split/output_0",
+                f"{prefix}/conv/Split/output_1",
+                f"{prefix}/conv/Split/output_2",
+            ],
             axis=1,
         )
 
         # === Gated convolution ===
         # Bx = B * x (input gating)
-        Bx = self.make_mul(f"{prefix}/B", f"{prefix}/x", f"{prefix}/Bx")
+        Bx = self.make_mul(
+            f"{prefix}/conv/Split/output_0",
+            f"{prefix}/conv/Split/output_2",
+            f"{prefix}/conv/Mul/output_0",
+        )
         # Concat with cache: [B, H, L] + [B, H, S] → [B, H, L+S]
         conv_input = self.make_node(
-            "Concat", [f"past_conv.{layer_idx}", Bx], [f"{prefix}/conv_input"], axis=2
+            "Concat", [f"past_conv.{layer_idx}", Bx], [f"{prefix}/conv/Concat/output_0"], axis=2
         )
         # Depthwise Conv1D (kernel=3, community naming: conv.conv.weight)
         conv_out_full = self.make_node(
             "Conv",
-            [conv_input, f"{prefix}.conv.conv.weight"],
-            [f"{prefix}/conv_out_full"],
+            [conv_input, f"{weight_prefix}.conv.conv.weight"],
+            [f"{prefix}/conv/conv/Conv/output_0"],
             kernel_shape=[L],
             group=H,
         )
 
         # === Dynamic slice ===
         # Get sequence length from LayerNorm output shape (axis 1)
-        self.make_node("Shape", [normed], [f"{prefix}/normed_shape"])
+        self.make_node("Shape", [normed], [f"{prefix}/conv/Shape/output_0"])
         self.make_node(
             "Gather",
-            [f"{prefix}/normed_shape", self.get_constant(1)],
-            [f"{prefix}/seq_len"],
+            [f"{prefix}/conv/Shape/output_0", self.get_constant(1)],
+            [f"{prefix}/conv/seq_len/output_0"],
             axis=0,
         )
         # Slice last S elements
-        self.make_slice_last_n(conv_out_full, f"{prefix}/seq_len", f"{prefix}/conv_out", axis=2)
+        self.make_slice_last_n(
+            conv_out_full,
+            f"{prefix}/conv/seq_len/output_0",
+            f"{prefix}/conv/Slice/output_0",
+            axis=2,
+        )
 
         # === Cache update ===
         # Extract last L elements for next iteration using shared constants
@@ -441,16 +482,24 @@ class LFM2Builder(ONNXBuilderBase):
 
         # === Output gating + projection ===
         # y = C * conv_out
-        y = self.make_mul(f"{prefix}/C", f"{prefix}/conv_out", f"{prefix}/y")
+        y = self.make_mul(
+            f"{prefix}/conv/Split/output_1",
+            f"{prefix}/conv/Slice/output_0",
+            f"{prefix}/conv/Mul_1/output_0",
+        )
         # Transpose: [B, H, S] → [B, S, H]
-        y_t = self.make_node("Transpose", [y], [f"{prefix}/y_t"], perm=[0, 2, 1])
+        y_t = self.make_node(
+            "Transpose", [y], [f"{prefix}/conv/out_proj/Transpose/output_0"], perm=[0, 2, 1]
+        )
         # out_proj: [B, S, H] → [B, S, H] (community naming)
         out_proj = self.make_matmul(
-            y_t, f"{prefix}.conv.out_proj.MatMul.weight", f"{prefix}/out_proj"
+            y_t,
+            f"{weight_prefix}.conv.out_proj.MatMul.weight",
+            f"{prefix}/conv/out_proj/MatMul/output_0",
         )
 
         # === Residual + MLP ===
-        hidden_state = self.make_add(residual, out_proj, f"{prefix}/residual1")
+        hidden_state = self.make_add(residual, out_proj, f"{prefix}/Add/output_0")
         return self.build_mlp(layer_idx, hidden_state)
 
     def build_attention_layer(self, layer_idx: int, hidden_state: str) -> str:
@@ -490,7 +539,8 @@ class LFM2Builder(ONNXBuilderBase):
             - RotaryEmbedding: Applies RoPE to Q/K
             - GroupQueryAttention: Fused attention with KV cache
         """
-        prefix = f"model.layers.{layer_idx}"
+        prefix = f"/model/layers.{layer_idx}"
+        weight_prefix = f"model.layers.{layer_idx}"
         H = self.config.hidden_size
         nh = self.config.num_attention_heads
         nkv = self.config.num_key_value_heads
@@ -500,13 +550,27 @@ class LFM2Builder(ONNXBuilderBase):
 
         # === LayerNorm (community naming) ===
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.operator_layernorm.weight", f"{prefix}/op_norm"
+            hidden_state,
+            f"{weight_prefix}.operator_layernorm.weight",
+            f"{prefix}/operator_layernorm/output_0",
         )
 
         # === Q/K/V Projections (community naming) ===
-        q = self.make_matmul(normed, f"{prefix}.attn.q_proj.MatMul.weight", f"{prefix}/q")
-        k = self.make_matmul(normed, f"{prefix}.attn.k_proj.MatMul.weight", f"{prefix}/k")
-        v = self.make_matmul(normed, f"{prefix}.attn.v_proj.MatMul.weight", f"{prefix}/v")
+        q = self.make_matmul(
+            normed,
+            f"{weight_prefix}.attn.q_proj.MatMul.weight",
+            f"{prefix}/attn/q_proj/MatMul/output_0",
+        )
+        k = self.make_matmul(
+            normed,
+            f"{weight_prefix}.attn.k_proj.MatMul.weight",
+            f"{prefix}/attn/k_proj/MatMul/output_0",
+        )
+        v = self.make_matmul(
+            normed,
+            f"{weight_prefix}.attn.v_proj.MatMul.weight",
+            f"{prefix}/attn/v_proj/MatMul/output_0",
+        )
 
         # === Q/K LayerNorm (per-head) ===
         # Reshape to [B, -1, head_dim] for per-head norm using shared constants
@@ -515,18 +579,30 @@ class LFM2Builder(ONNXBuilderBase):
         k_reshape_back = self.get_constant([0, -1, kv_hidden])
 
         # Q norm (community naming: attn.q_norm.layernorm.weight)
-        q_for_norm = self.make_node("Reshape", [q, reshape_for_norm], [f"{prefix}/q_for_norm"])
-        q_normed = self.make_simple_layernorm(
-            q_for_norm, f"{prefix}.attn.q_norm.layernorm.weight", f"{prefix}/q_normed"
+        q_for_norm = self.make_node(
+            "Reshape", [q, reshape_for_norm], [f"{prefix}/attn/q_norm/Reshape/output_0"]
         )
-        q_3d = self.make_node("Reshape", [q_normed, q_reshape_back], [f"{prefix}/q_3d"])
+        q_normed = self.make_simple_layernorm(
+            q_for_norm,
+            f"{weight_prefix}.attn.q_norm.layernorm.weight",
+            f"{prefix}/attn/q_norm/layernorm/output_0",
+        )
+        q_3d = self.make_node(
+            "Reshape", [q_normed, q_reshape_back], [f"{prefix}/attn/q_norm/Reshape_1/output_0"]
+        )
 
         # K norm (community naming: attn.k_norm.layernorm.weight)
-        k_for_norm = self.make_node("Reshape", [k, reshape_for_norm], [f"{prefix}/k_for_norm"])
-        k_normed = self.make_simple_layernorm(
-            k_for_norm, f"{prefix}.attn.k_norm.layernorm.weight", f"{prefix}/k_normed"
+        k_for_norm = self.make_node(
+            "Reshape", [k, reshape_for_norm], [f"{prefix}/attn/k_norm/Reshape/output_0"]
         )
-        k_3d = self.make_node("Reshape", [k_normed, k_reshape_back], [f"{prefix}/k_3d"])
+        k_normed = self.make_simple_layernorm(
+            k_for_norm,
+            f"{weight_prefix}.attn.k_norm.layernorm.weight",
+            f"{prefix}/attn/k_norm/layernorm/output_0",
+        )
+        k_3d = self.make_node(
+            "Reshape", [k_normed, k_reshape_back], [f"{prefix}/attn/k_norm/Reshape_1/output_0"]
+        )
 
         # === RoPE + GroupQueryAttention ===
         scale = 1.0 / (hd**0.5)
@@ -541,12 +617,16 @@ class LFM2Builder(ONNXBuilderBase):
                     v,
                     f"past_key_values.{layer_idx}.key",
                     f"past_key_values.{layer_idx}.value",
-                    "/attn_mask/seqlens_k",
-                    "/attn_mask/total_seq",
+                    "/model/attn_mask/seqlens_k/output_0",
+                    "/model/attn_mask/total_seq/output_0",
                     "cos_cache",
                     "sin_cache",
                 ],
-                [f"{prefix}/attn_out", f"present.{layer_idx}.key", f"present.{layer_idx}.value"],
+                [
+                    f"{prefix}/attn/GroupQueryAttention/output_0",
+                    f"present.{layer_idx}.key",
+                    f"present.{layer_idx}.value",
+                ],
                 domain="com.microsoft",
                 num_heads=nh,
                 kv_num_heads=nkv,
@@ -567,13 +647,13 @@ class LFM2Builder(ONNXBuilderBase):
             q_rope = self.make_node(
                 "RotaryEmbedding",
                 [q_3d, "position_ids", "cos_cache", "sin_cache"],
-                [f"{prefix}/q_rope"],
+                [f"{prefix}/attn/RotaryEmbedding/output_0"],
                 **rope_attrs,
             )
             k_rope = self.make_node(
                 "RotaryEmbedding",
                 [k_3d, "position_ids", "cos_cache", "sin_cache"],
-                [f"{prefix}/k_rope"],
+                [f"{prefix}/attn/RotaryEmbedding_1/output_0"],
                 **rope_attrs,
             )
 
@@ -585,12 +665,16 @@ class LFM2Builder(ONNXBuilderBase):
                     v,
                     f"past_key_values.{layer_idx}.key",
                     f"past_key_values.{layer_idx}.value",
-                    "/attn_mask/seqlens_k",
-                    "/attn_mask/total_seq",
+                    "/model/attn_mask/seqlens_k/output_0",
+                    "/model/attn_mask/total_seq/output_0",
                     "",  # cos_cache (unused, RoPE applied above)
                     "",  # sin_cache (unused, RoPE applied above)
                 ],
-                [f"{prefix}/attn_out", f"present.{layer_idx}.key", f"present.{layer_idx}.value"],
+                [
+                    f"{prefix}/attn/GroupQueryAttention/output_0",
+                    f"present.{layer_idx}.key",
+                    f"present.{layer_idx}.value",
+                ],
                 domain="com.microsoft",
                 num_heads=nh,
                 kv_num_heads=nkv,
@@ -603,9 +687,11 @@ class LFM2Builder(ONNXBuilderBase):
 
         # === Output projection + Residual + MLP (community naming) ===
         o_proj = self.make_matmul(
-            f"{prefix}/attn_out", f"{prefix}.attn.o_proj.MatMul.weight", f"{prefix}/o_proj"
+            f"{prefix}/attn/GroupQueryAttention/output_0",
+            f"{weight_prefix}.attn.o_proj.MatMul.weight",
+            f"{prefix}/attn/o_proj/MatMul/output_0",
         )
-        hidden_state = self.make_add(residual, o_proj, f"{prefix}/residual1")
+        hidden_state = self.make_add(residual, o_proj, f"{prefix}/Add/output_0")
         return self.build_mlp(layer_idx, hidden_state)
 
     def build_mlp(self, layer_idx: int, hidden_state: str) -> str:
@@ -629,34 +715,45 @@ class LFM2Builder(ONNXBuilderBase):
                         ↓
                     Add (residual)
         """
-        prefix = f"model.layers.{layer_idx}"
+        prefix = f"/model/layers.{layer_idx}"
+        weight_prefix = f"model.layers.{layer_idx}"
 
         residual = hidden_state
 
         # FFN LayerNorm (community naming)
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.ffn_layernorm.weight", f"{prefix}/ffn_norm"
+            hidden_state,
+            f"{weight_prefix}.ffn_layernorm.weight",
+            f"{prefix}/ffn_layernorm/output_0",
         )
 
         # Gate and Up projections (community naming)
         gate = self.make_matmul(
-            normed, f"{prefix}.mlp.gate_proj.MatMul.weight", f"{prefix}/mlp_gate"
+            normed,
+            f"{weight_prefix}.mlp.gate_proj.MatMul.weight",
+            f"{prefix}/mlp/gate_proj/MatMul/output_0",
         )
-        up = self.make_matmul(normed, f"{prefix}.mlp.up_proj.MatMul.weight", f"{prefix}/mlp_up")
+        up = self.make_matmul(
+            normed,
+            f"{weight_prefix}.mlp.up_proj.MatMul.weight",
+            f"{prefix}/mlp/up_proj/MatMul/output_0",
+        )
 
         # SiLU on gate
-        gate_silu = self.make_silu(gate, f"{prefix}/mlp_gate_silu")
+        gate_silu = self.make_silu(gate, f"{prefix}/mlp/Silu/output_0")
 
         # gate * up
-        gated = self.make_mul(gate_silu, up, f"{prefix}/mlp_gated")
+        gated = self.make_mul(gate_silu, up, f"{prefix}/mlp/Mul/output_0")
 
         # Down projection (community naming)
         down = self.make_matmul(
-            gated, f"{prefix}.mlp.down_proj.MatMul.weight", f"{prefix}/mlp_down"
+            gated,
+            f"{weight_prefix}.mlp.down_proj.MatMul.weight",
+            f"{prefix}/mlp/down_proj/MatMul/output_0",
         )
 
         # Residual
-        return self.make_add(residual, down, f"{prefix}/residual2")
+        return self.make_add(residual, down, f"{prefix}/Add_1/output_0")
 
     def build_lm_head(self, hidden_state: str) -> str:
         # Final LayerNorm using SkipSimplifiedLayerNormalization (fused op)

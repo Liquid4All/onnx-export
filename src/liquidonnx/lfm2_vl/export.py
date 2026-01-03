@@ -265,49 +265,53 @@ def export_vl_model(
         )
     )
 
-    # Conv caches
-    for idx in text_builder.conv_indices:
-        text_builder.inputs.append(
-            helper.make_tensor_value_info(
-                f"past_conv.{idx}",
-                TensorProto.FLOAT,
-                ["batch_size", H, vl_config.text_config.conv_L_cache],
+    # Interleave cache inputs by layer index (community convention)
+    conv_set = set(text_builder.conv_indices)
+    attn_set = set(text_builder.attn_indices)
+    for idx in range(vl_config.text_config.num_hidden_layers):
+        if idx in conv_set:
+            text_builder.inputs.append(
+                helper.make_tensor_value_info(
+                    f"past_conv.{idx}",
+                    TensorProto.FLOAT,
+                    ["batch_size", H, vl_config.text_config.conv_L_cache],
+                )
             )
-        )
-
-    # KV caches
-    for idx in text_builder.attn_indices:
-        text_builder.inputs.append(
-            helper.make_tensor_value_info(
-                f"past_key_values.{idx}.key",
-                TensorProto.FLOAT,
-                [
-                    "batch_size",
-                    vl_config.text_config.num_key_value_heads,
-                    "past_sequence_length",
-                    text_builder.head_dim,
-                ],
+        elif idx in attn_set:
+            text_builder.inputs.append(
+                helper.make_tensor_value_info(
+                    f"past_key_values.{idx}.key",
+                    TensorProto.FLOAT,
+                    [
+                        "batch_size",
+                        vl_config.text_config.num_key_value_heads,
+                        "past_sequence_length",
+                        text_builder.head_dim,
+                    ],
+                )
             )
-        )
-        text_builder.inputs.append(
-            helper.make_tensor_value_info(
-                f"past_key_values.{idx}.value",
-                TensorProto.FLOAT,
-                [
-                    "batch_size",
-                    vl_config.text_config.num_key_value_heads,
-                    "past_sequence_length",
-                    text_builder.head_dim,
-                ],
+            text_builder.inputs.append(
+                helper.make_tensor_value_info(
+                    f"past_key_values.{idx}.value",
+                    TensorProto.FLOAT,
+                    [
+                        "batch_size",
+                        vl_config.text_config.num_key_value_heads,
+                        "past_sequence_length",
+                        text_builder.head_dim,
+                    ],
+                )
             )
-        )
 
     text_builder.build_outputs()
     text_builder.build_rope_cache()
     text_builder.build_attention_mask_subgraph()
 
     # Skip build_embedding() - use inputs_embeds directly as hidden_state
-    # (lm_head weight is added by build_lm_head as lm_head.MatMul.weight)
+    # But still add embed_tokens weight for tied lm_head (build_lm_head uses it)
+    text_builder.add_initializer(
+        "model.embed_tokens.weight", text_builder.weights["model.embed_tokens.weight"]
+    )
     hidden_state = "inputs_embeds"
 
     for layer_idx in range(vl_config.text_config.num_hidden_layers):

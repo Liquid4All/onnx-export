@@ -70,17 +70,17 @@ class ONNXBuilderBase:
         self.initializers.append(numpy_helper.from_array(tensor, name))
 
     def get_constant(self, value: int | float | list | np.ndarray, dtype=np.int64) -> str:
-        """Get or create a shared constant initializer.
+        """Get or create a shared constant via Constant node.
 
-        Returns the name of a shared constant. If the same value was already
-        added, returns the existing name (deduplication).
+        Returns the output name of a Constant node. If the same value was already
+        added, returns the existing output name (deduplication).
 
         Args:
             value: Scalar or array value
             dtype: NumPy dtype (default: int64)
 
         Returns:
-            Initializer name like "/model/constants/INT64/[2]"
+            Constant node output name like "/model/constants/INT64/[2]"
         """
         arr = np.asarray(value, dtype=dtype)
 
@@ -91,16 +91,19 @@ class ONNXBuilderBase:
             return self._constants[key]
 
         # Generate name matching community convention
+        # Community: node="/model/constant_nodes/...", output="/model/constants/..."
         dtype_name = str(arr.dtype).upper().replace("FLOAT32", "FLOAT").replace("FLOAT64", "FLOAT")
         if arr.ndim == 0:
             value_str = str(arr.item())
         else:
             value_str = str(arr.tolist())
-        name = f"/model/constants/{dtype_name}/{value_str}"
+        output_name = f"/model/constants/{dtype_name}/{value_str}"
 
-        self.add_initializer(name, arr)
-        self._constants[key] = name
-        return name
+        # Add as initializer (matches community convention)
+        self.add_initializer(output_name, arr)
+
+        self._constants[key] = output_name
+        return output_name
 
     def make_node(
         self,
@@ -117,7 +120,7 @@ class ONNXBuilderBase:
             op_type: ONNX operator type
             inputs: Input tensor names
             outputs: Output tensor names
-            name: Node name (auto-generated if None)
+            name: Node name (derived from first output if None, stripping /output_N suffix)
             domain: Operator domain (empty for standard ops)
             **attrs: Operator attributes
 
@@ -125,7 +128,13 @@ class ONNXBuilderBase:
             First output tensor name
         """
         if name is None:
-            name = self._unique_name(op_type)
+            # Derive node name from first output, stripping /output_N suffix
+            if outputs and outputs[0]:
+                import re
+
+                name = re.sub(r"/output_\d+$", "", outputs[0])
+            else:
+                name = self._unique_name(op_type)
 
         node = helper.make_node(op_type, inputs, outputs, name=name, domain=domain, **attrs)
         self.nodes.append(node)
@@ -148,8 +157,17 @@ class ONNXBuilderBase:
         return self.make_node("Sigmoid", [input_name], [output_name])
 
     def make_silu(self, input_name: str, output_name: str) -> str:
-        """Create SiLU activation: x * sigmoid(x)."""
-        sigmoid_out = self.make_sigmoid(input_name, f"{output_name}_sigmoid")
+        """Create SiLU activation: x * sigmoid(x).
+
+        Given output_name like '/model/layers.0/mlp/Silu/output_0',
+        creates:
+        - Sigmoid with output '/model/layers.0/mlp/Silu/Sigmoid/output_0'
+        - Mul with output '/model/layers.0/mlp/Silu/output_0'
+        """
+        import re
+
+        base = re.sub(r"/output_\d+$", "", output_name)
+        sigmoid_out = self.make_sigmoid(input_name, f"{base}/Sigmoid/output_0")
         return self.make_mul(input_name, sigmoid_out, output_name)
 
     def make_gelu(self, input_name: str, output_name: str, approximate: str = "tanh") -> str:
@@ -278,15 +296,17 @@ class ONNXBuilderBase:
         Args:
             input_name: Input tensor name
             n_elements: Name of scalar tensor containing N
-            output_name: Output tensor name
+            output_name: Output tensor name (should end with /output_0)
             axis: Axis to slice along
 
         Returns:
             Output tensor name
         """
-        prefix = f"{output_name}_slice"
-        neg_n = self.make_mul(n_elements, self.get_constant(-1), f"{prefix}/neg_n")
-        start = self.make_unsqueeze(neg_n, self.get_constant([0]), f"{prefix}/start")
+        import re
+
+        base = re.sub(r"/output_\d+$", "", output_name)
+        neg_n = self.make_mul(n_elements, self.get_constant(-1), f"{base}/Mul/output_0")
+        start = self.make_unsqueeze(neg_n, self.get_constant([0]), f"{base}/Unsqueeze/output_0")
 
         return self.make_slice(
             input_name,

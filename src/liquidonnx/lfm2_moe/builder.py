@@ -614,12 +614,12 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                 embed_weight,
                 "input_ids",
                 "model_embed_tokens_weight",
-                "/model/embed_tokens/Gather/output_0",
+                "/model/embed_tokens/GatherBlockQuantized/output_0",
             )
         else:
             self.add_initializer("model.embed_tokens.weight", embed_weight)
             return self.make_node(
-                "Gather", ["model.embed_tokens.weight", "input_ids"], ["embed_output"], axis=0
+                "Gather", ["model.embed_tokens.weight", "input_ids"], ["/model/embed_tokens/Gather/output_0"], axis=0
             )
 
     def build_rope_cache(self):
@@ -639,77 +639,105 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         self.add_initializer("sin_cache", torch.sin(freqs).numpy())
 
     def build_attention_mask_subgraph(self):
-        # Use community constant naming
+        # Use community constant naming and path convention
         const_1_arr = self.get_constant([1])  # /model/constants/INT64/[1]
         const_1_scalar = self.get_constant(1)  # /model/constants/INT64/1
 
         self.make_node(
-            "ReduceSum", ["attention_mask", const_1_arr], ["/attn_mask/reduce_sum"], keepdims=0
+            "ReduceSum",
+            ["attention_mask", const_1_arr],
+            ["/model/attn_mask_reformat/attn_mask_subgraph/ReduceSum/output_0"],
+            keepdims=0,
         )
-        self.make_node("Sub", ["/attn_mask/reduce_sum", const_1_arr], ["/attn_mask/seqlens_k_i64"])
         self.make_node(
-            "Cast", ["/attn_mask/seqlens_k_i64"], ["/attn_mask/seqlens_k"], to=TensorProto.INT32
+            "Sub",
+            ["/model/attn_mask_reformat/attn_mask_subgraph/ReduceSum/output_0", const_1_arr],
+            ["/model/attn_mask_reformat/attn_mask_subgraph/Sub/output_0"],
+        )
+        self.make_node(
+            "Cast",
+            ["/model/attn_mask_reformat/attn_mask_subgraph/Sub/output_0"],
+            ["/model/attn_mask_reformat/attn_mask_subgraph/Sub/Cast/output_0"],
+            to=TensorProto.INT32,
         )
 
-        self.make_node("Shape", ["attention_mask"], ["/attn_mask/shape"])
         self.make_node(
-            "Gather", ["/attn_mask/shape", const_1_scalar], ["/attn_mask/total_seq_i64"], axis=0
+            "Shape",
+            ["attention_mask"],
+            ["/model/attn_mask_reformat/attn_mask_subgraph/Shape/output_0"],
         )
         self.make_node(
-            "Cast", ["/attn_mask/total_seq_i64"], ["/attn_mask/total_seq"], to=TensorProto.INT32
+            "Gather",
+            ["/model/attn_mask_reformat/attn_mask_subgraph/Shape/output_0", const_1_scalar],
+            ["/model/attn_mask_reformat/attn_mask_subgraph/Gather_1/output_0"],
+            axis=0,
+        )
+        self.make_node(
+            "Cast",
+            ["/model/attn_mask_reformat/attn_mask_subgraph/Gather_1/output_0"],
+            ["/model/attn_mask_reformat/attn_mask_subgraph/Gather/Cast/output_0"],
+            to=TensorProto.INT32,
         )
 
     def build_conv_layer(self, layer_idx: int, hidden_state: str) -> str:
-        prefix = f"model.layers.{layer_idx}"
+        prefix = f"/model/layers.{layer_idx}"
+        weight_prefix = f"model.layers.{layer_idx}"
         L = self.config.conv_L_cache
         H = self.config.hidden_size
         residual = hidden_state
 
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.operator_layernorm.weight", f"{prefix}/op_norm"
+            hidden_state,
+            f"{weight_prefix}.operator_layernorm.weight",
+            f"{prefix}/operator_layernorm/output_0",
         )
 
         if self.use_q4:
             in_proj = self.make_matmul_nbits(
                 normed,
-                self.weights[f"{prefix}.conv.in_proj.weight"].T,
+                self.weights[f"{weight_prefix}.conv.in_proj.weight"].T,
                 f"model_layers_{layer_idx}_conv_in_proj_MatMul_weight",
-                f"/model/layers.{layer_idx}/conv/in_proj/MatMul/output_0",
+                f"{prefix}/conv/in_proj/MatMul/output_0",
             )
         else:
             in_proj = self.make_matmul(
-                normed, f"{prefix}.conv.in_proj.MatMul.weight", f"{prefix}/in_proj"
+                normed, f"{weight_prefix}.conv.in_proj.MatMul.weight", f"{prefix}/conv/in_proj/MatMul/output_0"
             )
-        in_proj_t = self.make_node("Transpose", [in_proj], [f"{prefix}/in_proj_t"], perm=[0, 2, 1])
+        in_proj_t = self.make_node(
+            "Transpose", [in_proj], [f"{prefix}/conv/Transpose_1/output_0"], perm=[0, 2, 1]
+        )
         self.make_node(
             "Split",
             [in_proj_t, self.get_constant([H, H, H])],
-            [f"{prefix}/B", f"{prefix}/C", f"{prefix}/x"],
+            [f"{prefix}/conv/Split/output_0", f"{prefix}/conv/Split/output_1", f"{prefix}/conv/Split/output_2"],
             axis=1,
         )
 
-        Bx = self.make_mul(f"{prefix}/B", f"{prefix}/x", f"{prefix}/Bx")
+        Bx = self.make_mul(
+            f"{prefix}/conv/Split/output_0", f"{prefix}/conv/Split/output_2", f"{prefix}/conv/Mul_1/output_0"
+        )
         conv_input = self.make_node(
-            "Concat", [f"past_conv.{layer_idx}", Bx], [f"{prefix}/conv_input"], axis=2
+            "Concat", [f"past_conv.{layer_idx}", Bx], [f"{prefix}/conv/Conv_Input/output_0"], axis=2
         )
         conv_out_full = self.make_node(
             "Conv",
-            [conv_input, f"{prefix}.conv.conv.weight"],
-            [f"{prefix}/conv_out_full"],
+            [conv_input, f"{weight_prefix}.conv.conv.weight"],
+            [f"{prefix}/conv/Conv/output_0"],
             kernel_shape=[L],
             group=H,
         )
 
         # Extract seq_len from LayerNorm output (shape [B, S, H]) at axis 1
-        # This matches community approach and avoids needing constant 2
-        self.make_node("Shape", [normed], [f"{prefix}/normed_shape"])
+        self.make_node("Shape", [normed], [f"{prefix}/conv/Shape/output_0"])
         self.make_node(
             "Gather",
-            [f"{prefix}/normed_shape", self.get_constant(1)],
-            [f"{prefix}/seq_len"],
+            [f"{prefix}/conv/Shape/output_0", self.get_constant(1)],
+            [f"{prefix}/conv/Gather/output_0"],
             axis=0,
         )
-        self.make_slice_last_n(conv_out_full, f"{prefix}/seq_len", f"{prefix}/conv_out", axis=2)
+        self.make_slice_last_n(
+            conv_out_full, f"{prefix}/conv/Gather/output_0", f"{prefix}/conv/Slice/output_0", axis=2
+        )
 
         self.make_node(
             "Slice",
@@ -722,26 +750,29 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             [f"present_conv.{layer_idx}"],
         )
 
-        y = self.make_mul(f"{prefix}/C", f"{prefix}/conv_out", f"{prefix}/y")
-        y_t = self.make_node("Transpose", [y], [f"{prefix}/y_t"], perm=[0, 2, 1])
+        y = self.make_mul(
+            f"{prefix}/conv/Split/output_1", f"{prefix}/conv/Slice/output_0", f"{prefix}/conv/Mul_2/output_0"
+        )
+        y_t = self.make_node("Transpose", [y], [f"{prefix}/conv/Transpose_2/output_0"], perm=[0, 2, 1])
 
         if self.use_q4:
             out_proj = self.make_matmul_nbits(
                 y_t,
-                self.weights[f"{prefix}.conv.out_proj.weight"].T,
+                self.weights[f"{weight_prefix}.conv.out_proj.weight"].T,
                 f"model_layers_{layer_idx}_conv_out_proj_MatMul_weight",
-                f"/model/layers.{layer_idx}/conv/out_proj/MatMul/output_0",
+                f"{prefix}/conv/out_proj/MatMul/output_0",
             )
         else:
             out_proj = self.make_matmul(
-                y_t, f"{prefix}.conv.out_proj.MatMul.weight", f"{prefix}/out_proj"
+                y_t, f"{weight_prefix}.conv.out_proj.MatMul.weight", f"{prefix}/conv/out_proj/MatMul/output_0"
             )
 
-        hidden_state = self.make_add(residual, out_proj, f"{prefix}/residual1")
+        hidden_state = self.make_add(residual, out_proj, f"{prefix}/Add/output_0")
         return self.build_ffn(layer_idx, hidden_state)
 
     def build_attention_layer(self, layer_idx: int, hidden_state: str) -> str:
-        prefix = f"model.layers.{layer_idx}"
+        prefix = f"/model/layers.{layer_idx}"
+        weight_prefix = f"model.layers.{layer_idx}"
         H = self.config.hidden_size
         nh = self.config.num_attention_heads
         nkv = self.config.num_key_value_heads
@@ -750,50 +781,70 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         residual = hidden_state
 
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.operator_layernorm.weight", f"{prefix}/op_norm"
+            hidden_state,
+            f"{weight_prefix}.operator_layernorm.weight",
+            f"{prefix}/operator_layernorm/output_0",
         )
 
         if self.use_q4:
             q = self.make_matmul_nbits(
                 normed,
-                self.weights[f"{prefix}.self_attn.q_proj.weight"].T,
+                self.weights[f"{weight_prefix}.self_attn.q_proj.weight"].T,
                 f"model_layers_{layer_idx}_attn_q_proj_MatMul_weight",
-                f"/model/layers.{layer_idx}/attn/q_proj/MatMul/output_0",
+                f"{prefix}/attn/q_proj/MatMul/output_0",
             )
             k = self.make_matmul_nbits(
                 normed,
-                self.weights[f"{prefix}.self_attn.k_proj.weight"].T,
+                self.weights[f"{weight_prefix}.self_attn.k_proj.weight"].T,
                 f"model_layers_{layer_idx}_attn_k_proj_MatMul_weight",
-                f"/model/layers.{layer_idx}/attn/k_proj/MatMul/output_0",
+                f"{prefix}/attn/k_proj/MatMul/output_0",
             )
             v = self.make_matmul_nbits(
                 normed,
-                self.weights[f"{prefix}.self_attn.v_proj.weight"].T,
+                self.weights[f"{weight_prefix}.self_attn.v_proj.weight"].T,
                 f"model_layers_{layer_idx}_attn_v_proj_MatMul_weight",
-                f"/model/layers.{layer_idx}/attn/v_proj/MatMul/output_0",
+                f"{prefix}/attn/v_proj/MatMul/output_0",
             )
         else:
-            q = self.make_matmul(normed, f"{prefix}.attn.q_proj.MatMul.weight", f"{prefix}/q")
-            k = self.make_matmul(normed, f"{prefix}.attn.k_proj.MatMul.weight", f"{prefix}/k")
-            v = self.make_matmul(normed, f"{prefix}.attn.v_proj.MatMul.weight", f"{prefix}/v")
+            q = self.make_matmul(
+                normed, f"{weight_prefix}.attn.q_proj.MatMul.weight", f"{prefix}/attn/q_proj/MatMul/output_0"
+            )
+            k = self.make_matmul(
+                normed, f"{weight_prefix}.attn.k_proj.MatMul.weight", f"{prefix}/attn/k_proj/MatMul/output_0"
+            )
+            v = self.make_matmul(
+                normed, f"{weight_prefix}.attn.v_proj.MatMul.weight", f"{prefix}/attn/v_proj/MatMul/output_0"
+            )
 
         reshape_for_norm = self.get_constant([0, -1, hd])
         q_reshape_back = self.get_constant([0, -1, H])
         k_reshape_back = self.get_constant([0, -1, kv_hidden])
 
-        q_for_norm = self.make_node("Reshape", [q, reshape_for_norm], [f"{prefix}/q_for_norm"])
+        q_for_norm = self.make_node(
+            "Reshape", [q, reshape_for_norm], [f"{prefix}/attn/q_norm/Reshape/output_0"]
+        )
         q_normed = self.make_simple_layernorm(
-            q_for_norm, f"{prefix}.attn.q_norm.layernorm.weight", f"{prefix}/q_normed"
+            q_for_norm, f"{weight_prefix}.attn.q_norm.layernorm.weight", f"{prefix}/attn/q_norm/layernorm/output_0"
         )
-        q_3d = self.make_node("Reshape", [q_normed, q_reshape_back], [f"{prefix}/q_3d"])
+        q_3d = self.make_node(
+            "Reshape", [q_normed, q_reshape_back], [f"{prefix}/attn/q_norm/Reshape_1/output_0"]
+        )
 
-        k_for_norm = self.make_node("Reshape", [k, reshape_for_norm], [f"{prefix}/k_for_norm"])
-        k_normed = self.make_simple_layernorm(
-            k_for_norm, f"{prefix}.attn.k_norm.layernorm.weight", f"{prefix}/k_normed"
+        k_for_norm = self.make_node(
+            "Reshape", [k, reshape_for_norm], [f"{prefix}/attn/k_norm/Reshape/output_0"]
         )
-        k_3d = self.make_node("Reshape", [k_normed, k_reshape_back], [f"{prefix}/k_3d"])
+        k_normed = self.make_simple_layernorm(
+            k_for_norm, f"{weight_prefix}.attn.k_norm.layernorm.weight", f"{prefix}/attn/k_norm/layernorm/output_0"
+        )
+        k_3d = self.make_node(
+            "Reshape", [k_normed, k_reshape_back], [f"{prefix}/attn/k_norm/Reshape_1/output_0"]
+        )
 
         scale = 1.0 / (hd**0.5)
+
+        # Use community attn mask output names
+        seqlens_k = "/model/attn_mask_reformat/attn_mask_subgraph/Sub/Cast/output_0"
+        total_seq = "/model/attn_mask_reformat/attn_mask_subgraph/Gather/Cast/output_0"
 
         if self.use_integrated_rope:
             self.make_node(
@@ -804,12 +855,12 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                     v,
                     f"past_key_values.{layer_idx}.key",
                     f"past_key_values.{layer_idx}.value",
-                    "/attn_mask/seqlens_k",
-                    "/attn_mask/total_seq",
+                    seqlens_k,
+                    total_seq,
                     "cos_cache",
                     "sin_cache",
                 ],
-                [f"{prefix}/attn_out", f"present.{layer_idx}.key", f"present.{layer_idx}.value"],
+                [f"{prefix}/attn/MultiHeadAttention/output_0", f"present.{layer_idx}.key", f"present.{layer_idx}.value"],
                 domain="com.microsoft",
                 num_heads=nh,
                 kv_num_heads=nkv,
@@ -829,13 +880,13 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             q_rope = self.make_node(
                 "RotaryEmbedding",
                 [q_3d, "position_ids", "cos_cache", "sin_cache"],
-                [f"{prefix}/q_rope"],
+                [f"{prefix}/attn/RotaryEmbedding/output_0"],
                 **rope_attrs,
             )
             k_rope = self.make_node(
                 "RotaryEmbedding",
                 [k_3d, "position_ids", "cos_cache", "sin_cache"],
-                [f"{prefix}/k_rope"],
+                [f"{prefix}/attn/RotaryEmbedding_1/output_0"],
                 **rope_attrs,
             )
 
@@ -847,12 +898,12 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                     v,
                     f"past_key_values.{layer_idx}.key",
                     f"past_key_values.{layer_idx}.value",
-                    "/attn_mask/seqlens_k",
-                    "/attn_mask/total_seq",
+                    seqlens_k,
+                    total_seq,
                     "",
                     "",
                 ],
-                [f"{prefix}/attn_out", f"present.{layer_idx}.key", f"present.{layer_idx}.value"],
+                [f"{prefix}/attn/MultiHeadAttention/output_0", f"present.{layer_idx}.key", f"present.{layer_idx}.value"],
                 domain="com.microsoft",
                 num_heads=nh,
                 kv_num_heads=nkv,
@@ -865,16 +916,18 @@ class LFM2MoEBuilder(ONNXBuilderBase):
 
         if self.use_q4:
             o_proj = self.make_matmul_nbits(
-                f"{prefix}/attn_out",
-                self.weights[f"{prefix}.self_attn.out_proj.weight"].T,
+                f"{prefix}/attn/MultiHeadAttention/output_0",
+                self.weights[f"{weight_prefix}.self_attn.out_proj.weight"].T,
                 f"model_layers_{layer_idx}_attn_o_proj_MatMul_weight",
-                f"/model/layers.{layer_idx}/attn/o_proj/MatMul/output_0",
+                f"{prefix}/attn/o_proj/MatMul/output_0",
             )
         else:
             o_proj = self.make_matmul(
-                f"{prefix}/attn_out", f"{prefix}.attn.o_proj.MatMul.weight", f"{prefix}/o_proj"
+                f"{prefix}/attn/MultiHeadAttention/output_0",
+                f"{weight_prefix}.attn.o_proj.MatMul.weight",
+                f"{prefix}/attn/o_proj/MatMul/output_0",
             )
-        hidden_state = self.make_add(residual, o_proj, f"{prefix}/residual1")
+        hidden_state = self.make_add(residual, o_proj, f"{prefix}/Add/output_0")
         return self.build_ffn(layer_idx, hidden_state)
 
     def build_ffn(self, layer_idx: int, hidden_state: str) -> str:
@@ -887,48 +940,51 @@ class LFM2MoEBuilder(ONNXBuilderBase):
 
     def build_dense_mlp(self, layer_idx: int, hidden_state: str) -> str:
         """Build dense MLP block (SwiGLU activation)."""
-        prefix = f"model.layers.{layer_idx}"
+        prefix = f"/model/layers.{layer_idx}"
+        weight_prefix = f"model.layers.{layer_idx}"
         residual = hidden_state
 
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.ffn_layernorm.weight", f"{prefix}/ffn_norm"
+            hidden_state, f"{weight_prefix}.ffn_layernorm.weight", f"{prefix}/ffn_layernorm/output_0"
         )
 
         if self.use_q4:
             gate = self.make_matmul_nbits(
                 normed,
-                self.weights[f"{prefix}.feed_forward.w1.weight"].T,
+                self.weights[f"{weight_prefix}.feed_forward.w1.weight"].T,
                 f"model_layers_{layer_idx}_mlp_gate_proj_MatMul_weight",
-                f"/model/layers.{layer_idx}/mlp/gate_proj/MatMul/output_0",
+                f"{prefix}/mlp/gate_proj/MatMul/output_0",
             )
             up = self.make_matmul_nbits(
                 normed,
-                self.weights[f"{prefix}.feed_forward.w3.weight"].T,
+                self.weights[f"{weight_prefix}.feed_forward.w3.weight"].T,
                 f"model_layers_{layer_idx}_mlp_up_proj_MatMul_weight",
-                f"/model/layers.{layer_idx}/mlp/up_proj/MatMul/output_0",
+                f"{prefix}/mlp/up_proj/MatMul/output_0",
             )
         else:
             gate = self.make_matmul(
-                normed, f"{prefix}.mlp.gate_proj.MatMul.weight", f"{prefix}/mlp_gate"
+                normed, f"{weight_prefix}.mlp.gate_proj.MatMul.weight", f"{prefix}/mlp/gate_proj/MatMul/output_0"
             )
-            up = self.make_matmul(normed, f"{prefix}.mlp.up_proj.MatMul.weight", f"{prefix}/mlp_up")
+            up = self.make_matmul(
+                normed, f"{weight_prefix}.mlp.up_proj.MatMul.weight", f"{prefix}/mlp/up_proj/MatMul/output_0"
+            )
 
-        gate_silu = self.make_silu(gate, f"{prefix}/mlp_gate_silu")
-        gated = self.make_mul(gate_silu, up, f"{prefix}/mlp_gated")
+        gate_silu = self.make_silu(gate, f"{prefix}/mlp/Silu/output_0")
+        gated = self.make_mul(gate_silu, up, f"{prefix}/mlp/Mul/output_0")
 
         if self.use_q4:
             down = self.make_matmul_nbits(
                 gated,
-                self.weights[f"{prefix}.feed_forward.w2.weight"].T,
+                self.weights[f"{weight_prefix}.feed_forward.w2.weight"].T,
                 f"model_layers_{layer_idx}_mlp_down_proj_MatMul_weight",
-                f"/model/layers.{layer_idx}/mlp/down_proj/MatMul/output_0",
+                f"{prefix}/mlp/down_proj/MatMul/output_0",
             )
         else:
             down = self.make_matmul(
-                gated, f"{prefix}.mlp.down_proj.MatMul.weight", f"{prefix}/mlp_down"
+                gated, f"{weight_prefix}.mlp.down_proj.MatMul.weight", f"{prefix}/mlp/down_proj/MatMul/output_0"
             )
 
-        return self.make_add(residual, down, f"{prefix}/residual2")
+        return self.make_add(residual, down, f"{prefix}/Add_1/output_0")
 
     def build_moe(self, layer_idx: int, hidden_state: str) -> str:
         """Build Sparse MoE block using com.microsoft:MoE operator.
@@ -955,25 +1011,26 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             - Uses SwiGLU activation with fusion
             - Normalizes routing weights
         """
-        prefix = f"model.layers.{layer_idx}"
+        prefix = f"/model/layers.{layer_idx}"
+        weight_prefix = f"model.layers.{layer_idx}"
         num_experts = self.config.num_experts
         k = self.config.num_experts_per_tok
         residual = hidden_state
 
         # === FFN LayerNorm ===
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.ffn_layernorm.weight", f"{prefix}/ffn_layernorm/output_0"
+            hidden_state, f"{weight_prefix}.ffn_layernorm.weight", f"{prefix}/ffn_layernorm/output_0"
         )
 
         # === Router subgraph ===
         router_logits = self.make_matmul(
-            normed, f"{prefix}.moe.router.MatMul.weight", f"{prefix}/moe/router/MatMul/output_0"
+            normed, f"{weight_prefix}.moe.router.MatMul.weight", f"{prefix}/moe/router/MatMul/output_0"
         )
         routing_weights = self.make_sigmoid(router_logits, f"{prefix}/moe/router/Sigmoid/output_0")
 
         if self.config.use_expert_bias:
             scores_for_routing = self.make_add(
-                routing_weights, f"{prefix}.moe.expert_bias", f"{prefix}/moe/router/Add/output_0"
+                routing_weights, f"{weight_prefix}.moe.expert_bias", f"{prefix}/moe/router/Add/output_0"
             )
         else:
             scores_for_routing = routing_weights
@@ -1040,9 +1097,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             [
                 normed,
                 router_probs,
-                f"{prefix}.moe.experts.gate_up_proj.weight",
+                f"{weight_prefix}.moe.experts.gate_up_proj.weight",
                 "",
-                f"{prefix}.moe.experts.down_proj.weight",
+                f"{weight_prefix}.moe.experts.down_proj.weight",
                 "",
                 "",
                 "",
@@ -1058,7 +1115,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             use_sparse_mixer=0,
         )
 
-        return self.make_add(residual, moe_out, f"{prefix}/residual2")
+        return self.make_add(residual, moe_out, f"{prefix}/Add_1/output_0")
 
     def build_qmoe(self, layer_idx: int, hidden_state: str) -> str:
         """Build Sparse MoE block using com.microsoft:QMoE operator (quantized).
@@ -1082,14 +1139,15 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             [12] down_proj_weight_zp: UINT8 packed
             [13] (empty)
         """
-        prefix = f"model.layers.{layer_idx}"
+        prefix = f"/model/layers.{layer_idx}"
+        weight_prefix = f"model.layers.{layer_idx}"
         num_experts = self.config.num_experts
         k = self.config.num_experts_per_tok
         residual = hidden_state
 
         # === FFN LayerNorm ===
         normed = self.make_simple_layernorm(
-            hidden_state, f"{prefix}.ffn_layernorm.weight", f"{prefix}/ffn_layernorm/output_0"
+            hidden_state, f"{weight_prefix}.ffn_layernorm.weight", f"{prefix}/ffn_layernorm/output_0"
         )
 
         # === Router subgraph ===
@@ -1097,20 +1155,20 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             # Q4: Use MatMulNBits for router weights
             router_logits = self.make_matmul_nbits(
                 normed,
-                self.weights[f"{prefix}.feed_forward.gate.weight"].T,
+                self.weights[f"{weight_prefix}.feed_forward.gate.weight"].T,
                 f"model_layers_{layer_idx}_moe_router_MatMul_weight",
                 f"{prefix}/moe/router/MatMul/output_0",
             )
         else:
             router_logits = self.make_matmul(
-                normed, f"{prefix}.moe.router.MatMul.weight", f"{prefix}/moe/router/MatMul/output_0"
+                normed, f"{weight_prefix}.moe.router.MatMul.weight", f"{prefix}/moe/router/MatMul/output_0"
             )
 
         routing_weights = self.make_sigmoid(router_logits, f"{prefix}/moe/router/Sigmoid/output_0")
 
         if self.config.use_expert_bias:
             scores_for_routing = self.make_add(
-                routing_weights, f"{prefix}.moe.expert_bias", f"{prefix}/moe/router/Add/output_0"
+                routing_weights, f"{weight_prefix}.moe.expert_bias", f"{prefix}/moe/router/Add/output_0"
             )
         else:
             scores_for_routing = routing_weights
@@ -1173,7 +1231,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         )
 
         # === QMoE operator ===
-        prefix_underscore = prefix.replace(".", "_")
+        prefix_underscore = weight_prefix.replace(".", "_")
         qmoe_out = self.make_node(
             "QMoE",
             [
@@ -1202,7 +1260,7 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             swiglu_fusion=1,
         )
 
-        return self.make_add(residual, qmoe_out, f"{prefix}/residual2")
+        return self.make_add(residual, qmoe_out, f"{prefix}/Add_1/output_0")
 
     def build_lm_head(self, hidden_state: str) -> str:
         # Community naming: model.layers.{num_layers}.final_norm_layernorm.weight
@@ -1267,10 +1325,10 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             self.make_node(
                 "Transpose",
                 ["model.embed_tokens.weight"],
-                ["lm_head.weight_transposed"],
+                ["/model/lm_head/Transpose/output_0"],
                 perm=[1, 0],
             )
-            return self.make_matmul(normed, "lm_head.weight_transposed", "logits")
+            return self.make_matmul(normed, "/model/lm_head/Transpose/output_0", "logits")
 
     def load_weights(self, model_path: str):
         import torch
