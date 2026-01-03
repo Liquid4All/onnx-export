@@ -187,8 +187,22 @@ def export_model(model_path: str, output_dir: pathlib.Path | str):
     return output_path
 
 
-def do_quantize(onnx_dir: pathlib.Path, bits: int, exclude_lm_head: bool, block_size: int):
-    """Quantize model to INT4 or INT8."""
+def do_quantize(
+    onnx_dir: pathlib.Path,
+    bits: int,
+    exclude_lm_head: bool,
+    block_size: int,
+    symmetric: bool = False,
+):
+    """Quantize model to INT4 or INT8.
+
+    Args:
+        onnx_dir: Directory containing model.onnx
+        bits: Quantization bits (4 or 8)
+        exclude_lm_head: Keep lm_head in FP32
+        block_size: Block size for quantization
+        symmetric: Use symmetric quantization (no zero points, better JSEP compatibility)
+    """
     input_model = onnx_dir / "model.onnx"
     if not input_model.exists():
         raise FileNotFoundError(f"model.onnx not found in {onnx_dir}")
@@ -201,9 +215,15 @@ def do_quantize(onnx_dir: pathlib.Path, bits: int, exclude_lm_head: bool, block_
 
     _, orig_mb = get_model_size(input_model)
 
-    logger.info(f"Quantizing to Q{bits}...")
+    quant_type = "symmetric" if symmetric else "asymmetric"
+    logger.info(f"Quantizing to Q{bits} ({quant_type})...")
     quantize_model(
-        input_model, output_model, bits=bits, block_size=block_size, exclude_lm_head=exclude_lm_head
+        input_model,
+        output_model,
+        bits=bits,
+        block_size=block_size,
+        exclude_lm_head=exclude_lm_head,
+        symmetric=symmetric,
     )
 
     _, quant_mb = get_model_size(output_model)
@@ -271,6 +291,11 @@ def main():
         default=32,
         help="Block size for quantization (default: 32)",
     )
+    parser.add_argument(
+        "--q4-asymmetric",
+        action="store_true",
+        help="Use asymmetric Q4 quantization. Default is symmetric (required for WebGPU)",
+    )
 
     args = parser.parse_args()
 
@@ -331,10 +356,13 @@ def main():
         logger.info(f"Quantizing to Q{bits}")
         logger.info("=" * 60)
 
+        # Q4: symmetric by default (required for WebGPU), Q8: asymmetric
+        symmetric = (bits == 4) and not args.q4_asymmetric
+
         for size in sizes:
             onnx_dir = get_output_dir(size, args.output_dir) / "onnx"
             try:
-                do_quantize(onnx_dir, bits, exclude_lm_head, args.block_size)
+                do_quantize(onnx_dir, bits, exclude_lm_head, args.block_size, symmetric=symmetric)
                 logger.info(f"  {size}: OK")
             except Exception as e:
                 logger.error(f"  {size}: FAILED - {e}")

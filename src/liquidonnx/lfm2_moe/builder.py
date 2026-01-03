@@ -619,7 +619,10 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         else:
             self.add_initializer("model.embed_tokens.weight", embed_weight)
             return self.make_node(
-                "Gather", ["model.embed_tokens.weight", "input_ids"], ["/model/embed_tokens/Gather/output_0"], axis=0
+                "Gather",
+                ["model.embed_tokens.weight", "input_ids"],
+                ["/model/embed_tokens/Gather/output_0"],
+                axis=0,
             )
 
     def build_rope_cache(self):
@@ -701,7 +704,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             )
         else:
             in_proj = self.make_matmul(
-                normed, f"{weight_prefix}.conv.in_proj.MatMul.weight", f"{prefix}/conv/in_proj/MatMul/output_0"
+                normed,
+                f"{weight_prefix}.conv.in_proj.MatMul.weight",
+                f"{prefix}/conv/in_proj/MatMul/output_0",
             )
         in_proj_t = self.make_node(
             "Transpose", [in_proj], [f"{prefix}/conv/Transpose_1/output_0"], perm=[0, 2, 1]
@@ -709,12 +714,18 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         self.make_node(
             "Split",
             [in_proj_t, self.get_constant([H, H, H])],
-            [f"{prefix}/conv/Split/output_0", f"{prefix}/conv/Split/output_1", f"{prefix}/conv/Split/output_2"],
+            [
+                f"{prefix}/conv/Split/output_0",
+                f"{prefix}/conv/Split/output_1",
+                f"{prefix}/conv/Split/output_2",
+            ],
             axis=1,
         )
 
         Bx = self.make_mul(
-            f"{prefix}/conv/Split/output_0", f"{prefix}/conv/Split/output_2", f"{prefix}/conv/Mul_1/output_0"
+            f"{prefix}/conv/Split/output_0",
+            f"{prefix}/conv/Split/output_2",
+            f"{prefix}/conv/Mul_1/output_0",
         )
         conv_input = self.make_node(
             "Concat", [f"past_conv.{layer_idx}", Bx], [f"{prefix}/conv/Conv_Input/output_0"], axis=2
@@ -751,9 +762,13 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         )
 
         y = self.make_mul(
-            f"{prefix}/conv/Split/output_1", f"{prefix}/conv/Slice/output_0", f"{prefix}/conv/Mul_2/output_0"
+            f"{prefix}/conv/Split/output_1",
+            f"{prefix}/conv/Slice/output_0",
+            f"{prefix}/conv/Mul_2/output_0",
         )
-        y_t = self.make_node("Transpose", [y], [f"{prefix}/conv/Transpose_2/output_0"], perm=[0, 2, 1])
+        y_t = self.make_node(
+            "Transpose", [y], [f"{prefix}/conv/Transpose_2/output_0"], perm=[0, 2, 1]
+        )
 
         if self.use_q4:
             out_proj = self.make_matmul_nbits(
@@ -764,7 +779,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             )
         else:
             out_proj = self.make_matmul(
-                y_t, f"{weight_prefix}.conv.out_proj.MatMul.weight", f"{prefix}/conv/out_proj/MatMul/output_0"
+                y_t,
+                f"{weight_prefix}.conv.out_proj.MatMul.weight",
+                f"{prefix}/conv/out_proj/MatMul/output_0",
             )
 
         hidden_state = self.make_add(residual, out_proj, f"{prefix}/Add/output_0")
@@ -807,13 +824,19 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             )
         else:
             q = self.make_matmul(
-                normed, f"{weight_prefix}.attn.q_proj.MatMul.weight", f"{prefix}/attn/q_proj/MatMul/output_0"
+                normed,
+                f"{weight_prefix}.attn.q_proj.MatMul.weight",
+                f"{prefix}/attn/q_proj/MatMul/output_0",
             )
             k = self.make_matmul(
-                normed, f"{weight_prefix}.attn.k_proj.MatMul.weight", f"{prefix}/attn/k_proj/MatMul/output_0"
+                normed,
+                f"{weight_prefix}.attn.k_proj.MatMul.weight",
+                f"{prefix}/attn/k_proj/MatMul/output_0",
             )
             v = self.make_matmul(
-                normed, f"{weight_prefix}.attn.v_proj.MatMul.weight", f"{prefix}/attn/v_proj/MatMul/output_0"
+                normed,
+                f"{weight_prefix}.attn.v_proj.MatMul.weight",
+                f"{prefix}/attn/v_proj/MatMul/output_0",
             )
 
         reshape_for_norm = self.get_constant([0, -1, hd])
@@ -824,7 +847,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             "Reshape", [q, reshape_for_norm], [f"{prefix}/attn/q_norm/Reshape/output_0"]
         )
         q_normed = self.make_simple_layernorm(
-            q_for_norm, f"{weight_prefix}.attn.q_norm.layernorm.weight", f"{prefix}/attn/q_norm/layernorm/output_0"
+            q_for_norm,
+            f"{weight_prefix}.attn.q_norm.layernorm.weight",
+            f"{prefix}/attn/q_norm/layernorm/output_0",
         )
         q_3d = self.make_node(
             "Reshape", [q_normed, q_reshape_back], [f"{prefix}/attn/q_norm/Reshape_1/output_0"]
@@ -834,7 +859,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             "Reshape", [k, reshape_for_norm], [f"{prefix}/attn/k_norm/Reshape/output_0"]
         )
         k_normed = self.make_simple_layernorm(
-            k_for_norm, f"{weight_prefix}.attn.k_norm.layernorm.weight", f"{prefix}/attn/k_norm/layernorm/output_0"
+            k_for_norm,
+            f"{weight_prefix}.attn.k_norm.layernorm.weight",
+            f"{prefix}/attn/k_norm/layernorm/output_0",
         )
         k_3d = self.make_node(
             "Reshape", [k_normed, k_reshape_back], [f"{prefix}/attn/k_norm/Reshape_1/output_0"]
@@ -860,7 +887,11 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                     "cos_cache",
                     "sin_cache",
                 ],
-                [f"{prefix}/attn/MultiHeadAttention/output_0", f"present.{layer_idx}.key", f"present.{layer_idx}.value"],
+                [
+                    f"{prefix}/attn/MultiHeadAttention/output_0",
+                    f"present.{layer_idx}.key",
+                    f"present.{layer_idx}.value",
+                ],
                 domain="com.microsoft",
                 num_heads=nh,
                 kv_num_heads=nkv,
@@ -903,7 +934,11 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                     "",
                     "",
                 ],
-                [f"{prefix}/attn/MultiHeadAttention/output_0", f"present.{layer_idx}.key", f"present.{layer_idx}.value"],
+                [
+                    f"{prefix}/attn/MultiHeadAttention/output_0",
+                    f"present.{layer_idx}.key",
+                    f"present.{layer_idx}.value",
+                ],
                 domain="com.microsoft",
                 num_heads=nh,
                 kv_num_heads=nkv,
@@ -945,7 +980,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         residual = hidden_state
 
         normed = self.make_simple_layernorm(
-            hidden_state, f"{weight_prefix}.ffn_layernorm.weight", f"{prefix}/ffn_layernorm/output_0"
+            hidden_state,
+            f"{weight_prefix}.ffn_layernorm.weight",
+            f"{prefix}/ffn_layernorm/output_0",
         )
 
         if self.use_q4:
@@ -963,10 +1000,14 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             )
         else:
             gate = self.make_matmul(
-                normed, f"{weight_prefix}.mlp.gate_proj.MatMul.weight", f"{prefix}/mlp/gate_proj/MatMul/output_0"
+                normed,
+                f"{weight_prefix}.mlp.gate_proj.MatMul.weight",
+                f"{prefix}/mlp/gate_proj/MatMul/output_0",
             )
             up = self.make_matmul(
-                normed, f"{weight_prefix}.mlp.up_proj.MatMul.weight", f"{prefix}/mlp/up_proj/MatMul/output_0"
+                normed,
+                f"{weight_prefix}.mlp.up_proj.MatMul.weight",
+                f"{prefix}/mlp/up_proj/MatMul/output_0",
             )
 
         gate_silu = self.make_silu(gate, f"{prefix}/mlp/Silu/output_0")
@@ -981,7 +1022,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             )
         else:
             down = self.make_matmul(
-                gated, f"{weight_prefix}.mlp.down_proj.MatMul.weight", f"{prefix}/mlp/down_proj/MatMul/output_0"
+                gated,
+                f"{weight_prefix}.mlp.down_proj.MatMul.weight",
+                f"{prefix}/mlp/down_proj/MatMul/output_0",
             )
 
         return self.make_add(residual, down, f"{prefix}/Add_1/output_0")
@@ -1019,18 +1062,24 @@ class LFM2MoEBuilder(ONNXBuilderBase):
 
         # === FFN LayerNorm ===
         normed = self.make_simple_layernorm(
-            hidden_state, f"{weight_prefix}.ffn_layernorm.weight", f"{prefix}/ffn_layernorm/output_0"
+            hidden_state,
+            f"{weight_prefix}.ffn_layernorm.weight",
+            f"{prefix}/ffn_layernorm/output_0",
         )
 
         # === Router subgraph ===
         router_logits = self.make_matmul(
-            normed, f"{weight_prefix}.moe.router.MatMul.weight", f"{prefix}/moe/router/MatMul/output_0"
+            normed,
+            f"{weight_prefix}.moe.router.MatMul.weight",
+            f"{prefix}/moe/router/MatMul/output_0",
         )
         routing_weights = self.make_sigmoid(router_logits, f"{prefix}/moe/router/Sigmoid/output_0")
 
         if self.config.use_expert_bias:
             scores_for_routing = self.make_add(
-                routing_weights, f"{weight_prefix}.moe.expert_bias", f"{prefix}/moe/router/Add/output_0"
+                routing_weights,
+                f"{weight_prefix}.moe.expert_bias",
+                f"{prefix}/moe/router/Add/output_0",
             )
         else:
             scores_for_routing = routing_weights
@@ -1147,7 +1196,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
 
         # === FFN LayerNorm ===
         normed = self.make_simple_layernorm(
-            hidden_state, f"{weight_prefix}.ffn_layernorm.weight", f"{prefix}/ffn_layernorm/output_0"
+            hidden_state,
+            f"{weight_prefix}.ffn_layernorm.weight",
+            f"{prefix}/ffn_layernorm/output_0",
         )
 
         # === Router subgraph ===
@@ -1161,14 +1212,18 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             )
         else:
             router_logits = self.make_matmul(
-                normed, f"{weight_prefix}.moe.router.MatMul.weight", f"{prefix}/moe/router/MatMul/output_0"
+                normed,
+                f"{weight_prefix}.moe.router.MatMul.weight",
+                f"{prefix}/moe/router/MatMul/output_0",
             )
 
         routing_weights = self.make_sigmoid(router_logits, f"{prefix}/moe/router/Sigmoid/output_0")
 
         if self.config.use_expert_bias:
             scores_for_routing = self.make_add(
-                routing_weights, f"{weight_prefix}.moe.expert_bias", f"{prefix}/moe/router/Add/output_0"
+                routing_weights,
+                f"{weight_prefix}.moe.expert_bias",
+                f"{prefix}/moe/router/Add/output_0",
             )
         else:
             scores_for_routing = routing_weights

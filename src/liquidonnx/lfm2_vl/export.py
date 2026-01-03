@@ -428,13 +428,28 @@ def do_export(
 
 
 def do_quantize(
-    onnx_dir: pathlib.Path, decoder_bits: int, vision_bits: int = 8, block_size: int = 32
+    onnx_dir: pathlib.Path,
+    decoder_bits: int,
+    vision_bits: int = 8,
+    block_size: int = 32,
+    symmetric: bool = False,
 ):
+    """Quantize VL model components.
+
+    Args:
+        onnx_dir: Directory containing FP32 ONNX files
+        decoder_bits: Bits for decoder quantization (4 or 8)
+        vision_bits: Bits for vision encoder quantization (4 or 8)
+        block_size: Block size for quantization
+        symmetric: Use symmetric quantization (no zero points, better JSEP compatibility)
+    """
     if not onnx_dir.exists():
         raise FileNotFoundError(f"ONNX directory not found: {onnx_dir}")
 
+    quant_type = "symmetric" if symmetric else "asymmetric"
     logger.info(
-        f"Quantizing {onnx_dir.parent.name} -> decoder=q{decoder_bits}, vision=q{vision_bits}..."
+        f"Quantizing {onnx_dir.parent.name} -> decoder=q{decoder_bits}, "
+        f"vision=q{vision_bits} ({quant_type})..."
     )
 
     # Quantize embed_images
@@ -444,7 +459,12 @@ def do_quantize(
     if embed_fp32.exists() and not embed_output.exists():
         _, embed_orig_mb = get_model_size(embed_fp32)
         quantize_model(
-            embed_fp32, embed_output, bits=vision_bits, block_size=block_size, exclude_lm_head=False
+            embed_fp32,
+            embed_output,
+            bits=vision_bits,
+            block_size=block_size,
+            exclude_lm_head=False,
+            symmetric=symmetric,
         )
         _, embed_quant_mb = get_model_size(embed_output)
         logger.info(
@@ -464,6 +484,7 @@ def do_quantize(
             bits=decoder_bits,
             block_size=block_size,
             exclude_lm_head=True,
+            symmetric=symmetric,
         )
         _, decoder_quant_mb = get_model_size(decoder_output)
         logger.info(
@@ -550,6 +571,11 @@ def main():
         help="Block size for quantization (default: 32)",
     )
     parser.add_argument(
+        "--q4-asymmetric",
+        action="store_true",
+        help="Use asymmetric Q4 quantization. Default is symmetric (required for WebGPU)",
+    )
+    parser.add_argument(
         "--vision-format",
         choices=[VISION_MODE_TILED, VISION_MODE_CONV2D],
         default=VISION_MODE_TILED,
@@ -607,9 +633,11 @@ def main():
 
     # Quantize
     for bits in quant_bits:
+        # Q4: symmetric by default (required for WebGPU), Q8: asymmetric
+        symmetric = (bits == 4) and not args.q4_asymmetric
         for _, output_dir in exports:
             onnx_dir = output_dir / "onnx"
-            do_quantize(onnx_dir, bits, bits, args.block_size)
+            do_quantize(onnx_dir, bits, bits, args.block_size, symmetric=symmetric)
 
     # FP16 conversion
     if do_fp16_conversion:
