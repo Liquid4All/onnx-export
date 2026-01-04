@@ -41,21 +41,15 @@ base_model:
 
 ONNX export of [LFM2.5-VL-1.6B](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B) for cross-platform inference.
 
-## Available Variants
+## Recommended Variants
 
-### WebGPU (Browser)
+| Encoder | Decoder | Size | Platform | Use Case |
+|---------|---------|------|----------|----------|
+| FP16 | Q4 | ~1.5GB | WebGPU, Server | Recommended for most uses |
+| FP16 | FP16 | ~3.2GB | Server | Higher quality |
 
-| Variant | Encoder | Decoder | Size | Use Case |
-|---------|---------|---------|------|----------|
-| `fp16-q4` | FP16 | Q4 | ~1.5GB | Recommended |
-| `fp16-fp16` | FP16 | FP16 | ~1.8GB | Higher quality |
-
-### Server (ONNX Runtime)
-
-| Variant | Encoder | Decoder | Size | Use Case |
-|---------|---------|---------|------|----------|
-| `fp16-q4` | FP16 | Q4 | ~1.5GB | Recommended |
-| `fp16-fp16` | FP16 | FP16 | ~1.8GB | Higher quality |
+- **WebGPU**: Use FP16 encoder + Q4 decoder (Q4 encoder not supported)
+- **Server**: FP16+Q4 for efficiency, FP16+FP16 for quality
 
 ## Model Files
 
@@ -192,11 +186,28 @@ print(processor.tokenizer.decode(generated_tokens, skip_special_tokens=True))
 npm install onnxruntime-web @huggingface/transformers
 ```
 
+### Enable WebGPU
+
+WebGPU is required for browser inference. To enable:
+
+1. **Chrome/Edge**: Navigate to `chrome://flags/#enable-unsafe-webgpu`, enable, and restart
+2. **Verify**: Check `chrome://gpu` for "WebGPU" status
+3. **Test**: Run `navigator.gpu.requestAdapter()` in DevTools console
+
 ### Inference
 
 ```javascript
 import * as ort from "onnxruntime-web/webgpu";
 import { AutoTokenizer } from "@huggingface/transformers";
+
+// Check WebGPU availability
+if (!navigator.gpu) {
+  throw new Error("WebGPU not available. Enable at chrome://flags/#enable-unsafe-webgpu");
+}
+const adapter = await navigator.gpu.requestAdapter();
+if (!adapter) {
+  throw new Error("WebGPU adapter not found. Check chrome://gpu for status.");
+}
 
 ort.env.wasm.numThreads = 1;
 
