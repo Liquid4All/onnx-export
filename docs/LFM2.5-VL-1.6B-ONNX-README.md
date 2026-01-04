@@ -57,6 +57,22 @@ ONNX export of [LFM2.5-VL-1.6B](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B) 
 | `fp16-q4` | FP16 | Q4 | ~1.5GB | Recommended |
 | `fp16-fp16` | FP16 | FP16 | ~1.8GB | Higher quality |
 
+## Model Files
+
+```
+onnx/
+├── embed_tokens.onnx           # Token embeddings (FP32)
+├── embed_tokens_fp16.onnx      # Token embeddings (FP16)
+├── embed_images.onnx           # Vision encoder (FP32)
+├── embed_images_fp16.onnx      # Vision encoder (FP16)
+├── embed_images_q4.onnx        # Vision encoder (Q4)
+├── embed_images_q8.onnx        # Vision encoder (Q8)
+├── decoder.onnx                # Language decoder (FP32)
+├── decoder_fp16.onnx           # Language decoder (FP16)
+├── decoder_q4.onnx             # Language decoder (Q4)
+└── decoder_q8.onnx             # Language decoder (Q8)
+```
+
 ## Python
 
 ### Installation
@@ -220,22 +236,6 @@ const tokenEmbeds = await embedTokens.run({
 
 - Recommended: `embed_images_fp16.onnx` + `decoder_q4.onnx`
 - For higher quality: `embed_images_fp16.onnx` + `decoder_fp16.onnx`
-
-## Model Files
-
-```
-onnx/
-├── embed_tokens.onnx           # Token embeddings (FP32)
-├── embed_tokens_fp16.onnx      # Token embeddings (FP16)
-├── embed_images.onnx           # Vision encoder (FP32)
-├── embed_images_fp16.onnx      # Vision encoder (FP16)
-├── embed_images_q4.onnx        # Vision encoder (Q4)
-├── embed_images_q8.onnx        # Vision encoder (Q8)
-├── decoder.onnx                # Language decoder (FP32)
-├── decoder_fp16.onnx           # Language decoder (FP16)
-├── decoder_q4.onnx             # Language decoder (Q4)
-└── decoder_q8.onnx             # Language decoder (Q8)
-```
 
 ## License
 
