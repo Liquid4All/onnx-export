@@ -46,12 +46,13 @@ def get_providers() -> list[str]:
 
             from onnx import TensorProto, helper
 
-            # Minimal valid ONNX model
+            # Minimal valid ONNX model (IR version 8 for max compatibility)
             X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
             Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
             node = helper.make_node("Identity", ["X"], ["Y"])
             graph = helper.make_graph([node], "test", [X], [Y])
-            model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+            model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 11)])
+            model.ir_version = 8
 
             with tempfile.NamedTemporaryFile(suffix=".onnx", delete=True) as f:
                 import onnx
@@ -86,10 +87,16 @@ def load_onnx_session(
     if providers is None:
         providers = get_providers()
 
+    # Session options - use basic optimization for CUDA to avoid opset compatibility issues
+    sess_options = ort.SessionOptions()
+    if "CUDAExecutionProvider" in providers:
+        # Extended optimizations can add ops with newer opset versions that CUDA doesn't support
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+
     # Try with preferred providers, fallback to CPU if CUDA fails
     try:
         logger.info(f"Loading {path.name} with {providers[0]}...")
-        return ort.InferenceSession(str(path), providers=providers)
+        return ort.InferenceSession(str(path), sess_options=sess_options, providers=providers)
     except Exception as e:
         if "CUDAExecutionProvider" in providers and "CPUExecutionProvider" in providers:
             logger.warning(f"CUDA failed ({e}), falling back to CPU...")
