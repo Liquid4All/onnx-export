@@ -220,21 +220,76 @@ const embedTokens = await loadSession("embed_tokens_fp16");
 const embedImages = await loadSession("embed_images_fp16");
 const decoder = await loadSession("decoder_q4");
 
-// Get image embeddings (requires preprocessing - see notes below)
-const imageOutputs = await embedImages.run({
-  pixel_values: new ort.Tensor("float32", pixelValues, [numTiles, 1024, 768]),
-  pixel_attention_mask: new ort.Tensor("int64", new BigInt64Array(mask), [numTiles, 1024]),
-  spatial_shapes: new ort.Tensor("int64", new BigInt64Array(shapes), [numTiles, 2]),
-});
+// Model config (from config.json)
+const hiddenSize = 1536;
+const numKVHeads = 12;
+const headDim = 128;
 
-// Get token embeddings
+// Get text embeddings helper
+async function getTextEmbeddings(ids) {
+  const tensor = new ort.Tensor("int64", new BigInt64Array(ids.map(BigInt)), [1, ids.length]);
+  const out = await embedTokens.run({ input_ids: tensor });
+  return out.inputs_embeds;
+}
+
+// Initialize KV cache
+function initCache() {
+  const cache = {};
+  for (const name of decoder.inputNames) {
+    if (name.startsWith("past_conv")) {
+      cache[name] = new ort.Tensor("float32", new Float32Array(hiddenSize * 3), [1, hiddenSize, 3]);
+    } else if (name.startsWith("past_key_values")) {
+      cache[name] = new ort.Tensor("float32", new Float32Array(0), [1, numKVHeads, 0, headDim]);
+    }
+  }
+  return cache;
+}
+
+// Update cache from outputs
+function updateCache(cache, outputs) {
+  for (const [name, tensor] of Object.entries(outputs)) {
+    if (name.startsWith("present_conv")) {
+      cache[name.replace("present_conv", "past_conv")] = tensor;
+    } else if (name.startsWith("present.")) {
+      cache[name.replace("present.", "past_key_values.")] = tensor;
+    }
+  }
+}
+
+// Build prompt and tokenize
+const prompt = tokenizer.apply_chat_template(messages, { add_generation_prompt: true, tokenize: false });
 const inputIds = tokenizer.encode(prompt);
-const tokenOutputs = await embedTokens.run({
-  input_ids: new ort.Tensor("int64", new BigInt64Array(inputIds.map(BigInt)), [1, inputIds.length]),
-});
 
-// Merge image embeddings into token embeddings at <image> positions
-// Then run decoder with KV cache for generation...
+// Get embeddings (for VL: merge image embeddings at <image> token positions)
+let inputsEmbeds = await getTextEmbeddings(inputIds);
+
+// Generation loop
+const cache = initCache();
+const eosTokenId = tokenizer.eos_token_id;
+const generatedTokens = [];
+let curLen = inputsEmbeds.dims[1];
+let embeds = inputsEmbeds;
+
+for (let step = 0; step < 256; step++) {
+  const attentionMask = new ort.Tensor("int64", new BigInt64Array(curLen).fill(1n), [1, curLen]);
+
+  const outputs = await decoder.run({ inputs_embeds: embeds, attention_mask: attentionMask, ...cache });
+
+  // Greedy decode: argmax of last token logits
+  const logits = outputs.logits;
+  const vocabSize = logits.dims[2];
+  const lastLogits = logits.data.slice((logits.dims[1] - 1) * vocabSize);
+  const nextToken = lastLogits.indexOf(Math.max(...lastLogits));
+
+  generatedTokens.push(nextToken);
+  if (nextToken === eosTokenId) break;
+
+  updateCache(cache, outputs);
+  embeds = await getTextEmbeddings([nextToken]);
+  curLen++;
+}
+
+console.log(tokenizer.decode(generatedTokens, { skip_special_tokens: true }));
 ```
 
 ### WebGPU Notes
