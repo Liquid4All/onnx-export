@@ -13,6 +13,8 @@ dependencies = [
     "pillow",
     "torchvision>=0.24.1",
     "onnx-ir>=0.1.13",
+    "fastapi",
+    "uvicorn",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +35,7 @@ lfm2-bench = "liquidonnx.lfm2.benchmark:main"
 # LFM2-VL vision-language model tools
 lfm2-vl-export = "liquidonnx.lfm2_vl.export:main"
 lfm2-vl-infer = "liquidonnx.lfm2_vl.infer:main"
+lfm2-vl-server = "liquidonnx.lfm2_vl.server:main"
 
 # LFM2-MoE (Mixture of Experts) model tools
 lfm2-moe-export = "liquidonnx.lfm2_moe.export:main"

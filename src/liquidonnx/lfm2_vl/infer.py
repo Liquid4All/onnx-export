@@ -73,7 +73,10 @@ class VLModelInference:
         onnx_dir = self.model_path / "onnx"
 
         self.embed_tokens_sess = load_onnx_session(onnx_dir / "embed_tokens.onnx")
-        self.embed_images_sess = load_onnx_session(onnx_dir / "embed_images.onnx")
+        # Force CPU for embed_images due to CUDA Expand op bug with dynamic shapes
+        self.embed_images_sess = load_onnx_session(
+            onnx_dir / "embed_images.onnx", providers=["CPUExecutionProvider"]
+        )
         self.decoder_sess = load_onnx_session(onnx_dir / "decoder.onnx")
 
         self.vision_format = detect_vision_format(self.embed_images_sess)
