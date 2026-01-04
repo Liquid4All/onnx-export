@@ -98,8 +98,15 @@ def load_image(url: str) -> Image.Image:
 
 
 class VLModelServer:
-    def __init__(self, model_path: str):
+    def __init__(
+        self,
+        model_path: str,
+        encoder_precision: str | None = None,
+        decoder_precision: str | None = None,
+    ):
         self.model_path = Path(model_path)
+        self.encoder_precision = encoder_precision
+        self.decoder_precision = decoder_precision
         self.processor = None
         self.tokenizer = None
         self.embed_tokens_sess = None
@@ -108,21 +115,38 @@ class VLModelServer:
         self.vision_format = None
         self.image_token_id = None
 
+    def _get_onnx_path(self, name: str, precision: str | None) -> Path:
+        """Get ONNX file path for given name and precision."""
+        onnx_dir = self.model_path / "onnx"
+        if precision:
+            return onnx_dir / f"{name}_{precision}.onnx"
+        return onnx_dir / f"{name}.onnx"
+
     def load(self):
-        logger.info(f"Loading model from {self.model_path}...")
+        enc_label = self.encoder_precision or "fp32"
+        dec_label = self.decoder_precision or "fp32"
+        logger.info(f"Loading model from {self.model_path} (encoder={enc_label}, decoder={dec_label})...")
 
         # Load processor (includes tokenizer)
         self.processor = AutoProcessor.from_pretrained(str(self.model_path), trust_remote_code=True)
         self.tokenizer = self.processor.tokenizer
         self.image_token_id = get_image_token_id(self.tokenizer)
 
-        onnx_dir = self.model_path / "onnx"
-        self.embed_tokens_sess = load_onnx_session(onnx_dir / "embed_tokens.onnx")
+        # Load embed_tokens (uses encoder precision for fp16, otherwise fp32)
+        embed_tokens_prec = self.encoder_precision if self.encoder_precision == "fp16" else None
+        self.embed_tokens_sess = load_onnx_session(
+            self._get_onnx_path("embed_tokens", embed_tokens_prec)
+        )
+
         # Force CPU for embed_images due to CUDA Expand op bug with dynamic shapes
         self.embed_images_sess = load_onnx_session(
-            onnx_dir / "embed_images.onnx", providers=["CPUExecutionProvider"]
+            self._get_onnx_path("embed_images", self.encoder_precision),
+            providers=["CPUExecutionProvider"],
         )
-        self.decoder_sess = load_onnx_session(onnx_dir / "decoder.onnx")
+
+        self.decoder_sess = load_onnx_session(
+            self._get_onnx_path("decoder", self.decoder_precision)
+        )
 
         self.vision_format = detect_vision_format(self.embed_images_sess)
         logger.info(f"Model loaded. Vision format: {self.vision_format}")
@@ -347,11 +371,27 @@ def main():
     parser.add_argument("--model", required=True, help="Path to ONNX model directory")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
+    parser.add_argument(
+        "--encoder",
+        choices=["fp32", "fp16", "q4", "q8"],
+        default="fp32",
+        help="Encoder precision (default: fp32)",
+    )
+    parser.add_argument(
+        "--decoder",
+        choices=["fp32", "fp16", "q4", "q8"],
+        default="fp32",
+        help="Decoder precision (default: fp32)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
-    model = VLModelServer(args.model)
+    # Convert "fp32" to None (use default files without suffix)
+    encoder_prec = None if args.encoder == "fp32" else args.encoder
+    decoder_prec = None if args.decoder == "fp32" else args.decoder
+
+    model = VLModelServer(args.model, encoder_precision=encoder_prec, decoder_precision=decoder_prec)
     model.load()
 
     logger.info(f"Starting server on {args.host}:{args.port}")
