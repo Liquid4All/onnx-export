@@ -18,10 +18,16 @@ Output Structure (Transformers.js compatible):
             └── model_q8.onnx_data
 
 Usage:
-    # Export single model (FP32 only)
+    # Export from local path
+    uv run lfm2-export --model-path ~/models/LFM2.5-1.2B-Instruct
+
+    # Export with custom output name
+    uv run lfm2-export --model-path ~/models/LFM2.5-1.2B --output-name LFM2.5-1.2B-ONNX
+
+    # Export predefined model by size (FP32 only)
     uv run lfm2-export --sizes 350M
 
-    # Export all models
+    # Export all predefined models
     uv run lfm2-export --sizes all
 
     # Export with all precisions (fp16, q4, q8)
@@ -29,7 +35,7 @@ Usage:
 
     # Export with specific precisions
     uv run lfm2-export --sizes 350M --precision q4
-    uv run lfm2-export --sizes 350M --precision fp16 q4 q8
+    uv run lfm2-export --model-path ~/models/LFM2.5-1.2B --precision fp16 q4
 
     # Convert existing exports (skip FP32 export)
     uv run lfm2-export --sizes all --precision --skip-export
@@ -254,11 +260,17 @@ def main():
         epilog=__doc__,
     )
 
-    parser.add_argument(
+    # Model source: either --sizes for predefined models or --model-path for custom
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument(
         "--sizes",
         nargs="+",
-        required=True,
         help="Model sizes: 350M, 700M, 1.2B, 2.6B, or 'all'",
+    )
+    source_group.add_argument(
+        "--model-path",
+        type=pathlib.Path,
+        help="Path to local model directory (alternative to --sizes)",
     )
 
     parser.add_argument(
@@ -266,6 +278,11 @@ def main():
         type=pathlib.Path,
         default=pathlib.Path("."),
         help="Output base directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--output-name",
+        type=str,
+        help="Output folder name (default: derived from model path)",
     )
 
     parser.add_argument(
@@ -301,10 +318,27 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
-    sizes = list(MODELS.keys()) if "all" in args.sizes else args.sizes
-    for s in sizes:
-        if s not in MODELS:
-            parser.error(f"Unknown size: {s}. Available: {', '.join(MODELS.keys())}")
+    # Build list of (model_path, output_dir, label) to process
+    models_to_export = []
+    if args.model_path:
+        # Custom model path
+        model_path = args.model_path
+        if args.output_name:
+            output_name = args.output_name
+        else:
+            # Derive name from path (e.g., "LFM2.5-1.2B-Instruct" -> "LFM2.5-1.2B-Instruct-ONNX")
+            output_name = f"{model_path.name}-ONNX"
+        output_dir = args.output_dir / "exports" / output_name
+        models_to_export.append((str(model_path), output_dir, model_path.name))
+    else:
+        # Predefined sizes
+        sizes = list(MODELS.keys()) if "all" in args.sizes else args.sizes
+        for s in sizes:
+            if s not in MODELS:
+                parser.error(f"Unknown size: {s}. Available: {', '.join(MODELS.keys())}")
+        for size in sizes:
+            output_dir = get_output_dir(size, args.output_dir)
+            models_to_export.append((MODELS[size], output_dir, size))
 
     quant_bits = []
     do_fp16_conversion = False
@@ -329,27 +363,26 @@ def main():
         logger.info("Exporting models (FP32)")
         logger.info("=" * 60)
 
-        for size in sizes:
-            output_path = get_output_dir(size, args.output_dir)
-            logger.info(f"Exporting {MODELS[size]} to {output_path}...")
+        for model_path, output_dir, label in models_to_export:
+            logger.info(f"Exporting {model_path} to {output_dir}...")
             try:
-                export_model(MODELS[size], str(output_path))
-                logger.info(f"  {size}: OK")
+                export_model(model_path, str(output_dir))
+                logger.info(f"  {label}: OK")
             except Exception as e:
-                logger.error(f"  {size}: FAILED - {e}")
+                logger.error(f"  {label}: FAILED - {e}")
 
     if do_fp16_conversion:
         logger.info("=" * 60)
         logger.info("Converting to FP16")
         logger.info("=" * 60)
 
-        for size in sizes:
-            onnx_dir = get_output_dir(size, args.output_dir) / "onnx"
+        for model_path, output_dir, label in models_to_export:
+            onnx_dir = output_dir / "onnx"
             try:
                 do_fp16(onnx_dir)
-                logger.info(f"  {size}: OK")
+                logger.info(f"  {label}: OK")
             except Exception as e:
-                logger.error(f"  {size}: FAILED - {e}")
+                logger.error(f"  {label}: FAILED - {e}")
 
     for bits in quant_bits:
         logger.info("=" * 60)
@@ -359,20 +392,20 @@ def main():
         # Q4: symmetric by default (required for WebGPU), Q8: asymmetric
         symmetric = (bits == 4) and not args.q4_asymmetric
 
-        for size in sizes:
-            onnx_dir = get_output_dir(size, args.output_dir) / "onnx"
+        for model_path, output_dir, label in models_to_export:
+            onnx_dir = output_dir / "onnx"
             try:
                 do_quantize(onnx_dir, bits, exclude_lm_head, args.block_size, symmetric=symmetric)
-                logger.info(f"  {size}: OK")
+                logger.info(f"  {label}: OK")
             except Exception as e:
-                logger.error(f"  {size}: FAILED - {e}")
+                logger.error(f"  {label}: FAILED - {e}")
 
     logger.info("=" * 60)
     logger.info("Output summary")
     logger.info("=" * 60)
 
-    for size in sizes:
-        out_dir = get_output_dir(size, args.output_dir)
+    for model_path, output_dir, label in models_to_export:
+        out_dir = output_dir
         if out_dir.exists():
             onnx_dir = out_dir / "onnx"
             files = list(onnx_dir.glob("model*.onnx"))
