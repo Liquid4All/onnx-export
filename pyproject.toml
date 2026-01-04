@@ -81,6 +81,6 @@ url = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Night
 explicit = true
 
 [tool.uv.sources]
-transformers = { git = "ssh://git@github.com/Liquid4All/transformers_private.git", branch = "lfm2-config" }
+transformers = { git = "https://github.com/Liquid4All/transformers.git", branch = "lfm2-vl-config" }
 onnxruntime = { index = "ort-nightly" }
 onnxruntime-gpu = { index = "ort-nightly" }

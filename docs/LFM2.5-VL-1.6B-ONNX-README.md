@@ -47,14 +47,14 @@ ONNX export of [LFM2.5-VL-1.6B](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B) 
 
 | Variant | Encoder | Decoder | Size | Use Case |
 |---------|---------|---------|------|----------|
-| `q4-fp16` | Q4 | FP16 | ~1.2GB | Balanced quality, smaller download |
+| `fp16-q4` | FP16 | Q4 | ~1.5GB | Recommended |
 | `fp16-fp16` | FP16 | FP16 | ~1.8GB | Higher quality |
 
 ### Server (ONNX Runtime)
 
 | Variant | Encoder | Decoder | Size | Use Case |
 |---------|---------|---------|------|----------|
-| `fp16-q4` | FP16 | Q4 | ~1.5GB | Fast inference |
+| `fp16-q4` | FP16 | Q4 | ~1.5GB | Recommended |
 | `fp16-fp16` | FP16 | FP16 | ~1.8GB | Higher quality |
 
 ## Python
@@ -62,9 +62,9 @@ ONNX export of [LFM2.5-VL-1.6B](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B) 
 ### Installation
 
 ```bash
-pip install onnxruntime transformers pillow numpy
+pip install onnxruntime transformers pillow torch huggingface_hub
 # or with GPU support:
-pip install onnxruntime-gpu transformers pillow numpy
+pip install onnxruntime-gpu transformers pillow torch huggingface_hub
 ```
 
 ### Inference
@@ -76,11 +76,11 @@ from huggingface_hub import hf_hub_download
 from transformers import AutoProcessor
 from PIL import Image
 
-# Download model files
+# Download model files (fp16 encoder + q4 decoder recommended)
 model_id = "LiquidAI/LFM2.5-VL-1.6B-ONNX"
 embed_tokens_path = hf_hub_download(model_id, "onnx/embed_tokens_fp16.onnx")
 embed_images_path = hf_hub_download(model_id, "onnx/embed_images_fp16.onnx")
-decoder_path = hf_hub_download(model_id, "onnx/decoder_fp16.onnx")
+decoder_path = hf_hub_download(model_id, "onnx/decoder_q4.onnx")
 
 # Load ONNX sessions
 embed_tokens = ort.InferenceSession(embed_tokens_path)
@@ -99,18 +99,23 @@ messages = [{"role": "user", "content": [
 
 # Process inputs
 prompt = processor.apply_chat_template(messages, add_generation_prompt=True)
-inputs = processor(images=[image], text=prompt, return_tensors="np")
+inputs = processor(images=[image], text=prompt, return_tensors="pt")
+
+# Convert to numpy with correct dtypes
+pixel_values = inputs["pixel_values"].numpy().astype(np.float32)
+pixel_attention_mask = inputs["pixel_attention_mask"].numpy().astype(np.int64)
+spatial_shapes = inputs["spatial_shapes"].numpy().astype(np.int64)
+input_ids = inputs["input_ids"].numpy().astype(np.int64)
 
 # Get image embeddings
 image_outputs = embed_images.run(None, {
-    "pixel_values": inputs["pixel_values"],
-    "pixel_attention_mask": inputs["pixel_attention_mask"],
-    "spatial_shapes": inputs["spatial_shapes"],
+    "pixel_values": pixel_values,
+    "pixel_attention_mask": pixel_attention_mask,
+    "spatial_shapes": spatial_shapes,
 })
 image_embeds = image_outputs[0]
 
-# Get token embeddings and merge with image embeddings
-input_ids = inputs["input_ids"]
+# Get token embeddings
 token_outputs = embed_tokens.run(None, {"input_ids": input_ids})
 token_embeds = token_outputs[0]
 
@@ -121,14 +126,46 @@ for i, pos in enumerate(image_positions):
     if i < len(image_embeds):
         token_embeds[0, pos] = image_embeds[i]
 
-# Generate (simplified single-token example)
-decoder_output = decoder.run(None, {
-    "inputs_embeds": token_embeds.astype(np.float32),
-    "attention_mask": np.ones((1, token_embeds.shape[1]), dtype=np.int64),
-})
-logits = decoder_output[0]
-next_token = np.argmax(logits[0, -1])
-print(processor.tokenizer.decode([next_token]))
+# Initialize KV cache for stateful decoding
+ONNX_DTYPE = {"tensor(float)": np.float32, "tensor(float16)": np.float16, "tensor(int64)": np.int64}
+cache = {}
+for inp in decoder.get_inputs():
+    if inp.name in {"inputs_embeds", "attention_mask", "position_ids"}:
+        continue
+    shape = [d if isinstance(d, int) else 1 for d in inp.shape]
+    for i, d in enumerate(inp.shape):
+        if isinstance(d, str) and "sequence" in d.lower():
+            shape[i] = 0
+    cache[inp.name] = np.zeros(shape, dtype=ONNX_DTYPE.get(inp.type, np.float32))
+
+# Generate tokens
+seq_len = token_embeds.shape[1]
+generated_tokens = []
+
+for step in range(100):  # max tokens
+    if step == 0:
+        embeds = token_embeds.astype(np.float32)
+    else:
+        last_token = np.array([[generated_tokens[-1]]], dtype=np.int64)
+        embeds = embed_tokens.run(None, {"input_ids": last_token})[0].astype(np.float32)
+
+    attn_mask = np.ones((1, seq_len + len(generated_tokens)), dtype=np.int64)
+    feed = {"inputs_embeds": embeds, "attention_mask": attn_mask, **cache}
+
+    outputs = decoder.run(None, feed)
+    next_token = int(np.argmax(outputs[0][0, -1]))
+    generated_tokens.append(next_token)
+
+    # Update cache
+    for i, out in enumerate(decoder.get_outputs()[1:], 1):
+        name = out.name.replace("present_conv", "past_conv").replace("present.", "past_key_values.")
+        if name in cache:
+            cache[name] = outputs[i]
+
+    if next_token == processor.tokenizer.eos_token_id:
+        break
+
+print(processor.tokenizer.decode(generated_tokens, skip_special_tokens=True))
 ```
 
 ## WebGPU (Browser)
@@ -149,7 +186,7 @@ ort.env.wasm.numThreads = 1;
 
 const modelBase = "https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-ONNX/resolve/main/onnx";
 
-// Load sessions (use fp16 for WebGPU)
+// Load sessions (fp16 encoder + q4 decoder recommended)
 const embedTokens = await ort.InferenceSession.create(
   `${modelBase}/embed_tokens_fp16.onnx`,
   { executionProviders: ["webgpu"] }
@@ -161,7 +198,7 @@ const embedImages = await ort.InferenceSession.create(
 );
 
 const decoder = await ort.InferenceSession.create(
-  `${modelBase}/decoder_fp16.onnx`,
+  `${modelBase}/decoder_q4.onnx`,
   { executionProviders: ["webgpu"] }
 );
 
@@ -181,9 +218,8 @@ const tokenEmbeds = await embedTokens.run({
 
 ### WebGPU Notes
 
-- **Use FP16 or Q8 for decoder** - Q4 decoder is not fully supported on WebGPU
-- Q4 encoder works on WebGPU (recommended for smaller download)
-- Best config: `embed_images_q4.onnx` + `decoder_fp16.onnx`
+- Recommended: `embed_images_fp16.onnx` + `decoder_q4.onnx`
+- For higher quality: `embed_images_fp16.onnx` + `decoder_fp16.onnx`
 
 ## Model Files
 
