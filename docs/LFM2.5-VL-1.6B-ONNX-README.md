@@ -48,7 +48,7 @@ ONNX export of [LFM2.5-VL-1.6B](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B) 
 | FP16 | Q4 | ~1.5GB | WebGPU, Server | Recommended for most uses |
 | FP16 | FP16 | ~3.2GB | Server | Higher quality |
 
-- **WebGPU**: Use FP16 encoder + Q4 decoder (Q4 encoder not supported)
+- **WebGPU**: Use FP16 encoder + Q4 decoder (Q8 not supported)
 - **Server**: FP16+Q4 for efficiency, FP16+FP16 for quality
 
 ## Model Files
