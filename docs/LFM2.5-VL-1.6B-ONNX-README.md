@@ -189,53 +189,61 @@ print(processor.tokenizer.decode(generated_tokens, skip_special_tokens=True))
 ### Installation
 
 ```bash
-npm install onnxruntime-web
+npm install onnxruntime-web @huggingface/transformers
 ```
 
 ### Inference
 
 ```javascript
 import * as ort from "onnxruntime-web/webgpu";
+import { AutoTokenizer } from "@huggingface/transformers";
 
-// Configure WebGPU
 ort.env.wasm.numThreads = 1;
 
-const modelBase = "https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-ONNX/resolve/main/onnx";
+const modelId = "LiquidAI/LFM2.5-VL-1.6B-ONNX";
+const modelBase = `https://huggingface.co/${modelId}/resolve/main`;
 
-// Load sessions (fp16 encoder + q4 decoder recommended)
-const embedTokens = await ort.InferenceSession.create(
-  `${modelBase}/embed_tokens_fp16.onnx`,
-  { executionProviders: ["webgpu"] }
-);
+// Load tokenizer
+const tokenizer = await AutoTokenizer.from_pretrained(modelId);
 
-const embedImages = await ort.InferenceSession.create(
-  `${modelBase}/embed_images_fp16.onnx`,
-  { executionProviders: ["webgpu"] }
-);
+// Load ONNX sessions with external data
+async function loadSession(name) {
+  const onnxPath = `${modelBase}/onnx/${name}.onnx`;
+  const dataPath = `${modelBase}/onnx/${name}.onnx_data`;
+  return ort.InferenceSession.create(onnxPath, {
+    executionProviders: ["webgpu"],
+    externalData: [{ path: `${name}.onnx_data`, data: dataPath }],
+  });
+}
 
-const decoder = await ort.InferenceSession.create(
-  `${modelBase}/decoder_q4.onnx`,
-  { executionProviders: ["webgpu"] }
-);
+const embedTokens = await loadSession("embed_tokens_fp16");
+const embedImages = await loadSession("embed_images_fp16");
+const decoder = await loadSession("decoder_q4");
 
-// Run inference
-const imageEmbeds = await embedImages.run({
-  pixel_values: pixelValuesTensor,
-  pixel_attention_mask: attentionMaskTensor,
-  spatial_shapes: spatialShapesTensor,
+// Get image embeddings (requires preprocessing - see notes below)
+const imageOutputs = await embedImages.run({
+  pixel_values: new ort.Tensor("float32", pixelValues, [numTiles, 1024, 768]),
+  pixel_attention_mask: new ort.Tensor("int64", new BigInt64Array(mask), [numTiles, 1024]),
+  spatial_shapes: new ort.Tensor("int64", new BigInt64Array(shapes), [numTiles, 2]),
 });
 
-const tokenEmbeds = await embedTokens.run({
-  input_ids: inputIdsTensor,
+// Get token embeddings
+const inputIds = tokenizer.encode(prompt);
+const tokenOutputs = await embedTokens.run({
+  input_ids: new ort.Tensor("int64", new BigInt64Array(inputIds.map(BigInt)), [1, inputIds.length]),
 });
 
-// Merge embeddings and run decoder...
+// Merge image embeddings into token embeddings at <image> positions
+// Then run decoder with KV cache for generation...
 ```
 
 ### WebGPU Notes
 
 - Recommended: `embed_images_fp16.onnx` + `decoder_q4.onnx`
 - For higher quality: `embed_images_fp16.onnx` + `decoder_fp16.onnx`
+- Image preprocessing requires tiling (512×512), patch extraction (16×16), and normalization
+- Models use external data files (`.onnx_data`) that are loaded automatically
+- int64 tensors require `BigInt64Array`
 
 ## License
 
