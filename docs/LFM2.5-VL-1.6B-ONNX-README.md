@@ -21,7 +21,6 @@ tags:
 - lfm2.5
 - onnx
 - onnxruntime
-- transformers.js
 - webgpu
 base_model:
 - LiquidAI/LFM2.5-VL-1.6B
@@ -40,135 +39,167 @@ base_model:
 
 # LFM2.5-VL-1.6B-ONNX
 
-ONNX export of [LFM2.5-VL-1.6B](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B) for cross-platform inference with ONNX Runtime, WebGPU, and Transformers.js.
-
-Find more details in the original model card: https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B
+ONNX export of [LFM2.5-VL-1.6B](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B) for cross-platform inference.
 
 ## Available Variants
 
-### WebGPU Optimized
+### WebGPU (Browser)
 
 | Variant | Encoder | Decoder | Size | Use Case |
 |---------|---------|---------|------|----------|
-| `q4-fp16` | Q4 | FP16 | ~1.2GB | Balanced quality, smaller encoder |
-| `fp16-fp16` | FP16 | FP16 | ~1.8GB | Higher quality, faster inference |
+| `q4-fp16` | Q4 | FP16 | ~1.2GB | Balanced quality, smaller download |
+| `fp16-fp16` | FP16 | FP16 | ~1.8GB | Higher quality |
 
-### All Precisions
+### Server (ONNX Runtime)
 
-| Format | Size vs FP32 | Use Case |
-|--------|--------------|----------|
-| FP32 | 100% | Maximum accuracy, debugging |
-| FP16 | 50% | Balanced speed/accuracy |
-| Q8 | ~35% | Good compression |
-| Q4 | ~25% | Edge / memory-constrained |
+| Variant | Encoder | Decoder | Size | Use Case |
+|---------|---------|---------|------|----------|
+| `fp16-q4` | FP16 | Q4 | ~1.5GB | Fast inference |
+| `fp16-fp16` | FP16 | FP16 | ~1.8GB | Higher quality |
 
-## Python (ONNX Runtime)
+## Python
 
 ### Installation
 
 ```bash
-pip install onnxruntime-gpu transformers pillow
-# or for CPU only:
-pip install onnxruntime transformers pillow
+pip install onnxruntime transformers pillow numpy
+# or with GPU support:
+pip install onnxruntime-gpu transformers pillow numpy
 ```
 
-### Interactive CLI
-
-```bash
-# Basic usage
-lfm2-vl-infer --model LiquidAI/LFM2.5-VL-1.6B-ONNX
-
-# With image
-lfm2-vl-infer --model LiquidAI/LFM2.5-VL-1.6B-ONNX --images photo.jpg --prompt "What is this?"
-
-# Compare two images
-lfm2-vl-infer --model LiquidAI/LFM2.5-VL-1.6B-ONNX --images a.jpg b.jpg --prompt "Compare these"
-```
-
-### Python API
+### Inference
 
 ```python
-from transformers import AutoProcessor
+import numpy as np
 import onnxruntime as ort
+from huggingface_hub import hf_hub_download
+from transformers import AutoProcessor
 from PIL import Image
 
-# Load processor and ONNX sessions
-processor = AutoProcessor.from_pretrained("LiquidAI/LFM2.5-VL-1.6B-ONNX", trust_remote_code=True)
-embed_tokens = ort.InferenceSession("onnx/embed_tokens.onnx")
-embed_images = ort.InferenceSession("onnx/embed_images_fp16.onnx")
-decoder = ort.InferenceSession("onnx/decoder_q4.onnx")
+# Download model files
+model_id = "LiquidAI/LFM2.5-VL-1.6B-ONNX"
+embed_tokens_path = hf_hub_download(model_id, "onnx/embed_tokens_fp16.onnx")
+embed_images_path = hf_hub_download(model_id, "onnx/embed_images_fp16.onnx")
+decoder_path = hf_hub_download(model_id, "onnx/decoder_fp16.onnx")
 
-# Prepare inputs
+# Load ONNX sessions
+embed_tokens = ort.InferenceSession(embed_tokens_path)
+embed_images = ort.InferenceSession(embed_images_path)
+decoder = ort.InferenceSession(decoder_path)
+
+# Load processor
+processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+
+# Prepare input
 image = Image.open("photo.jpg")
-messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Describe this image"}]}]
+messages = [{"role": "user", "content": [
+    {"type": "image"},
+    {"type": "text", "text": "What is in this image?"}
+]}]
+
+# Process inputs
+prompt = processor.apply_chat_template(messages, add_generation_prompt=True)
+inputs = processor(images=[image], text=prompt, return_tensors="np")
+
+# Get image embeddings
+image_outputs = embed_images.run(None, {
+    "pixel_values": inputs["pixel_values"],
+    "pixel_attention_mask": inputs["pixel_attention_mask"],
+    "spatial_shapes": inputs["spatial_shapes"],
+})
+image_embeds = image_outputs[0]
+
+# Get token embeddings and merge with image embeddings
+input_ids = inputs["input_ids"]
+token_outputs = embed_tokens.run(None, {"input_ids": input_ids})
+token_embeds = token_outputs[0]
+
+# Replace <image> tokens with image embeddings
+image_token_id = processor.tokenizer.convert_tokens_to_ids("<image>")
+image_positions = np.where(input_ids[0] == image_token_id)[0]
+for i, pos in enumerate(image_positions):
+    if i < len(image_embeds):
+        token_embeds[0, pos] = image_embeds[i]
+
+# Generate (simplified single-token example)
+decoder_output = decoder.run(None, {
+    "inputs_embeds": token_embeds.astype(np.float32),
+    "attention_mask": np.ones((1, token_embeds.shape[1]), dtype=np.int64),
+})
+logits = decoder_output[0]
+next_token = np.argmax(logits[0, -1])
+print(processor.tokenizer.decode([next_token]))
 ```
 
 ## WebGPU (Browser)
 
-### Setup
+### Installation
 
 ```bash
-npm install @huggingface/transformers onnxruntime-web
+npm install onnxruntime-web
 ```
 
-### Usage
+### Inference
 
 ```javascript
-import { env } from "@huggingface/transformers";
 import * as ort from "onnxruntime-web/webgpu";
 
-// Configure for WebGPU
-env.backends.onnx.wasm.proxy = false;
+// Configure WebGPU
 ort.env.wasm.numThreads = 1;
 
-// Load model with FP16 precision (recommended for WebGPU)
-const modelPath = "https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-ONNX/resolve/main/onnx";
+const modelBase = "https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-ONNX/resolve/main/onnx";
 
+// Load sessions (use fp16 for WebGPU)
 const embedTokens = await ort.InferenceSession.create(
-  `${modelPath}/embed_tokens_fp16.onnx`,
+  `${modelBase}/embed_tokens_fp16.onnx`,
   { executionProviders: ["webgpu"] }
 );
 
 const embedImages = await ort.InferenceSession.create(
-  `${modelPath}/embed_images_fp16.onnx`,
+  `${modelBase}/embed_images_fp16.onnx`,
   { executionProviders: ["webgpu"] }
 );
 
 const decoder = await ort.InferenceSession.create(
-  `${modelPath}/decoder_fp16.onnx`,
+  `${modelBase}/decoder_fp16.onnx`,
   { executionProviders: ["webgpu"] }
 );
+
+// Run inference
+const imageEmbeds = await embedImages.run({
+  pixel_values: pixelValuesTensor,
+  pixel_attention_mask: attentionMaskTensor,
+  spatial_shapes: spatialShapesTensor,
+});
+
+const tokenEmbeds = await embedTokens.run({
+  input_ids: inputIdsTensor,
+});
+
+// Merge embeddings and run decoder...
 ```
 
-### Notes
+### WebGPU Notes
 
-- **Q4 decoder is not supported on WebGPU** - use FP16 or Q8 for the decoder
-- Q4 encoder works on WebGPU (smaller download)
-- Recommended: `q4` encoder + `fp16` decoder for balance, or `fp16`/`fp16` for quality
+- **Use FP16 or Q8 for decoder** - Q4 decoder is not fully supported on WebGPU
+- Q4 encoder works on WebGPU (recommended for smaller download)
+- Best config: `embed_images_q4.onnx` + `decoder_fp16.onnx`
 
 ## Model Files
 
 ```
 onnx/
-├── embed_tokens.onnx          # Token embeddings (FP32)
-├── embed_tokens_fp16.onnx     # Token embeddings (FP16)
-├── embed_images.onnx          # Vision encoder (FP32)
-├── embed_images_fp16.onnx     # Vision encoder (FP16)
-├── embed_images_q4.onnx       # Vision encoder (Q4)
-├── embed_images_q8.onnx       # Vision encoder (Q8)
-├── decoder.onnx               # Language decoder (FP32)
-├── decoder_fp16.onnx          # Language decoder (FP16)
-├── decoder_q4.onnx            # Language decoder (Q4)
-└── decoder_q8.onnx            # Language decoder (Q8)
+├── embed_tokens.onnx           # Token embeddings (FP32)
+├── embed_tokens_fp16.onnx      # Token embeddings (FP16)
+├── embed_images.onnx           # Vision encoder (FP32)
+├── embed_images_fp16.onnx      # Vision encoder (FP16)
+├── embed_images_q4.onnx        # Vision encoder (Q4)
+├── embed_images_q8.onnx        # Vision encoder (Q8)
+├── decoder.onnx                # Language decoder (FP32)
+├── decoder_fp16.onnx           # Language decoder (FP16)
+├── decoder_q4.onnx             # Language decoder (Q4)
+└── decoder_q8.onnx             # Language decoder (Q8)
 ```
-
-## Recommended Configurations
-
-| Platform | Encoder | Decoder | Notes |
-|----------|---------|---------|-------|
-| WebGPU | fp16 | fp16 | Best quality for browser |
-| WebGPU | q4 | fp16 | Smaller download, good quality |
-| Server | fp16 | q4 | ONNX Runtime (CPU/CUDA) |
 
 ## License
 
