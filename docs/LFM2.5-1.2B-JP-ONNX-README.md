@@ -13,19 +13,22 @@ tags:
 - japanese
 - onnx
 - onnxruntime
+- webgpu
 base_model:
 - LiquidAI/LFM2.5-1.2B-JP
 ---
 
 <div align="center">
-  <img src="https://cdn-uploads.huggingface.co/production/uploads/61b8e2ba285851687028d395/2b08LKpev0DNEk6DlnWkY.png" alt="Liquid AI" style="width: 100%; max-width: 100%;">
-
-  <p>
+  <img
+    src="https://cdn-uploads.huggingface.co/production/uploads/61b8e2ba285851687028d395/2b08LKpev0DNEk6DlnWkY.png"
+    alt="Liquid AI"
+    style="width: 100%; max-width: 100%; height: auto; display: inline-block; margin-bottom: 0.5em; margin-top: 0.5em;"
+  />
+  <div style="display: flex; justify-content: center; gap: 0.5em; margin-bottom: 1em;">
     <a href="https://playground.liquid.ai/"><strong>Try LFM</strong></a> •
     <a href="https://docs.liquid.ai/lfm"><strong>Documentation</strong></a> •
-    <a href="https://leap.liquid.ai/"><strong>LEAP</strong></a> •
-    <a href="https://www.liquid.ai/blog/"><strong>Blog</strong></a>
-  </p>
+    <a href="https://leap.liquid.ai/"><strong>LEAP</strong></a>
+  </div>
 </div>
 
 # LFM2.5-1.2B-JP-ONNX
@@ -36,11 +39,14 @@ LFM2.5-JP is a Japanese language model based on the LFM2.5 hybrid architecture, 
 
 ## Recommended Variants
 
-| Precision | Size | Use Case |
-|-----------|------|----------|
-| Q4 | ~1.2GB | Recommended for most uses |
-| FP16 | ~2.4GB | Higher quality |
-| Q8 | ~1.7GB | Balance of quality and size |
+| Precision | Size | Platform | Use Case |
+|-----------|------|----------|----------|
+| Q4 | ~1.2GB | WebGPU, Server | Recommended for most uses |
+| FP16 | ~2.4GB | WebGPU, Server | Higher quality |
+| Q8 | ~1.7GB | Server only | Balance of quality and size |
+
+- **WebGPU**: Use Q4 or FP16 (Q8 not supported)
+- **Server**: All variants supported
 
 ## Model Files
 
@@ -131,6 +137,115 @@ for step in range(50):  # max tokens
 
 print(prompt + tokenizer.decode(generated_tokens, skip_special_tokens=True))
 ```
+
+## WebGPU (Browser)
+
+### Installation
+
+```bash
+npm install onnxruntime-web @huggingface/transformers
+```
+
+### Enable WebGPU
+
+WebGPU is required for browser inference. To enable:
+
+1. **Chrome/Edge**: Navigate to `chrome://flags/#enable-unsafe-webgpu`, enable, and restart
+2. **Verify**: Check `chrome://gpu` for "WebGPU" status
+3. **Test**: Run `navigator.gpu.requestAdapter()` in DevTools console
+
+### Inference
+
+```javascript
+import * as ort from "onnxruntime-web/webgpu";
+import { AutoTokenizer } from "@huggingface/transformers";
+
+// Check WebGPU availability
+if (!navigator.gpu) {
+  throw new Error("WebGPU not available. Enable at chrome://flags/#enable-unsafe-webgpu");
+}
+
+ort.env.wasm.numThreads = 1;
+
+const modelId = "LiquidAI/LFM2.5-1.2B-JP-ONNX";
+const modelBase = `https://huggingface.co/${modelId}/resolve/main`;
+
+// Load tokenizer and model
+const tokenizer = await AutoTokenizer.from_pretrained(modelId);
+
+const session = await ort.InferenceSession.create(`${modelBase}/onnx/model_q4.onnx`, {
+  executionProviders: ["webgpu"],
+  externalData: [{ path: "model_q4.onnx_data", data: `${modelBase}/onnx/model_q4.onnx_data` }],
+});
+
+// Model config
+const hiddenSize = 1536;
+const numKVHeads = 12;
+const headDim = 128;
+
+// Initialize KV cache
+function initCache() {
+  const cache = {};
+  for (const name of session.inputNames) {
+    if (name.startsWith("past_conv")) {
+      cache[name] = new ort.Tensor("float32", new Float32Array(hiddenSize * 3), [1, hiddenSize, 3]);
+    } else if (name.startsWith("past_key_values")) {
+      cache[name] = new ort.Tensor("float32", new Float32Array(0), [1, numKVHeads, 0, headDim]);
+    }
+  }
+  return cache;
+}
+
+// Update cache from outputs
+function updateCache(cache, outputs) {
+  for (const [name, tensor] of Object.entries(outputs)) {
+    if (name.startsWith("present_conv")) {
+      cache[name.replace("present_conv", "past_conv")] = tensor;
+    } else if (name.startsWith("present.")) {
+      cache[name.replace("present.", "past_key_values.")] = tensor;
+    }
+  }
+}
+
+// Prepare input (Japanese text completion)
+const prompt = "東京は日本の";
+const inputIds = tokenizer.encode(prompt);
+
+// Generation loop
+const cache = initCache();
+const generatedTokens = [];
+let curLen = inputIds.length;
+
+for (let step = 0; step < 50; step++) {
+  const ids = step === 0 ? inputIds : [generatedTokens[generatedTokens.length - 1]];
+  const inputTensor = new ort.Tensor("int64", new BigInt64Array(ids.map(BigInt)), [1, ids.length]);
+  const attentionMask = new ort.Tensor("int64", new BigInt64Array(curLen).fill(1n), [1, curLen]);
+
+  const outputs = await session.run({ input_ids: inputTensor, attention_mask: attentionMask, ...cache });
+
+  // Greedy decode
+  const logits = outputs.logits;
+  const vocabSize = logits.dims[2];
+  const lastLogits = logits.data.slice((logits.dims[1] - 1) * vocabSize);
+  const nextToken = lastLogits.indexOf(Math.max(...lastLogits));
+
+  generatedTokens.push(nextToken);
+  if (nextToken === tokenizer.eos_token_id) break;
+
+  updateCache(cache, outputs);
+  curLen++;
+}
+
+console.log(prompt + tokenizer.decode(generatedTokens, { skip_special_tokens: true }));
+```
+
+### WebGPU Notes
+
+- Recommended: `model_q4.onnx` for smallest size
+- For higher quality: `model_fp16.onnx`
+- Q8 is not supported on WebGPU - use Q4 or FP16
+- Models use external data files (`.onnx_data`) loaded automatically
+- int64 tensors require `BigInt64Array`
 
 ## License
 

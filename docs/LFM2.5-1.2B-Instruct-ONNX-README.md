@@ -20,19 +20,22 @@ tags:
 - lfm2.5
 - onnx
 - onnxruntime
+- webgpu
 base_model:
 - LiquidAI/LFM2.5-1.2B-Instruct
 ---
 
 <div align="center">
-  <img src="https://cdn-uploads.huggingface.co/production/uploads/61b8e2ba285851687028d395/2b08LKpev0DNEk6DlnWkY.png" alt="Liquid AI" style="width: 100%; max-width: 100%;">
-
-  <p>
+  <img
+    src="https://cdn-uploads.huggingface.co/production/uploads/61b8e2ba285851687028d395/2b08LKpev0DNEk6DlnWkY.png"
+    alt="Liquid AI"
+    style="width: 100%; max-width: 100%; height: auto; display: inline-block; margin-bottom: 0.5em; margin-top: 0.5em;"
+  />
+  <div style="display: flex; justify-content: center; gap: 0.5em; margin-bottom: 1em;">
     <a href="https://playground.liquid.ai/"><strong>Try LFM</strong></a> •
     <a href="https://docs.liquid.ai/lfm"><strong>Documentation</strong></a> •
-    <a href="https://leap.liquid.ai/"><strong>LEAP</strong></a> •
-    <a href="https://www.liquid.ai/blog/"><strong>Blog</strong></a>
-  </p>
+    <a href="https://leap.liquid.ai/"><strong>LEAP</strong></a>
+  </div>
 </div>
 
 # LFM2.5-1.2B-Instruct-ONNX
@@ -43,11 +46,14 @@ LFM2.5 is a hybrid architecture combining multiplicative gates and short convolu
 
 ## Recommended Variants
 
-| Precision | Size | Use Case |
-|-----------|------|----------|
-| Q4 | ~1.2GB | Recommended for most uses |
-| FP16 | ~2.4GB | Higher quality |
-| Q8 | ~1.7GB | Balance of quality and size |
+| Precision | Size | Platform | Use Case |
+|-----------|------|----------|----------|
+| Q4 | ~1.2GB | WebGPU, Server | Recommended for most uses |
+| FP16 | ~2.4GB | WebGPU, Server | Higher quality |
+| Q8 | ~1.7GB | Server only | Balance of quality and size |
+
+- **WebGPU**: Use Q4 or FP16 (Q8 not supported)
+- **Server**: All variants supported
 
 ## Model Files
 
@@ -139,6 +145,52 @@ for step in range(100):  # max tokens
 
 print(tokenizer.decode(generated_tokens, skip_special_tokens=True))
 ```
+
+## WebGPU (Browser)
+
+### Installation
+
+```bash
+npm install @huggingface/transformers
+```
+
+### Inference
+
+```javascript
+import { AutoModelForCausalLM, AutoTokenizer, TextStreamer } from "@huggingface/transformers";
+
+const modelId = "LiquidAI/LFM2.5-1.2B-Instruct-ONNX";
+
+// Load model and tokenizer
+const tokenizer = await AutoTokenizer.from_pretrained(modelId);
+const model = await AutoModelForCausalLM.from_pretrained(modelId, {
+  device: "webgpu",
+  dtype: "q4",  // or "fp16"
+});
+
+// Prepare input
+const messages = [{ role: "user", content: "What is the capital of France?" }];
+const input = tokenizer.apply_chat_template(messages, {
+  add_generation_prompt: true,
+  return_dict: true,
+});
+
+// Generate with streaming
+const streamer = new TextStreamer(tokenizer, { skip_prompt: true });
+const output = await model.generate({
+  ...input,
+  max_new_tokens: 256,
+  do_sample: false,
+  streamer,
+});
+
+console.log(tokenizer.decode(output[0], { skip_special_tokens: true }));
+```
+
+### WebGPU Notes
+
+- Enable WebGPU: `chrome://flags/#enable-unsafe-webgpu`
+- Supported: Q4, FP16 (Q8 not supported on WebGPU)
 
 ## License
 

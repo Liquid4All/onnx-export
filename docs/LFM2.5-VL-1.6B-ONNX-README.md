@@ -27,14 +27,16 @@ base_model:
 ---
 
 <div align="center">
-  <img src="https://cdn-uploads.huggingface.co/production/uploads/61b8e2ba285851687028d395/2b08LKpev0DNEk6DlnWkY.png" alt="Liquid AI" style="width: 100%; max-width: 100%;">
-
-  <p>
+  <img
+    src="https://cdn-uploads.huggingface.co/production/uploads/61b8e2ba285851687028d395/2b08LKpev0DNEk6DlnWkY.png"
+    alt="Liquid AI"
+    style="width: 100%; max-width: 100%; height: auto; display: inline-block; margin-bottom: 0.5em; margin-top: 0.5em;"
+  />
+  <div style="display: flex; justify-content: center; gap: 0.5em; margin-bottom: 1em;">
     <a href="https://playground.liquid.ai/"><strong>Try LFM</strong></a> •
     <a href="https://docs.liquid.ai/lfm"><strong>Documentation</strong></a> •
-    <a href="https://leap.liquid.ai/"><strong>LEAP</strong></a> •
-    <a href="https://www.liquid.ai/blog/"><strong>Blog</strong></a>
-  </p>
+    <a href="https://leap.liquid.ai/"><strong>LEAP</strong></a>
+  </div>
 </div>
 
 # LFM2.5-VL-1.6B-ONNX
@@ -46,9 +48,9 @@ ONNX export of [LFM2.5-VL-1.6B](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B) 
 | Encoder | Decoder | Size | Platform | Use Case |
 |---------|---------|------|----------|----------|
 | FP16 | Q4 | ~1.5GB | WebGPU, Server | Recommended for most uses |
-| FP16 | FP16 | ~3.2GB | Server | Higher quality |
+| FP16 | FP16 | ~3.2GB | WebGPU, Server | Higher quality |
 
-- **WebGPU**: Use FP16 encoder + Q4 decoder (Q8 not supported)
+- **WebGPU**: Use FP16 encoder + Q4 or FP16 decoder (Q8 not supported)
 - **Server**: FP16+Q4 for efficiency, FP16+FP16 for quality
 
 ## Model Files
@@ -307,6 +309,7 @@ console.log(tokenizer.decode(generatedTokens, { skip_special_tokens: true }));
 
 - Recommended: `embed_images_fp16.onnx` + `decoder_q4.onnx`
 - For higher quality: `embed_images_fp16.onnx` + `decoder_fp16.onnx`
+- Q8 is not supported on WebGPU - use Q4 or FP16
 - Image preprocessing requires tiling (512×512), patch extraction (16×16), and normalization
 - Models use external data files (`.onnx_data`) that are loaded automatically
 - int64 tensors require `BigInt64Array`

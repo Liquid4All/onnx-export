@@ -4,25 +4,19 @@ license_name: lfm1.0
 license_link: LICENSE
 language:
 - en
-- ja
-- ko
-- fr
-- es
-- de
-- it
-- pt
-- ar
-- zh
 pipeline_tag: text-generation
 tags:
 - liquid
 - edge
-- lfm2.5
+- lfm2
+- transcript
+- meeting
+- summarization
 - onnx
 - onnxruntime
 - webgpu
 base_model:
-- LiquidAI/LFM2.5-1.2B-Base
+- LiquidAI/LFM2-2.6B-Transcript
 ---
 
 <div align="center">
@@ -38,21 +32,20 @@ base_model:
   </div>
 </div>
 
-# LFM2.5-1.2B-Base-ONNX
+# LFM2-2.6B-Transcript-ONNX
 
-ONNX export of [LFM2.5-1.2B-Base](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Base) for cross-platform inference.
+ONNX export of [LFM2-2.6B-Transcript](https://huggingface.co/LiquidAI/LFM2-2.6B-Transcript) for cross-platform inference.
 
-LFM2.5 is a hybrid architecture combining multiplicative gates and short convolutions, optimized for edge deployment with fast inference on CPU, GPU, and NPU hardware. This is the base (pretrained) model for text completion tasks.
+LFM2-2.6B-Transcript is optimized for processing and summarizing meeting transcripts, extracting key points, action items, and decisions from conversational text.
 
 ## Recommended Variants
 
 | Precision | Size | Platform | Use Case |
 |-----------|------|----------|----------|
-| Q4 | ~1.2GB | WebGPU, Server | Recommended for most uses |
-| FP16 | ~2.4GB | WebGPU, Server | Higher quality |
-| Q8 | ~1.7GB | Server only | Balance of quality and size |
+| Q4 | ~2.0GB | WebGPU, Server | Recommended for most uses |
+| FP16 | ~4.8GB | WebGPU, Server | Higher quality |
 
-- **WebGPU**: Use Q4 or FP16 (Q8 not supported)
+- **WebGPU**: Use Q4 or FP16
 - **Server**: All variants supported
 
 ## Model Files
@@ -61,8 +54,7 @@ LFM2.5 is a hybrid architecture combining multiplicative gates and short convolu
 onnx/
 ├── model.onnx              # FP32
 ├── model_fp16.onnx         # FP16
-├── model_q4.onnx           # Q4 (recommended)
-└── model_q8.onnx           # Q8
+└── model_q4.onnx           # Q4 (recommended)
 ```
 
 ## Python
@@ -84,7 +76,7 @@ from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 
 # Download model (Q4 recommended)
-model_id = "LiquidAI/LFM2.5-1.2B-Base-ONNX"
+model_id = "LiquidAI/LFM2-2.6B-Transcript-ONNX"
 model_path = hf_hub_download(model_id, "onnx/model_q4.onnx")
 data_path = hf_hub_download(model_id, "onnx/model_q4.onnx_data")
 
@@ -92,9 +84,10 @@ data_path = hf_hub_download(model_id, "onnx/model_q4.onnx_data")
 session = ort.InferenceSession(model_path)
 tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 
-# Prepare text completion input
-prompt = "The quick brown fox"
-input_ids = np.array([tokenizer.encode(prompt, add_special_tokens=True)], dtype=np.int64)
+# Prepare chat input
+messages = [{"role": "user", "content": "Summarize this meeting transcript: ..."}]
+prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+input_ids = np.array([tokenizer.encode(prompt, add_special_tokens=False)], dtype=np.int64)
 
 # Initialize KV cache
 ONNX_DTYPE = {"tensor(float)": np.float32, "tensor(float16)": np.float16, "tensor(int64)": np.int64}
@@ -116,7 +109,7 @@ use_position_ids = "position_ids" in input_names
 seq_len = input_ids.shape[1]
 generated_tokens = []
 
-for step in range(50):  # max tokens
+for step in range(100):  # max tokens
     if step == 0:
         ids = input_ids
         pos = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
@@ -142,7 +135,7 @@ for step in range(50):  # max tokens
     if next_token == tokenizer.eos_token_id:
         break
 
-print(prompt + tokenizer.decode(generated_tokens, skip_special_tokens=True))
+print(tokenizer.decode(generated_tokens, skip_special_tokens=True))
 ```
 
 ## WebGPU (Browser)
@@ -174,7 +167,7 @@ if (!navigator.gpu) {
 
 ort.env.wasm.numThreads = 1;
 
-const modelId = "LiquidAI/LFM2.5-1.2B-Base-ONNX";
+const modelId = "LiquidAI/LFM2-2.6B-Transcript-ONNX";
 const modelBase = `https://huggingface.co/${modelId}/resolve/main`;
 
 // Load tokenizer and model
@@ -186,9 +179,9 @@ const session = await ort.InferenceSession.create(`${modelBase}/onnx/model_q4.on
 });
 
 // Model config
-const hiddenSize = 1536;
-const numKVHeads = 12;
-const headDim = 128;
+const hiddenSize = 2048;
+const numKVHeads = 8;
+const headDim = 256;
 
 // Initialize KV cache
 function initCache() {
@@ -214,8 +207,9 @@ function updateCache(cache, outputs) {
   }
 }
 
-// Prepare input (text completion)
-const prompt = "The quick brown fox";
+// Prepare input
+const messages = [{ role: "user", content: "Summarize this meeting transcript: ..." }];
+const prompt = tokenizer.apply_chat_template(messages, { add_generation_prompt: true, tokenize: false });
 const inputIds = tokenizer.encode(prompt);
 
 // Generation loop
@@ -223,7 +217,7 @@ const cache = initCache();
 const generatedTokens = [];
 let curLen = inputIds.length;
 
-for (let step = 0; step < 50; step++) {
+for (let step = 0; step < 256; step++) {
   const ids = step === 0 ? inputIds : [generatedTokens[generatedTokens.length - 1]];
   const inputTensor = new ort.Tensor("int64", new BigInt64Array(ids.map(BigInt)), [1, ids.length]);
   const attentionMask = new ort.Tensor("int64", new BigInt64Array(curLen).fill(1n), [1, curLen]);
@@ -243,14 +237,13 @@ for (let step = 0; step < 50; step++) {
   curLen++;
 }
 
-console.log(prompt + tokenizer.decode(generatedTokens, { skip_special_tokens: true }));
+console.log(tokenizer.decode(generatedTokens, { skip_special_tokens: true }));
 ```
 
 ### WebGPU Notes
 
 - Recommended: `model_q4.onnx` for smallest size
 - For higher quality: `model_fp16.onnx`
-- Q8 is not supported on WebGPU - use Q4 or FP16
 - Models use external data files (`.onnx_data`) loaded automatically
 - int64 tensors require `BigInt64Array`
 
