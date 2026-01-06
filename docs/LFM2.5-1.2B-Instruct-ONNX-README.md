@@ -154,6 +154,14 @@ print(tokenizer.decode(generated_tokens, skip_special_tokens=True))
 npm install @huggingface/transformers
 ```
 
+### Enable WebGPU
+
+WebGPU is required for browser inference. To enable:
+
+1. **Chrome/Edge**: Navigate to `chrome://flags/#enable-unsafe-webgpu`, enable, and restart
+2. **Verify**: Check `chrome://gpu` for "WebGPU" status
+3. **Test**: Run `navigator.gpu.requestAdapter()` in DevTools console
+
 ### Inference
 
 ```javascript
@@ -189,7 +197,6 @@ console.log(tokenizer.decode(output[0], { skip_special_tokens: true }));
 
 ### WebGPU Notes
 
-- Enable WebGPU: `chrome://flags/#enable-unsafe-webgpu`
 - Supported: Q4, FP16 (Q8 not supported on WebGPU)
 
 ## License

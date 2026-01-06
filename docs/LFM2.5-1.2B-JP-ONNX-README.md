@@ -143,7 +143,7 @@ print(prompt + tokenizer.decode(generated_tokens, skip_special_tokens=True))
 ### Installation
 
 ```bash
-npm install onnxruntime-web @huggingface/transformers
+npm install @huggingface/transformers
 ```
 
 ### Enable WebGPU
@@ -157,95 +157,36 @@ WebGPU is required for browser inference. To enable:
 ### Inference
 
 ```javascript
-import * as ort from "onnxruntime-web/webgpu";
-import { AutoTokenizer } from "@huggingface/transformers";
-
-// Check WebGPU availability
-if (!navigator.gpu) {
-  throw new Error("WebGPU not available. Enable at chrome://flags/#enable-unsafe-webgpu");
-}
-
-ort.env.wasm.numThreads = 1;
+import { AutoModelForCausalLM, AutoTokenizer, TextStreamer } from "@huggingface/transformers";
 
 const modelId = "LiquidAI/LFM2.5-1.2B-JP-ONNX";
-const modelBase = `https://huggingface.co/${modelId}/resolve/main`;
 
-// Load tokenizer and model
+// Load model and tokenizer
 const tokenizer = await AutoTokenizer.from_pretrained(modelId);
-
-const session = await ort.InferenceSession.create(`${modelBase}/onnx/model_q4.onnx`, {
-  executionProviders: ["webgpu"],
-  externalData: [{ path: "model_q4.onnx_data", data: `${modelBase}/onnx/model_q4.onnx_data` }],
+const model = await AutoModelForCausalLM.from_pretrained(modelId, {
+  device: "webgpu",
+  dtype: "q4",  // or "fp16"
 });
-
-// Model config
-const hiddenSize = 1536;
-const numKVHeads = 12;
-const headDim = 128;
-
-// Initialize KV cache
-function initCache() {
-  const cache = {};
-  for (const name of session.inputNames) {
-    if (name.startsWith("past_conv")) {
-      cache[name] = new ort.Tensor("float32", new Float32Array(hiddenSize * 3), [1, hiddenSize, 3]);
-    } else if (name.startsWith("past_key_values")) {
-      cache[name] = new ort.Tensor("float32", new Float32Array(0), [1, numKVHeads, 0, headDim]);
-    }
-  }
-  return cache;
-}
-
-// Update cache from outputs
-function updateCache(cache, outputs) {
-  for (const [name, tensor] of Object.entries(outputs)) {
-    if (name.startsWith("present_conv")) {
-      cache[name.replace("present_conv", "past_conv")] = tensor;
-    } else if (name.startsWith("present.")) {
-      cache[name.replace("present.", "past_key_values.")] = tensor;
-    }
-  }
-}
 
 // Prepare input (Japanese text completion)
 const prompt = "東京は日本の";
 const inputIds = tokenizer.encode(prompt);
 
-// Generation loop
-const cache = initCache();
-const generatedTokens = [];
-let curLen = inputIds.length;
+// Generate with streaming
+const streamer = new TextStreamer(tokenizer, { skip_prompt: false });
+const output = await model.generate({
+  input_ids: inputIds,
+  max_new_tokens: 50,
+  do_sample: false,
+  streamer,
+});
 
-for (let step = 0; step < 50; step++) {
-  const ids = step === 0 ? inputIds : [generatedTokens[generatedTokens.length - 1]];
-  const inputTensor = new ort.Tensor("int64", new BigInt64Array(ids.map(BigInt)), [1, ids.length]);
-  const attentionMask = new ort.Tensor("int64", new BigInt64Array(curLen).fill(1n), [1, curLen]);
-
-  const outputs = await session.run({ input_ids: inputTensor, attention_mask: attentionMask, ...cache });
-
-  // Greedy decode
-  const logits = outputs.logits;
-  const vocabSize = logits.dims[2];
-  const lastLogits = logits.data.slice((logits.dims[1] - 1) * vocabSize);
-  const nextToken = lastLogits.indexOf(Math.max(...lastLogits));
-
-  generatedTokens.push(nextToken);
-  if (nextToken === tokenizer.eos_token_id) break;
-
-  updateCache(cache, outputs);
-  curLen++;
-}
-
-console.log(prompt + tokenizer.decode(generatedTokens, { skip_special_tokens: true }));
+console.log(tokenizer.decode(output[0], { skip_special_tokens: true }));
 ```
 
 ### WebGPU Notes
 
-- Recommended: `model_q4.onnx` for smallest size
-- For higher quality: `model_fp16.onnx`
-- Q8 is not supported on WebGPU - use Q4 or FP16
-- Models use external data files (`.onnx_data`) loaded automatically
-- int64 tensors require `BigInt64Array`
+- Supported: Q4, FP16 (Q8 not supported on WebGPU)
 
 ## License
 
