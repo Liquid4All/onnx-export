@@ -38,7 +38,9 @@ class ONNXBuilderBase:
         self.inputs: list[onnx.ValueInfoProto] = []
         self.outputs: list[onnx.ValueInfoProto] = []
         self.initializers: list[onnx.TensorProto] = []
+        self.value_info: list[onnx.ValueInfoProto] = []
         self._initializer_names: set[str] = set()
+        self._value_info_names: set[str] = set()
         self.weights: dict[str, np.ndarray] = {}
         self._node_count = 0
         self._constants: dict[tuple, str] = {}  # (value_bytes, dtype) -> name
@@ -47,6 +49,29 @@ class ONNXBuilderBase:
         """Generate unique node name."""
         self._node_count += 1
         return f"{prefix}_{self._node_count}"
+
+    def _strip_output_suffix(self, name: str) -> str:
+        """Strip /output_N suffix from tensor name to get node name."""
+        if "/output_" in name:
+            return name.rsplit("/output_", 1)[0]
+        return name
+
+    def _parent_path(self, path: str) -> str:
+        """Get parent path by removing last component."""
+        return path.rsplit("/", 1)[0] if "/" in path else path
+
+    def _output_name(self, path: str, op_type: str, idx: int = 0) -> str:
+        """Generate output name from logical path and op type.
+
+        Args:
+            path: Logical path (e.g., "/model/layers.0/input_layernorm")
+            op_type: ONNX operator type (e.g., "LayerNormalization")
+            idx: Output index (default 0)
+
+        Returns:
+            Output name like "/model/layers.0/input_layernorm/LayerNormalization/output_0"
+        """
+        return f"{path}/{op_type}/output_{idx}"
 
     def add_initializer(self, name: str, tensor: np.ndarray, dtype=None):
         """Add weight tensor as graph initializer.
@@ -68,6 +93,21 @@ class ONNXBuilderBase:
         else:
             tensor = tensor.astype(dtype)
         self.initializers.append(numpy_helper.from_array(tensor, name))
+
+    def add_value_info(
+        self, name: str, elem_type: int, shape: list[int | str]
+    ) -> None:
+        """Add shape annotation for an intermediate tensor.
+
+        Args:
+            name: Tensor name
+            elem_type: ONNX TensorProto element type (e.g., TensorProto.FLOAT)
+            shape: Shape as list of ints (concrete) or strings (symbolic dims)
+        """
+        if name in self._value_info_names:
+            return
+        self._value_info_names.add(name)
+        self.value_info.append(helper.make_tensor_value_info(name, elem_type, shape))
 
     def get_constant(self, value: int | float | list | np.ndarray, dtype=np.int64) -> str:
         """Get or create a shared constant via Constant node.
@@ -130,9 +170,7 @@ class ONNXBuilderBase:
         if name is None:
             # Derive node name from first output, stripping /output_N suffix
             if outputs and outputs[0]:
-                import re
-
-                name = re.sub(r"/output_\d+$", "", outputs[0])
+                name = self._strip_output_suffix(outputs[0])
             else:
                 name = self._unique_name(op_type)
 
@@ -156,64 +194,72 @@ class ONNXBuilderBase:
         """Create Sigmoid node."""
         return self.make_node("Sigmoid", [input_name], [output_name])
 
-    def make_silu(self, input_name: str, output_name: str) -> str:
+    def make_silu(self, input_name: str, path: str) -> str:
         """Create SiLU activation: x * sigmoid(x).
 
-        Given output_name like '/model/layers.0/mlp/Silu/output_0',
-        creates:
-        - Sigmoid with output '/model/layers.0/mlp/Silu/Sigmoid/output_0'
-        - Mul with output '/model/layers.0/mlp/Silu/output_0'
+        Args:
+            input_name: Input tensor name
+            path: Logical path (e.g., "/model/layers.0/mlp/act_fn")
+
+        Returns:
+            Output name "{path}/Mul/output_0"
         """
-        import re
+        sigmoid_out = self.make_sigmoid(input_name, self._output_name(path, "Sigmoid"))
+        return self.make_mul(input_name, sigmoid_out, self._output_name(path, "Mul"))
 
-        base = re.sub(r"/output_\d+$", "", output_name)
-        sigmoid_out = self.make_sigmoid(input_name, f"{base}/Sigmoid/output_0")
-        return self.make_mul(input_name, sigmoid_out, output_name)
-
-    def make_gelu(self, input_name: str, output_name: str, approximate: str = "tanh") -> str:
+    def make_gelu(self, input_name: str, path: str, approximate: str = "tanh") -> str:
         """Create GELU activation.
 
         Args:
             input_name: Input tensor name
-            output_name: Output tensor name
+            path: Logical path (e.g., "/model/layers.0/mlp/act_fn")
             approximate: "tanh" for fast approximation, "none" for exact GELU
 
         Returns:
-            Output tensor name
+            Output name "{path}/Gelu/output_0"
         """
-        return self.make_node("Gelu", [input_name], [output_name], approximate=approximate)
+        return self.make_node("Gelu", [input_name], [self._output_name(path, "Gelu")], approximate=approximate)
 
     def make_layernorm(
         self,
         input_name: str,
         weight_name: str,
         bias_name: str | None,
-        output_name: str,
+        path: str,
         epsilon: float = 1e-5,
+        name: str = None,
     ) -> str:
         """Create LayerNormalization node.
+
+        Automatically selects SimplifiedLayerNormalization (no bias) or
+        LayerNormalization (with bias) based on bias_name.
 
         Args:
             input_name: Input tensor
             weight_name: Scale weight
             bias_name: Bias (None for SimplifiedLayerNorm)
-            output_name: Output tensor
+            path: Logical path (e.g., "/model/layers.0/input_layernorm")
             epsilon: Epsilon for numerical stability
+            name: Override name in path (default: op type). Use "LayerNorm" for
+                  community convention where SimplifiedLayerNormalization uses
+                  shorter name in path.
 
         Returns:
-            Output tensor name
+            Output name "{path}/{name}/output_0"
         """
         if bias_name is None:
+            op_type = "SimplifiedLayerNormalization"
             return self.make_node(
-                "SimplifiedLayerNormalization",
+                op_type,
                 inputs=[input_name, weight_name],
-                outputs=[output_name],
+                outputs=[self._output_name(path, name or op_type)],
                 epsilon=epsilon,
             )
+        op_type = "LayerNormalization"
         return self.make_node(
-            "LayerNormalization",
+            op_type,
             inputs=[input_name, weight_name, bias_name],
-            outputs=[output_name],
+            outputs=[self._output_name(path, name or op_type)],
             epsilon=epsilon,
         )
 
@@ -289,31 +335,28 @@ class ONNXBuilderBase:
         return matmul_out
 
     def make_slice_last_n(
-        self, input_name: str, n_elements: str, output_name: str, axis: int = 2
+        self, input_name: str, n_elements: str, path: str, axis: int = 2
     ) -> str:
         """Slice last N elements along axis (dynamic N).
 
         Args:
             input_name: Input tensor name
             n_elements: Name of scalar tensor containing N
-            output_name: Output tensor name (should end with /output_0)
+            path: Logical path (e.g., "/model/layers.0/conv/slice_last")
             axis: Axis to slice along
 
         Returns:
-            Output tensor name
+            Output name "{path}/Slice/output_0"
         """
-        import re
-
-        base = re.sub(r"/output_\d+$", "", output_name)
-        neg_n = self.make_mul(n_elements, self.get_constant(-1), f"{base}/Mul/output_0")
-        start = self.make_unsqueeze(neg_n, self.get_constant([0]), f"{base}/Unsqueeze/output_0")
+        neg_n = self.make_mul(n_elements, self.get_constant(-1), self._output_name(path, "Mul"))
+        start = self.make_unsqueeze(neg_n, self.get_constant([0]), self._output_name(path, "Unsqueeze"))
 
         return self.make_slice(
             input_name,
             start,
             self.get_constant([np.iinfo(np.int64).max]),
             self.get_constant([axis]),
-            output_name,
+            self._output_name(path, "Slice"),
         )
 
     def build_graph(
@@ -321,7 +364,7 @@ class ONNXBuilderBase:
         name: str,
         opset_version: int = 21,
         ms_domain: bool = True,
-        ir_version: int = 9,
+        ir_version: int = 10,
         producer_name: str = "liquidonnx",
     ) -> onnx.ModelProto:
         """Build the ONNX model from accumulated graph components.
@@ -342,6 +385,7 @@ class ONNXBuilderBase:
             self.inputs,
             self.outputs,
             self.initializers,
+            value_info=self.value_info,
         )
 
         opset_imports = [helper.make_opsetid("", opset_version)]

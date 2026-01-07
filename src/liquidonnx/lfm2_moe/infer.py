@@ -20,11 +20,12 @@ def main():
     parser.add_argument("--prompt", default=None, help="Initial prompt (optional)")
     parser.add_argument("--max-tokens", type=int, default=100, help="Max tokens to generate")
     parser.add_argument("--no-stream", action="store_true", help="Disable streaming output")
+    parser.add_argument("--cpu", action="store_true", help="Force CPU execution (skip CUDA)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
-    model = ONNXTextModel(args.model)
+    model = ONNXTextModel(args.model, force_cpu=args.cpu)
     model.load()
 
     run_chat_loop(model, args)

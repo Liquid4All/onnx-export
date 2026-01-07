@@ -70,10 +70,23 @@ class EmbedTokensBuilder(ONNXBuilderBase):
             )
         )
 
-        self.add_initializer("weight", self.embed_weight)
-        self.make_gather("weight", "input_ids", "inputs_embeds", axis=0)
+        # Community naming: model.embed_tokens.weight
+        self.add_initializer("model.embed_tokens.weight", self.embed_weight)
+        # Community node name: /model/embed_tokens/Gather
+        self.make_node(
+            "Gather",
+            ["model.embed_tokens.weight", "input_ids"],
+            ["inputs_embeds"],
+            name="/model/embed_tokens/Gather",
+            axis=0,
+        )
 
-        model = self.build_graph("embed_tokens", ms_domain=False, producer_name="lfm2-vl-builder")
+        # Add ValueInfo for weight (community convention)
+        self.add_value_info(
+            "model.embed_tokens.weight", TensorProto.FLOAT, [self.vocab_size, self.hidden_size]
+        )
+
+        model = self.build_graph("embed_tokens", ms_domain=False)
         logger.info(
             f"embed_tokens built: {len(self.nodes)} nodes, "
             f"vocab_size={self.vocab_size}, hidden_size={self.hidden_size}"

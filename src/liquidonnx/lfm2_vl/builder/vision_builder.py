@@ -76,15 +76,24 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         self.downsample = config.downsample_factor
 
     def make_vision_layernorm(
-        self, input_name: str, weight_name: str, bias_name: str, output_name: str
+        self, input_name: str, weight_name: str, bias_name: str, path: str
     ) -> str:
-        """Create LayerNormalization node with vision encoder epsilon."""
+        """Create LayerNormalization node with vision encoder epsilon.
+
+        Args:
+            input_name: Input tensor
+            weight_name: Scale weight
+            bias_name: Bias
+            path: Logical path (e.g., "/vision_encoder/layers.0/ln_1")
+        """
+        # Use "LayerNorm" suffix to match community naming convention
         return self.make_layernorm(
             input_name,
             weight_name,
             bias_name,
-            output_name,
+            path,
             epsilon=self.vision_config.layer_norm_eps,
+            name="LayerNorm",
         )
 
     def _split_spatial_shapes(self, output_prefix: str) -> tuple[str, str]:
@@ -1103,7 +1112,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             hidden_state,
             f"{w_prefix}.layer_norm1_layernorm.weight",
             f"{w_prefix}.layer_norm1_layernorm.bias",
-            f"{layer}/layer_norm1_layernorm/output_0",
+            f"{layer}/layer_norm1_layernorm",
         )
 
         q = self.make_node(
@@ -1169,8 +1178,9 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             [f"{layer}/attn/out_proj/Add/output_0"],
         )
 
+        # Community naming: Add_1 for attention residual
         hidden_state = self.make_node(
-            "Add", [residual, out_proj], [f"{layer}/attn_residual/Add/output_0"]
+            "Add", [residual, out_proj], [f"{layer}/Add_1/output_0"]
         )
 
         residual2 = hidden_state
@@ -1178,7 +1188,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             hidden_state,
             f"{w_prefix}.layer_norm2_layernorm.weight",
             f"{w_prefix}.layer_norm2_layernorm.bias",
-            f"{layer}/layer_norm2_layernorm/output_0",
+            f"{layer}/layer_norm2_layernorm",
         )
 
         fc1 = self.make_node(
@@ -1191,7 +1201,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             [fc1, f"{w_prefix}.mlp.fc1.Add.bias"],
             [f"{layer}/mlp/fc1/Add/output_0"],
         )
-        fc1_act = self.make_gelu(fc1, f"{layer}/mlp/fc1/Gelu/output_0")
+        fc1_act = self.make_gelu(fc1, f"{layer}/mlp/fc1")
 
         fc2 = self.make_node(
             "MatMul",
@@ -1204,7 +1214,8 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             [f"{layer}/mlp/fc2/Add/output_0"],
         )
 
-        return self.make_node("Add", [residual2, fc2], [f"{layer}/mlp_residual/Add/output_0"])
+        # Community naming: Add_2 for MLP residual
+        return self.make_node("Add", [residual2, fc2], [f"{layer}/Add_2/output_0"])
 
     def build_post_layernorm(self, hidden_state: str) -> str:
         """Build post layer norm."""
@@ -1220,7 +1231,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             hidden_state,
             "model.post_layernorm_layernorm.weight",
             "model.post_layernorm_layernorm.bias",
-            "/model/post_layernorm_layernorm/output_0",
+            "/model/post_layernorm_layernorm",
         )
 
     def build_projector(self, vision_embeddings: str) -> str:
@@ -1463,7 +1474,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 [f"{p}/linear_1/Add/output_0"],
             )
 
-        fc1_act = self.make_gelu(fc1, f"{p}/linear_1/Gelu/output_0", approximate="none")
+        fc1_act = self.make_gelu(fc1, f"{p}/linear_1", approximate="none")
 
         fc2 = self.make_node(
             "MatMul",
@@ -1521,6 +1532,157 @@ class VisionEmbedBuilder(ONNXBuilderBase):
 
         logger.info(f"Loaded {len(self.weights)} vision + projector weights")
 
+    def build_value_info(self):
+        """Build ValueInfo entries for weights and intermediate tensors."""
+        H = self.vision_hidden
+        nh = self.vision_config.num_attention_heads
+        hd = self.head_dim
+        intermediate = self.vision_config.intermediate_size
+        num_layers = self.vision_config.num_hidden_layers
+        text_hidden = self.text_hidden
+        proj_hidden = self.proj_hidden
+
+        # === Weight shapes (from initializers) ===
+        for init in self.initializers:
+            shape = list(init.dims)
+            dtype = init.data_type
+            self.add_value_info(init.name, dtype, shape)
+
+        # === Per-layer outputs ===
+        for layer_idx in range(num_layers):
+            layer = f"/model/layers.{layer_idx}"
+
+            # LayerNorm outputs
+            self.add_value_info(
+                f"{layer}/layer_norm1_layernorm/LayerNorm/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+            self.add_value_info(
+                f"{layer}/layer_norm2_layernorm/LayerNorm/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+
+            # Attention Q/K/V projections
+            self.add_value_info(
+                f"{layer}/attn/q_proj/MatMul/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+            self.add_value_info(
+                f"{layer}/attn/q_proj/Add/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+            self.add_value_info(
+                f"{layer}/attn/k_proj/MatMul/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+            self.add_value_info(
+                f"{layer}/attn/k_proj/Add/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+            self.add_value_info(
+                f"{layer}/attn/v_proj/MatMul/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+            self.add_value_info(
+                f"{layer}/attn/v_proj/Add/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+
+            # MultiHeadAttention output
+            self.add_value_info(
+                f"{layer}/attn/MultiHeadAttention/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+
+            # Output projection
+            self.add_value_info(
+                f"{layer}/attn/out_proj/MatMul/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+            self.add_value_info(
+                f"{layer}/attn/out_proj/Add/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+
+            # Residual adds
+            self.add_value_info(
+                f"{layer}/Add_1/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+            self.add_value_info(
+                f"{layer}/Add_2/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+
+            # MLP
+            self.add_value_info(
+                f"{layer}/mlp/fc1/MatMul/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", intermediate],
+            )
+            self.add_value_info(
+                f"{layer}/mlp/fc1/Add/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", intermediate],
+            )
+            self.add_value_info(
+                f"{layer}/mlp/fc1/Gelu/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", intermediate],
+            )
+            self.add_value_info(
+                f"{layer}/mlp/fc2/MatMul/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+            self.add_value_info(
+                f"{layer}/mlp/fc2/Add/output_0",
+                TensorProto.FLOAT,
+                ["batch_size", "num_patches", H],
+            )
+
+        # Post LayerNorm
+        self.add_value_info(
+            "/model/post_layernorm_layernorm/LayerNorm/output_0",
+            TensorProto.FLOAT,
+            ["batch_size", "num_patches", H],
+        )
+
+        # Projector outputs (main ones)
+        self.add_value_info(
+            "/multi_modal_projector/fc1/MatMul/output_0",
+            TensorProto.FLOAT,
+            ["batch_size", "num_patches_projected", proj_hidden],
+        )
+        self.add_value_info(
+            "/multi_modal_projector/fc1/Add/output_0",
+            TensorProto.FLOAT,
+            ["batch_size", "num_patches_projected", proj_hidden],
+        )
+        self.add_value_info(
+            "/multi_modal_projector/fc2/MatMul/output_0",
+            TensorProto.FLOAT,
+            ["batch_size", "num_patches_projected", text_hidden],
+        )
+        self.add_value_info(
+            "/multi_modal_projector/fc2/Add/output_0",
+            TensorProto.FLOAT,
+            ["batch_size", "num_patches_projected", text_hidden],
+        )
+
     def build(self) -> onnx.ModelProto:
         logger.info("Building fused vision encoder + projector...")
 
@@ -1539,6 +1701,8 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         logger.info("Building projector...")
         self.build_projector(vision_embeddings)
 
-        model = self.build_graph("embed_images", producer_name="lfm2-vl-builder")
-        logger.info(f"Vision + projector model built: {len(self.nodes)} nodes")
+        self.build_value_info()
+
+        model = self.build_graph("embed_images")
+        logger.info(f"Vision + projector model built: {len(self.nodes)} nodes, {len(self.value_info)} value_info")
         return model

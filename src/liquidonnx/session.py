@@ -46,12 +46,13 @@ def get_providers() -> list[str]:
 
             from onnx import TensorProto, helper
 
-            # Minimal valid ONNX model
+            # Minimal valid ONNX model (use IR version 8 for compatibility)
             X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
             Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
             node = helper.make_node("Identity", ["X"], ["Y"])
             graph = helper.make_graph([node], "test", [X], [Y])
             model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+            model.ir_version = 8
 
             with tempfile.NamedTemporaryFile(suffix=".onnx", delete=True) as f:
                 import onnx
@@ -147,11 +148,12 @@ def update_cache(cache: dict, outputs: list, output_infos: list) -> None:
 class ONNXTextModel:
     """Shared ONNX inference for LFM2 text models (dense and MoE)."""
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, force_cpu: bool = False):
         self.model_path = pathlib.Path(model_path)
         self.tokenizer = None
         self.session = None
         self.input_names = set()
+        self.force_cpu = force_cpu
 
     def load(self):
         """Load tokenizer and ONNX model."""
@@ -175,8 +177,9 @@ class ONNXTextModel:
 
         self.tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path), trust_remote_code=True)
 
+        providers = ["CPUExecutionProvider"] if self.force_cpu else None
         logger.info(f"Loading ONNX from {onnx_path}...")
-        self.session = load_onnx_session(onnx_path)
+        self.session = load_onnx_session(onnx_path, providers=providers)
 
         self.input_names = {inp.name for inp in self.session.get_inputs()}
         logger.info(f"Model loaded. Inputs: {len(self.input_names)} tensors")
