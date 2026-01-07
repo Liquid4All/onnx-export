@@ -237,7 +237,7 @@ def export_vl_model(
     # === 3. Export decoder ===
     logger.info("Exporting decoder (with inputs_embeds input)...")
 
-    text_builder = LFM2Builder(vl_config.text_config, use_integrated_rope=True)
+    text_builder = LFM2Builder(vl_config.text_config, use_integrated_rope=True, vl_naming=True)
 
     # Filter text model weights (they have "model.language_model." prefix in VL model)
     for name, weight in weights.items():
@@ -331,6 +331,9 @@ def export_vl_model(
     text_builder.weights.clear()
     gc.collect()
 
+    # Build ValueInfo for shape annotations (community convention)
+    text_builder.build_value_info()
+
     logger.info("Building decoder graph...")
     text_graph = helper.make_graph(
         text_builder.nodes,
@@ -338,6 +341,7 @@ def export_vl_model(
         text_builder.inputs,
         text_builder.outputs,
         text_builder.initializers,
+        value_info=text_builder.value_info,
     )
 
     text_model = helper.make_model(
@@ -346,9 +350,9 @@ def export_vl_model(
             helper.make_opsetid("", 21),
             helper.make_opsetid("com.microsoft", 1),
         ],
-        ir_version=9,
+        ir_version=10,
     )
-    text_model.producer_name = "lfm2-vl-builder"
+    text_model.producer_name = "liquidonnx"
 
     text_builder.nodes.clear()
     text_builder.initializers.clear()

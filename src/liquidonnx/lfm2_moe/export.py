@@ -200,13 +200,17 @@ def convert_q4_to_fp16(
 
     graph = model.graph
 
-    # Convert all float32 initializers to FP16 (including scales for MatMulNBits type consistency)
+    # Convert float32 initializers to FP16, except quantization scales (keep FP32 for precision)
     fp16_min = np.finfo(np.float16).min  # -65504.0
     fp16_max = np.finfo(np.float16).max  # 65504.0
     new_initializers = []
     for init in graph.initializer:
         if init.data_type == TensorProto.FLOAT:
             name = init.name
+            # Keep quantization scales in FP32 for precision (matches community)
+            if "_scales" in name:
+                new_initializers.append(init)
+                continue
             arr = numpy_helper.to_array(init)
             # Clamp to FP16 range before conversion to avoid -inf/+inf
             arr_clamped = np.clip(arr, fp16_min, fp16_max)
