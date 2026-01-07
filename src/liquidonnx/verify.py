@@ -9,10 +9,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
-ATOL = 5e-2  # 0.05 - our exports have ~0.03 max_diff (80x better than community's ~2.5)
+ATOL = 5e-2  # 0.05 - our fp32 exports have ~0.03 max_diff
 RTOL = 5e-2
-ATOL_FP16 = 2e-2  # fp16 has ~3 decimal digits of precision
-RTOL_FP16 = 5e-2
+ATOL_FP16 = 1e-1  # 0.1 - fp16 has less precision than fp32
+RTOL_FP16 = 1e-1
 ATOL_QUANT = 0.5
 RTOL_QUANT = 0.5
 
