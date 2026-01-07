@@ -38,13 +38,28 @@ class LFM2Config:
     num_key_value_heads: int
     vocab_size: int
     layer_types: list[str]
+    intermediate_size: int | None = None  # MLP intermediate size, defaults to H * 9 // 2
     conv_L_cache: int = 3
     max_position_embeddings: int = 128000
     norm_eps: float = 1e-5
     rope_theta: float = 1000000.0
 
+    def __post_init__(self):
+        if self.intermediate_size is None:
+            self.intermediate_size = self.hidden_size * 9 // 2
+
     @classmethod
     def from_hf_config(cls, config) -> "LFM2Config":
+        # Compute intermediate_size using same logic as PyTorch model
+        intermediate_size = getattr(config, "intermediate_size", None)
+        if intermediate_size is not None and getattr(config, "block_auto_adjust_ff_dim", False):
+            intermediate_size = int(2 * intermediate_size / 3)
+            multiplier = getattr(config, "block_ffn_dim_multiplier", None)
+            if multiplier is not None:
+                intermediate_size = int(multiplier * intermediate_size)
+                multiple_of = getattr(config, "block_multiple_of", 256)
+                intermediate_size = multiple_of * ((intermediate_size + multiple_of - 1) // multiple_of)
+
         return cls(
             hidden_size=config.hidden_size,
             num_hidden_layers=config.num_hidden_layers,
@@ -52,6 +67,7 @@ class LFM2Config:
             num_key_value_heads=config.num_key_value_heads,
             vocab_size=config.vocab_size,
             layer_types=config.layer_types,
+            intermediate_size=intermediate_size,
             conv_L_cache=getattr(config, "conv_L_cache", 3),
             max_position_embeddings=config.max_position_embeddings,
             norm_eps=getattr(config, "norm_eps", 1e-5),
@@ -831,7 +847,7 @@ class LFM2Builder(ONNXBuilderBase):
         nkv = self.config.num_key_value_heads
         hd = self.head_dim
         kv_hidden = nkv * hd
-        intermediate = H * 9 // 2  # MLP intermediate size (4.5x)
+        intermediate = self.config.intermediate_size
         L = self.config.conv_L_cache
         num_layers = self.config.num_hidden_layers
         mask_prefix = "/model/attn_mask_reformat/attn_mask_subgraph"
