@@ -16,16 +16,20 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from helpers import skip_if_missing
+from helpers import get_model_name, get_onnx_dir
 from PIL import Image
 
-from liquidonnx.lfm2_vl import MODELS
-from liquidonnx.lfm2_vl.infer import get_onnx_dir
 from liquidonnx.lfm2_vl.preprocessing import pad_to_square
 from liquidonnx.session import get_onnx_file, load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, compare_correlation, get_tolerances
 
 logger = logging.getLogger(__name__)
+
+# HuggingFace model IDs to test
+MODELS = [
+    "LiquidAI/LFM2-VL-450M",
+    "LiquidAI/LFM2-VL-1.6B",
+]
 
 VISION_CORRELATION_THRESHOLD = 0.89
 
@@ -114,7 +118,7 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, v
 
 # pytorch_model outermost so same model runs consecutively (memory optimization)
 # Only tests tiled format (conv2d has different preprocessing, verified via coherence tests)
-@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 @pytest.mark.parametrize("vision_type,checks", QUANT_CONFIGS)
 def test_vision_encoder(
     exports_dir: pathlib.Path,
@@ -123,14 +127,17 @@ def test_vision_encoder(
     vision_type: str | None,
     checks: list[str],
 ):
-    size, model, processor = pytorch_model
-    logger.info(f"Testing vision encoder {size}/{vision_type or 'fp32'}")
+    model_id, model, processor = pytorch_model
+    model_name = get_model_name(model_id)
+    logger.info(f"Testing vision encoder {model_name}/{vision_type or 'fp32'}")
 
-    onnx_dir = get_onnx_dir(exports_dir, size)
-    skip_if_missing(onnx_dir, "Export not found")
+    onnx_dir = get_onnx_dir(exports_dir, model_id)
+    if not onnx_dir.exists():
+        pytest.skip(f"Export not found: {onnx_dir}")
 
     embed_images_file = get_onnx_file(onnx_dir, vision_type, "embed_images")
-    skip_if_missing(embed_images_file, "Vision encoder not found")
+    if not embed_images_file.exists():
+        pytest.skip(f"Vision encoder not found: {embed_images_file}")
 
     embed_images_sess = load_onnx_session(embed_images_file)
     image = Image.open(cardinal_image).convert("RGB")

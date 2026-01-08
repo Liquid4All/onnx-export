@@ -6,9 +6,6 @@ Both are compared against PyTorch reference to show which is closer.
 Run with:
     uv run pytest tests/test_lfm2_moe/test_community.py -v
     uv run pytest tests/test_lfm2_moe/test_community.py -v -k "fp32"
-
-Set ONNX_COMMUNITY_DIR environment variable to the directory containing community models:
-    export ONNX_COMMUNITY_DIR=/path/to/onnx-community
 """
 
 import logging
@@ -17,18 +14,16 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from helpers import get_community_moe_onnx_dir, get_community_moe_onnx_file, skip_if_missing
+from helpers import download_community_moe_onnx, get_model_name, get_onnx_dir
 
-from liquidonnx.lfm2_moe import MODELS
 from liquidonnx.session import get_onnx_file, load_onnx_session
 
 logger = logging.getLogger(__name__)
 
-
-def get_onnx_dir(exports_dir: pathlib.Path, size: str) -> pathlib.Path:
-    """Get ONNX directory for a model size."""
-    return exports_dir / f"LFM2-MoE-{size}-ONNX" / "onnx"
-
+# HuggingFace model IDs to test
+MODELS = [
+    "LiquidAI/LFM2-8B-A1B",
+]
 
 QUANT_CONFIGS = [
     pytest.param(None, id="fp32"),
@@ -63,33 +58,35 @@ def compute_metrics(expected: np.ndarray, actual: np.ndarray) -> dict:
     }
 
 
-@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 @pytest.mark.parametrize("precision", QUANT_CONFIGS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_community_comparison(
     exports_dir: pathlib.Path,
-    community_dir: pathlib.Path,
     pytorch_model,
     precision: str | None,
     prompt: str,
 ):
     """Compare local and community ONNX exports against PyTorch reference."""
-    size, model, tokenizer = pytorch_model
-    logger.info(f"Comparing {size}/{precision or 'fp32'}: '{prompt}'")
+    model_id, model, tokenizer = pytorch_model
+    model_name = get_model_name(model_id)
+    logger.info(f"Comparing {model_name}/{precision or 'fp32'}: '{prompt}'")
 
     # Check local export exists
-    local_onnx_dir = get_onnx_dir(exports_dir, size)
-    skip_if_missing(local_onnx_dir, "Local export not found")
-
+    local_onnx_dir = get_onnx_dir(exports_dir, model_id)
     local_onnx_file = get_onnx_file(local_onnx_dir, precision)
-    skip_if_missing(local_onnx_file, f"Local ONNX file not found: {local_onnx_file.name}")
 
-    # Check community export exists
-    community_onnx_dir = get_community_moe_onnx_dir(community_dir, size)
-    skip_if_missing(community_onnx_dir, f"Community export not found: {community_onnx_dir}")
+    if not local_onnx_file.exists():
+        precision_arg = f" --precision {precision}" if precision else ""
+        pytest.skip(
+            f"Local ONNX file not found: {local_onnx_file}\n"
+            f"Export with: uv run lfm2-moe-export {model_id}{precision_arg}"
+        )
 
-    community_onnx_file = get_community_moe_onnx_file(community_onnx_dir, precision)
-    skip_if_missing(community_onnx_file, f"Community ONNX file not found: {community_onnx_file}")
+    # Download community export from HuggingFace
+    community_onnx_file = download_community_moe_onnx(model_id, precision)
+    if not community_onnx_file:
+        pytest.skip(f"Community ONNX not available on HF for {model_id} {precision or 'fp32'}")
 
     # Load ONNX models
     try:

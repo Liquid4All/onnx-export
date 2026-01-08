@@ -16,11 +16,10 @@ from dataclasses import dataclass
 import numpy as np
 import onnxruntime as ort
 import pytest
-from helpers import skip_if_missing
+from helpers import get_onnx_dir
 from PIL import Image
 
-from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D
-from liquidonnx.lfm2_vl.infer import get_onnx_dir
+from liquidonnx.lfm2_vl import VISION_MODE_CONV2D
 from liquidonnx.lfm2_vl.preprocessing import (
     detect_vision_format,
     get_image_token_id,
@@ -30,6 +29,12 @@ from liquidonnx.quantize import get_total_model_size_mb
 from liquidonnx.session import get_onnx_file, initialize_cache, update_cache
 
 logger = logging.getLogger(__name__)
+
+# HuggingFace model IDs to test
+MODELS = [
+    "LiquidAI/LFM2-VL-450M",
+    "LiquidAI/LFM2-VL-1.6B",
+]
 
 QUANT_CONFIGS = [
     pytest.param("q4", "q4", id="q4"),
@@ -212,7 +217,7 @@ def run_benchmark(
     )
 
 
-@pytest.mark.parametrize("model_processor", MODELS.keys(), indirect=True)
+@pytest.mark.parametrize("model_processor", MODELS, indirect=True)
 @pytest.mark.parametrize("decoder_type,vision_type", QUANT_CONFIGS)
 def test_benchmark(
     exports_dir: pathlib.Path,
@@ -222,19 +227,23 @@ def test_benchmark(
     vision_type: str,
 ):
     """Benchmark single-image VL inference."""
-    size, processor = model_processor
-    logger.info(f"Benchmarking {size}/{decoder_type}d-{vision_type}v")
+    model_id, processor = model_processor
+    logger.info(f"Benchmarking {model_id}/{decoder_type}d-{vision_type}v")
 
-    onnx_dir = get_onnx_dir(exports_dir, size)
-    skip_if_missing(onnx_dir, "Export not found")
+    onnx_dir = get_onnx_dir(exports_dir, model_id)
+    if not onnx_dir.exists():
+        pytest.skip(f"Export not found: {onnx_dir}")
 
     embed_tokens_file = onnx_dir / "embed_tokens.onnx"
     embed_images_file = get_onnx_file(onnx_dir, vision_type, "embed_images")
     decoder_file = get_onnx_file(onnx_dir, decoder_type, "decoder")
 
-    skip_if_missing(embed_tokens_file, "embed_tokens not found")
-    skip_if_missing(embed_images_file, "embed_images not found")
-    skip_if_missing(decoder_file, "decoder not found")
+    if not embed_tokens_file.exists():
+        pytest.skip(f"embed_tokens not found: {embed_tokens_file}")
+    if not embed_images_file.exists():
+        pytest.skip(f"embed_images not found: {embed_images_file}")
+    if not decoder_file.exists():
+        pytest.skip(f"decoder not found: {decoder_file}")
 
     # Measure model sizes
     embed_tokens_mb = get_total_model_size_mb(embed_tokens_file)

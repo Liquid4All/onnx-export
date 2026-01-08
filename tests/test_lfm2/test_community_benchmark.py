@@ -18,19 +18,25 @@ from dataclasses import dataclass
 
 import numpy as np
 import pytest
-from helpers import get_community_onnx_dir, get_community_onnx_file, skip_if_missing
+from helpers import download_community_onnx, get_model_name, get_onnx_dir
 
-from liquidonnx.lfm2 import MODELS
-from liquidonnx.lfm2.infer import get_onnx_dir
 from liquidonnx.quantize import get_total_model_size_mb
 from liquidonnx.session import get_onnx_file, initialize_cache, update_cache
 
 logger = logging.getLogger(__name__)
 
+# HuggingFace model IDs to test
+MODELS = [
+    "LiquidAI/LFM2-350M",
+    "LiquidAI/LFM2-700M",
+    "LiquidAI/LFM2-1.2B",
+    "LiquidAI/LFM2-2.6B",
+]
+
 QUANT_CONFIGS = [
     pytest.param(None, id="fp32"),
-    pytest.param(4, id="q4"),
-    pytest.param(8, id="q8"),
+    pytest.param("q4", id="q4"),
+    pytest.param("q8", id="q8"),
 ]
 
 PREFILL_TOKENS = 256
@@ -154,35 +160,37 @@ def benchmark_model(
     )
 
 
-@pytest.mark.parametrize("model_tokenizer", MODELS.keys(), indirect=True)
-@pytest.mark.parametrize("bits", QUANT_CONFIGS)
+@pytest.mark.parametrize("model_tokenizer", MODELS, indirect=True)
+@pytest.mark.parametrize("precision", QUANT_CONFIGS)
 def test_benchmark_comparison(
     exports_dir: pathlib.Path,
-    community_dir: pathlib.Path,
     model_tokenizer,
-    bits: int,
+    precision: str | None,
 ):
     """Benchmark local vs community ONNX models."""
-    size, tokenizer = model_tokenizer
-    logger.info(f"Benchmarking {size}/q{bits}")
+    model_id, tokenizer = model_tokenizer
+    model_name = get_model_name(model_id)
+    logger.info(f"Benchmarking {model_name}/{precision or 'fp32'}")
 
     # Check local export exists
-    local_onnx_dir = get_onnx_dir(exports_dir, size)
-    skip_if_missing(local_onnx_dir, "Local export not found")
+    local_onnx_dir = get_onnx_dir(exports_dir, model_id)
+    local_onnx_file = get_onnx_file(local_onnx_dir, precision)
 
-    local_onnx_file = get_onnx_file(local_onnx_dir, bits)
-    skip_if_missing(local_onnx_file, f"Local ONNX not found: {local_onnx_file.name}")
+    if not local_onnx_file.exists():
+        precision_arg = f" --precision {precision}" if precision else ""
+        pytest.fail(
+            f"Local ONNX file not found: {local_onnx_file}\n"
+            f"Export with: uv run lfm2-export {model_id}{precision_arg}"
+        )
 
-    # Check community export exists
-    community_onnx_dir = get_community_onnx_dir(community_dir, size)
-    skip_if_missing(community_onnx_dir, "Community export not found")
-
-    community_onnx_file = get_community_onnx_file(community_onnx_dir, bits)
-    skip_if_missing(community_onnx_file, f"Community ONNX not found: {community_onnx_file.name}")
+    # Download community export from HuggingFace
+    community_onnx_file = download_community_onnx(model_id, precision)
+    if not community_onnx_file:
+        pytest.skip(f"Community ONNX not available on HF for {model_id} {precision or 'fp32'}")
 
     # Benchmark both
-    local_result = benchmark_model(local_onnx_file, tokenizer, f"local-{size}-q{bits}")
-    community_result = benchmark_model(community_onnx_file, tokenizer, f"community-{size}-q{bits}")
+    local_result = benchmark_model(local_onnx_file, tokenizer, f"local-{model_name}-{precision or 'fp32'}")
+    community_result = benchmark_model(community_onnx_file, tokenizer, f"community-{model_name}-{precision or 'fp32'}")
 
     # Log results
     logger.info(f"  Prefill: {PREFILL_TOKENS} tokens, Decode: {DECODE_TOKENS} tokens")

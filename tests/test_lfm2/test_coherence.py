@@ -15,14 +15,20 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from helpers import skip_if_missing
+from helpers import get_model_name, get_onnx_dir
 
-from liquidonnx.lfm2 import MODELS
-from liquidonnx.lfm2.infer import get_onnx_dir
 from liquidonnx.session import get_onnx_file, initialize_cache, load_onnx_session, update_cache
 from liquidonnx.verify import compare_logits_similarity
 
 logger = logging.getLogger(__name__)
+
+# HuggingFace model IDs to test
+MODELS = [
+    "LiquidAI/LFM2-350M",
+    "LiquidAI/LFM2-700M",
+    "LiquidAI/LFM2-1.2B",
+    "LiquidAI/LFM2-2.6B",
+]
 
 QUANT_CONFIGS = [
     pytest.param(None, id="fp32"),
@@ -178,7 +184,7 @@ def run_multi_turn_coherence(
     return float(np.mean(similarities)) if similarities else 0.0
 
 
-@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 @pytest.mark.parametrize("precision", QUANT_CONFIGS)
 def test_coherence(
     exports_dir: pathlib.Path,
@@ -186,13 +192,19 @@ def test_coherence(
     precision: str | None,
 ):
     """Test multi-turn coherence between PyTorch and ONNX."""
-    size, model, tokenizer = pytorch_model
+    model_id, model, tokenizer = pytorch_model
+    model_name = get_model_name(model_id)
+    logger.info(f"Testing coherence {model_name}/{precision or 'fp32'}")
 
-    onnx_dir = get_onnx_dir(exports_dir, size)
-    skip_if_missing(onnx_dir, "Export not found")
-
+    onnx_dir = get_onnx_dir(exports_dir, model_id)
     onnx_file = get_onnx_file(onnx_dir, precision)
-    skip_if_missing(onnx_file, f"ONNX file not found: {onnx_file.name}")
+
+    if not onnx_file.exists():
+        precision_arg = f" --precision {precision}" if precision else ""
+        pytest.fail(
+            f"ONNX file not found: {onnx_file}\n"
+            f"Export with: uv run lfm2-export {model_id}{precision_arg}"
+        )
 
     onnx_session = load_onnx_session(onnx_file)
 

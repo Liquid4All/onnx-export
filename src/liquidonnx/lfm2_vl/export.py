@@ -3,8 +3,8 @@
 Export LFM2-VL models to ONNX with optional quantization and FP16 conversion.
 
 Output Structure (Transformers.js compatible):
-    exports/
-    └── LFM2-VL-{size}-ONNX/
+    {output-dir}/
+    └── {model-name}-ONNX/
         ├── config.json
         ├── tokenizer.json
         ├── tokenizer_config.json
@@ -21,28 +21,24 @@ Output Structure (Transformers.js compatible):
             └── decoder_q8.onnx            # --precision q8
 
 Usage:
-    # Export from local model path
-    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461
-    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --precision
+    # Export from HuggingFace
+    uv run lfm2-vl-export LiquidAI/LFM2-VL-450M
+    uv run lfm2-vl-export LiquidAI/LFM2.5-VL-1.6B
 
-    # Export FP32 only (all sizes)
-    uv run lfm2-vl-export --sizes all
+    # Export from local path
+    uv run lfm2-vl-export /path/to/local/model
 
     # Export with all precisions (fp16, q4, q8)
-    uv run lfm2-vl-export --sizes all --precision
+    uv run lfm2-vl-export LiquidAI/LFM2-VL-450M --precision
 
     # Export with specific precisions
-    uv run lfm2-vl-export --sizes 450M --precision q4
-    uv run lfm2-vl-export --sizes 450M --precision fp16 q4 q8
+    uv run lfm2-vl-export LiquidAI/LFM2-VL-450M --precision fp16 q4
 
-    # Convert existing exports (skip FP32 export)
-    uv run lfm2-vl-export --sizes all --precision --skip-export
-
-    # Convert to FP16 (2x smaller, matches onnx-community format)
-    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --precision fp16
+    # Convert existing export (skip FP32 export)
+    uv run lfm2-vl-export LiquidAI/LFM2-VL-450M --precision --skip-export
 
     # Export with conv2d vision format (instead of default tiled)
-    uv run lfm2-vl-export --sizes 450M --vision-format conv2d
+    uv run lfm2-vl-export LiquidAI/LFM2-VL-450M --vision-format conv2d
 """
 
 import argparse
@@ -55,7 +51,7 @@ import onnx
 from onnx import TensorProto, helper
 
 from liquidonnx.lfm2.builder import LFM2Builder
-from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D, VISION_MODE_TILED
+from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.builder import EmbedTokensBuilder, LFM2VLConfig, VisionEmbedBuilder
 from liquidonnx.quantize import get_model_size, get_total_model_size_mb, quantize_model
 
@@ -146,11 +142,13 @@ def convert_to_fp16(
     return output_path
 
 
-def get_output_dir(
-    size: str, output_base: pathlib.Path, vision_format: str = VISION_MODE_TILED
-) -> pathlib.Path:
-    suffix = f"-{vision_format}" if vision_format != VISION_MODE_TILED else ""
-    return output_base / "exports" / f"LFM2-VL-{size}-ONNX{suffix}"
+def get_model_name(model_path: str) -> str:
+    """Extract model name from HF slug or local path."""
+    # Handle HF slugs like "LiquidAI/LFM2-VL-450M" -> "LFM2-VL-450M"
+    if "/" in model_path:
+        return model_path.split("/")[-1]
+    # Handle local paths
+    return pathlib.Path(model_path).name
 
 
 def export_vl_model(
@@ -536,27 +534,21 @@ def main():
         epilog=__doc__,
     )
 
-    # Model selection
     parser.add_argument(
-        "--sizes",
-        nargs="+",
-        help="Model sizes: 450M, 1.6B, 3B, or 'all'",
+        "model",
+        help="HuggingFace model ID or local path (e.g., LiquidAI/LFM2-VL-450M)",
     )
-    parser.add_argument(
-        "--model-path",
-        type=str,
-        help="Local model path (alternative to --sizes for local models)",
-    )
-
-    # Output
     parser.add_argument(
         "--output-dir",
         type=pathlib.Path,
         default=pathlib.Path("."),
         help="Output base directory (default: current directory)",
     )
-
-    # Output precision
+    parser.add_argument(
+        "--output-name",
+        type=str,
+        help="Output folder name (default: {model-name}-ONNX)",
+    )
     parser.add_argument(
         "--precision",
         nargs="*",
@@ -607,47 +599,26 @@ def main():
                 else:
                     parser.error(f"Invalid precision: {p}. Use fp16, q4, or q8.")
 
-    # Validate args
-    if args.model_path and args.sizes:
-        parser.error("Cannot specify both --model-path and --sizes")
-    if not args.model_path and not args.sizes:
-        parser.error("Must specify either --model-path or --sizes")
-
-    # Build list of (model_path, output_dir) pairs
+    # Derive output name from model path
+    model_name = get_model_name(args.model)
     vision_suffix = f"-{args.vision_format}" if args.vision_format != VISION_MODE_TILED else ""
-    exports = []
-    if args.model_path:
-        model_name = pathlib.Path(args.model_path).name
-        output_dir = args.output_dir / "exports" / f"{model_name}-ONNX{vision_suffix}"
-        exports.append((args.model_path, output_dir))
-    else:
-        sizes = list(MODELS.keys()) if "all" in args.sizes else args.sizes
-        for s in sizes:
-            if s not in MODELS:
-                parser.error(f"Unknown size: {s}. Available: {', '.join(MODELS.keys())}")
-        for size in sizes:
-            exports.append(
-                (MODELS[size], get_output_dir(size, args.output_dir, args.vision_format))
-            )
+    output_name = args.output_name or f"{model_name}-ONNX{vision_suffix}"
+    output_dir = args.output_dir / "exports" / output_name
+    onnx_dir = output_dir / "onnx"
 
     # Export
     if not args.skip_export:
-        for model_path, output_dir in exports:
-            do_export(model_path, output_dir, args.vision_format)
+        do_export(args.model, output_dir, args.vision_format)
 
     # Quantize
     for bits in quant_bits:
         # Q4: symmetric by default (required for WebGPU), Q8: asymmetric
         symmetric = (bits == 4) and not args.q4_asymmetric
-        for _, output_dir in exports:
-            onnx_dir = output_dir / "onnx"
-            do_quantize(onnx_dir, bits, bits, args.block_size, symmetric=symmetric)
+        do_quantize(onnx_dir, bits, bits, args.block_size, symmetric=symmetric)
 
     # FP16 conversion
     if do_fp16_conversion:
-        for _, output_dir in exports:
-            onnx_dir = output_dir / "onnx"
-            do_fp16(onnx_dir)
+        do_fp16(onnx_dir)
 
 
 if __name__ == "__main__":

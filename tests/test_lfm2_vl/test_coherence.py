@@ -15,11 +15,10 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from helpers import skip_if_missing
+from helpers import get_onnx_dir
 from PIL import Image
 
-from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D, VISION_MODE_TILED
-from liquidonnx.lfm2_vl.infer import get_onnx_dir
+from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.preprocessing import (
     detect_vision_format,
     get_image_token_id,
@@ -30,6 +29,12 @@ from liquidonnx.session import get_onnx_file, initialize_cache, load_onnx_sessio
 from liquidonnx.verify import compare_logits_similarity
 
 logger = logging.getLogger(__name__)
+
+# HuggingFace model IDs to test
+MODELS = [
+    "LiquidAI/LFM2-VL-450M",
+    "LiquidAI/LFM2-VL-1.6B",
+]
 
 QUANT_CONFIGS = [
     pytest.param(None, None, id="fp32"),
@@ -300,7 +305,7 @@ def run_multi_turn_coherence(
 
 
 # pytorch_model outermost so same model runs consecutively (memory optimization)
-@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 @pytest.mark.parametrize("decoder_type,vision_type", QUANT_CONFIGS)
 @pytest.mark.parametrize("scenario,prompts", COHERENCE_SCENARIOS)
 def test_coherence(
@@ -313,16 +318,24 @@ def test_coherence(
     scenario: str,
     prompts: list[str],
 ):
-    size, model, processor = pytorch_model
+    model_id, model, processor = pytorch_model
 
-    onnx_dir = get_onnx_dir(exports_dir, size)
-    skip_if_missing(onnx_dir, "Export not found")
+    onnx_dir = get_onnx_dir(exports_dir, model_id)
+    if not onnx_dir.exists():
+        pytest.skip(f"Export not found: {onnx_dir}")
 
     decoder_file = get_onnx_file(onnx_dir, decoder_type, "decoder")
     embed_images_file = get_onnx_file(onnx_dir, vision_type, "embed_images")
-    skip_if_missing(decoder_file, "Decoder not found")
-    skip_if_missing(embed_images_file, "Vision encoder not found")
-    embed_tokens_sess = load_onnx_session(onnx_dir / "embed_tokens.onnx")
+    if not decoder_file.exists():
+        pytest.skip(f"Decoder not found: {decoder_file}")
+    if not embed_images_file.exists():
+        pytest.skip(f"Vision encoder not found: {embed_images_file}")
+
+    embed_tokens_file = onnx_dir / "embed_tokens.onnx"
+    if not embed_tokens_file.exists():
+        pytest.skip(f"embed_tokens not found: {embed_tokens_file}")
+
+    embed_tokens_sess = load_onnx_session(embed_tokens_file)
     embed_images_sess = load_onnx_session(embed_images_file)
     decoder_sess = load_onnx_session(decoder_file)
 
