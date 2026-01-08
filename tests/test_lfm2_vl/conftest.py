@@ -8,19 +8,17 @@ import pytest
 import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from liquidonnx.lfm2_vl import MODELS
-
 logger = logging.getLogger(__name__)
 
 ASSETS_DIR = pathlib.Path(__file__).parent / "assets"
 
 
-def load_pytorch_model(model_path: str) -> tuple:
+def load_pytorch_model(model_id: str) -> tuple:
     """Load PyTorch model and processor from HuggingFace."""
-    logger.info(f"Loading PyTorch model from {model_path}...")
-    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    logger.info(f"Loading PyTorch model from {model_id}...")
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
     model = AutoModelForImageTextToText.from_pretrained(
-        model_path,
+        model_id,
         torch_dtype=torch.float32,
         trust_remote_code=True,
     )
@@ -30,27 +28,26 @@ def load_pytorch_model(model_path: str) -> tuple:
 
 @pytest.fixture(scope="module")
 def model_processor(request):
-    """Load processor for model size. Use with indirect=True.
+    """Load processor for model. Use with indirect=True.
 
-    Lighter alternative to pytorch_model when full model isn't needed.
-    Returns (size, processor) tuple.
+    Returns (model_id, processor) tuple.
     """
-    size = request.param
-    processor = AutoProcessor.from_pretrained(MODELS[size], trust_remote_code=True)
-    return size, processor
+    model_id = request.param
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    return model_id, processor
 
 
 @pytest.fixture(scope="module")
 def pytorch_model(request):
     """Load PyTorch model for current test group. Use with indirect=True.
 
-    Returns (size, model, processor) tuple.
+    Returns (model_id, model, processor) tuple.
     """
-    size = request.param
-    model, processor = load_pytorch_model(MODELS[size])
-    yield size, model, processor
+    model_id = request.param
+    model, processor = load_pytorch_model(model_id)
+    yield model_id, model, processor
 
-    logger.info(f"Cleaning up {size} model...")
+    logger.info(f"Cleaning up {model_id} model...")
     del model
     del processor
     gc.collect()

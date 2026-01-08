@@ -12,14 +12,19 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from helpers import skip_if_missing
+from helpers import get_model_name, get_onnx_dir
 
-from liquidonnx.lfm2_vl import MODELS
-from liquidonnx.lfm2_vl.infer import get_onnx_dir
 from liquidonnx.session import get_onnx_file, load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, compare_top_k, get_tolerances
 
 logger = logging.getLogger(__name__)
+
+# HuggingFace model IDs to test
+MODELS = [
+    "LiquidAI/LFM2-VL-450M",
+    "LiquidAI/LFM2-VL-1.6B",
+    "LiquidAI/LFM2-VL-3B",
+]
 
 PROMPTS = ["Hello, how are", "The image shows", "I can see"]
 
@@ -33,7 +38,7 @@ QUANT_CONFIGS = [
 
 
 # pytorch_model outermost so same model runs consecutively (memory optimization)
-@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 @pytest.mark.parametrize("decoder_type,checks", QUANT_CONFIGS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_decoder(
@@ -43,15 +48,23 @@ def test_decoder(
     checks: list[str],
     prompt: str,
 ):
-    size, model, processor = pytorch_model
-    logger.info(f"Testing {size}/{decoder_type or 'fp32'}: '{prompt}'")
+    model_id, model, processor = pytorch_model
+    model_name = get_model_name(model_id)
+    logger.info(f"Testing {model_name}/{decoder_type or 'fp32'}: '{prompt}'")
 
-    onnx_dir = get_onnx_dir(exports_dir, size)
-    skip_if_missing(onnx_dir, "Export not found")
+    onnx_dir = get_onnx_dir(exports_dir, model_id)
+    if not onnx_dir.exists():
+        pytest.skip(f"Export not found: {onnx_dir}")
 
     decoder_file = get_onnx_file(onnx_dir, decoder_type, "decoder")
-    skip_if_missing(decoder_file, "Decoder not found")
-    embed_tokens_sess = load_onnx_session(onnx_dir / "embed_tokens.onnx")
+    if not decoder_file.exists():
+        pytest.skip(f"Decoder not found: {decoder_file}")
+
+    embed_tokens_file = onnx_dir / "embed_tokens.onnx"
+    if not embed_tokens_file.exists():
+        pytest.skip(f"embed_tokens.onnx not found: {embed_tokens_file}")
+
+    embed_tokens_sess = load_onnx_session(embed_tokens_file)
     decoder_sess = load_onnx_session(decoder_file)
 
     input_ids = processor.tokenizer.encode(prompt, return_tensors="pt")
@@ -77,11 +90,14 @@ def test_decoder(
         },
     )[0]
 
+    # Build inputs based on what the decoder actually expects
+    decoder_input_names = {inp.name for inp in decoder_sess.get_inputs()}
     onnx_inputs = {
         "inputs_embeds": onnx_embeds.astype(np.float32),
         "attention_mask": attention_mask.numpy().astype(np.int64),
-        "position_ids": position_ids.numpy().astype(np.int64),
     }
+    if "position_ids" in decoder_input_names:
+        onnx_inputs["position_ids"] = position_ids.numpy().astype(np.int64)
 
     for inp in decoder_sess.get_inputs():
         if inp.name not in onnx_inputs:

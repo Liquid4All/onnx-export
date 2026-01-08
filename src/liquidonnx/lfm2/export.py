@@ -1,41 +1,44 @@
 #!/usr/bin/env python3
 """
-Export LFM2 models to ONNX with optional quantization.
+Export LFM2 models to ONNX with optional quantization and FP16 conversion.
 
 Output Structure (Transformers.js compatible):
-    exports/
-    └── LFM2-{size}-ONNX/
+    {output-dir}/
+    └── {model-name}-ONNX/
         ├── config.json
         ├── tokenizer.json
         └── onnx/
             ├── model.onnx           # FP32
             ├── model.onnx_data
-            ├── model_q4.onnx        # INT4 quantized
+            ├── model_fp16.onnx      # --precision fp16
+            ├── model_fp16.onnx_data
+            ├── model_q4.onnx        # --precision q4
             ├── model_q4.onnx_data
-            ├── model_q8.onnx        # INT8 quantized
+            ├── model_q8.onnx        # --precision q8
             └── model_q8.onnx_data
 
 Usage:
-    # Export single model (FP32 only)
-    uv run lfm2-export --sizes 350M
+    # Export from HuggingFace
+    uv run lfm2-export LiquidAI/LFM2-350M
+    uv run lfm2-export LiquidAI/LFM2.5-1.2B-Instruct
 
-    # Export all models
-    uv run lfm2-export --sizes all
+    # Export from local path
+    uv run lfm2-export /path/to/local/model
 
-    # Export with Q4 quantization
-    uv run lfm2-export --sizes 350M --quantize q4
+    # Export with custom output directory
+    uv run lfm2-export LiquidAI/LFM2-350M --output-dir ./exports
 
-    # Export with both Q4 and Q8
-    uv run lfm2-export --sizes 1.2B --quantize q4 q8
+    # Export with specific precisions
+    uv run lfm2-export LiquidAI/LFM2-350M --precision fp16 q4
 
-    # Export with all quantizations (default when --quantize has no args)
-    uv run lfm2-export --sizes all --quantize
+    # Export with all precisions (fp16, q4, q8)
+    uv run lfm2-export LiquidAI/LFM2-350M --precision
 
-    # Quantize existing exports (skip FP32 export)
-    uv run lfm2-export --sizes all --quantize --skip-export
+    # Convert existing export (skip FP32 export)
+    uv run lfm2-export LiquidAI/LFM2-350M --precision --skip-export
 
     # Quantize with lm_head included
-    uv run lfm2-export --sizes 350M --quantize q4 --no-exclude-lm-head
+    uv run lfm2-export LiquidAI/LFM2-350M --precision q4 --no-exclude-lm-head
 """
 
 import argparse
@@ -46,15 +49,67 @@ import pathlib
 import onnx
 from transformers import AutoConfig, AutoTokenizer
 
-from liquidonnx.lfm2 import MODELS
+from liquidonnx.external_data import split_external_data
 from liquidonnx.lfm2.builder import LFM2Builder, LFM2Config
-from liquidonnx.quantize import get_model_size, quantize_model
+from liquidonnx.quantize import get_model_size, get_total_model_size_mb, quantize_model
 
 logger = logging.getLogger(__name__)
 
 
-def get_output_dir(size: str, output_base: pathlib.Path) -> pathlib.Path:
-    return output_base / "exports" / f"LFM2-{size}-ONNX"
+def convert_to_fp16(
+    input_path: pathlib.Path,
+    output_path: pathlib.Path,
+    keep_io_types: bool = True,
+):
+    """Convert ONNX model from FP32 to FP16.
+
+    Args:
+        input_path: Path to FP32 ONNX model
+        output_path: Path for FP16 output model
+        keep_io_types: Keep inputs/outputs as FP32 for compatibility
+    """
+    from onnx.external_data_helper import load_external_data_for_model
+    from onnxruntime.transformers.float16 import convert_float_to_float16
+
+    logger.info(f"Converting {input_path.name} to FP16...")
+
+    model = onnx.load(str(input_path), load_external_data=False)
+    load_external_data_for_model(model, str(input_path.parent))
+
+    model_fp16 = convert_float_to_float16(
+        model,
+        keep_io_types=keep_io_types,
+        force_fp16_initializers=True,
+        disable_shape_infer=True,
+    )
+
+    output_data_path = output_path.parent / f"{output_path.stem}.onnx_data"
+    if output_data_path.exists():
+        output_data_path.unlink()
+
+    onnx.save_model(
+        model_fp16,
+        str(output_path),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=f"{output_path.stem}.onnx_data",
+    )
+
+    orig_mb = get_total_model_size_mb(input_path)
+    fp16_mb = get_total_model_size_mb(output_path)
+    ratio = orig_mb / fp16_mb if fp16_mb > 0 else 0
+    logger.info(f"  {input_path.name}: {orig_mb:.1f} -> {fp16_mb:.1f} MB ({ratio:.1f}x)")
+
+    return output_path
+
+
+def get_model_name(model_path: str) -> str:
+    """Extract model name from HF slug or local path."""
+    # Handle HF slugs like "LiquidAI/LFM2-350M" -> "LFM2-350M"
+    if "/" in model_path:
+        return model_path.split("/")[-1]
+    # Handle local paths
+    return pathlib.Path(model_path).name
 
 
 def export_model(model_path: str, output_dir: pathlib.Path | str):
@@ -84,7 +139,6 @@ def export_model(model_path: str, output_dir: pathlib.Path | str):
 
     output_path = onnx_dir / "model.onnx"
 
-    # Remove existing external data file to avoid appending
     external_data_path = onnx_dir / "model.onnx_data"
     if external_data_path.exists():
         external_data_path.unlink()
@@ -99,12 +153,10 @@ def export_model(model_path: str, output_dir: pathlib.Path | str):
 
     logger.info(f"Model saved to {output_path}")
 
-    # Copy tokenizer and config
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     tokenizer.save_pretrained(output_dir)
     config.save_pretrained(output_dir)
 
-    # Create generation_config.json (required by Transformers.js)
     gen_config = {
         "_from_model_config": True,
         "bos_token_id": config.bos_token_id,
@@ -115,7 +167,6 @@ def export_model(model_path: str, output_dir: pathlib.Path | str):
     gen_config_path = output_dir / "generation_config.json"
     gen_config_path.write_text(json.dumps(gen_config, indent=2))
 
-    # Add transformers.js_config to config.json (for external data support)
     config_path = output_dir / "config.json"
     cfg = json.loads(config_path.read_text())
     cfg["transformers.js_config"] = {
@@ -124,7 +175,6 @@ def export_model(model_path: str, output_dir: pathlib.Path | str):
     }
     config_path.write_text(json.dumps(cfg, indent=2))
 
-    # Save chat_template if available
     tokenizer_config_path = output_dir / "tokenizer_config.json"
     chat_template_path = output_dir / "chat_template.jinja"
 
@@ -137,7 +187,6 @@ def export_model(model_path: str, output_dir: pathlib.Path | str):
                 tok_cfg["chat_template"] = tokenizer.chat_template
                 tokenizer_config_path.write_text(json.dumps(tok_cfg, indent=2))
 
-    # Print summary
     size_mb = output_path.stat().st_size / 1e6
     data_path = onnx_dir / "model.onnx_data"
     data_size_gb = data_path.stat().st_size / 1e9 if data_path.exists() else 0
@@ -146,14 +195,21 @@ def export_model(model_path: str, output_dir: pathlib.Path | str):
     return output_path
 
 
-def do_quantize(onnx_dir: pathlib.Path, bits: int, exclude_lm_head: bool, block_size: int):
+def do_quantize(
+    onnx_dir: pathlib.Path,
+    bits: int,
+    exclude_lm_head: bool,
+    block_size: int,
+    symmetric: bool = False,
+):
     """Quantize model to INT4 or INT8.
 
     Args:
-        onnx_dir: Directory containing ONNX files
-        bits: 4 for INT4, 8 for INT8
-        exclude_lm_head: Whether to exclude lm_head from quantization
+        onnx_dir: Directory containing model.onnx
+        bits: Quantization bits (4 or 8)
+        exclude_lm_head: Keep lm_head in FP32
         block_size: Block size for quantization
+        symmetric: Use symmetric quantization (no zero points, better JSEP compatibility)
     """
     input_model = onnx_dir / "model.onnx"
     if not input_model.exists():
@@ -167,14 +223,36 @@ def do_quantize(onnx_dir: pathlib.Path, bits: int, exclude_lm_head: bool, block_
 
     _, orig_mb = get_model_size(input_model)
 
-    logger.info(f"Quantizing to Q{bits}...")
+    quant_type = "symmetric" if symmetric else "asymmetric"
+    logger.info(f"Quantizing to Q{bits} ({quant_type})...")
     quantize_model(
-        input_model, output_model, bits=bits, block_size=block_size, exclude_lm_head=exclude_lm_head
+        input_model,
+        output_model,
+        bits=bits,
+        block_size=block_size,
+        exclude_lm_head=exclude_lm_head,
+        symmetric=symmetric,
     )
 
     _, quant_mb = get_model_size(output_model)
     if orig_mb > 0:
         logger.info(f"  {orig_mb:.1f} MB -> {quant_mb:.1f} MB ({orig_mb / quant_mb:.1f}x)")
+
+
+def do_fp16(onnx_dir: pathlib.Path):
+    """Convert model to FP16."""
+    if not onnx_dir.exists():
+        raise FileNotFoundError(f"ONNX directory not found: {onnx_dir}")
+
+    model_fp32 = onnx_dir / "model.onnx"
+    model_fp16 = onnx_dir / "model_fp16.onnx"
+
+    if model_fp16.exists():
+        logger.info("Skipping fp16 (already exists)")
+        return
+
+    if model_fp32.exists():
+        convert_to_fp16(model_fp32, model_fp16)
 
 
 def main():
@@ -184,35 +262,31 @@ def main():
         epilog=__doc__,
     )
 
-    # Model selection
     parser.add_argument(
-        "--sizes",
-        nargs="+",
-        required=True,
-        help="Model sizes: 350M, 700M, 1.2B, 2.6B, or 'all'",
+        "model",
+        help="HuggingFace model ID or local path (e.g., LiquidAI/LFM2-350M)",
     )
-
-    # Output
     parser.add_argument(
         "--output-dir",
         type=pathlib.Path,
         default=pathlib.Path("."),
         help="Output base directory (default: current directory)",
     )
-
-    # Export options
+    parser.add_argument(
+        "--output-name",
+        type=str,
+        help="Output folder name (default: {model-name}-ONNX)",
+    )
     parser.add_argument(
         "--skip-export",
         action="store_true",
-        help="Skip FP32 export, only run quantization",
+        help="Skip FP32 export, only run precision conversion",
     )
-
-    # Quantization options
     parser.add_argument(
-        "--quantize",
+        "--precision",
         nargs="*",
-        metavar="BITS",
-        help="Quantize: q4, q8, or both (default if no args)",
+        metavar="PRECISION",
+        help="Output precisions: fp16, q4, q8, or all (default if no args)",
     )
     parser.add_argument(
         "--no-exclude-lm-head",
@@ -225,74 +299,97 @@ def main():
         default=32,
         help="Block size for quantization (default: 32)",
     )
+    parser.add_argument(
+        "--q4-asymmetric",
+        action="store_true",
+        help="Use asymmetric Q4 quantization. Default is symmetric (required for WebGPU)",
+    )
+    parser.add_argument(
+        "--split-data",
+        type=float,
+        default=2.0,
+        metavar="GB",
+        help="Split external data into chunks (default: 2GB per chunk)",
+    )
+    parser.add_argument(
+        "--no-split-data",
+        action="store_true",
+        help="Disable external data splitting",
+    )
 
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
-    # Parse sizes
-    sizes = list(MODELS.keys()) if "all" in args.sizes else args.sizes
-    for s in sizes:
-        if s not in MODELS:
-            parser.error(f"Unknown size: {s}. Available: {', '.join(MODELS.keys())}")
+    # Derive output name from model path
+    model_name = get_model_name(args.model)
+    output_name = args.output_name or f"{model_name}-ONNX"
+    output_dir = args.output_dir / "exports" / output_name
 
-    # Parse quantization options
     quant_bits = []
-    if args.quantize is not None:
-        if len(args.quantize) == 0:
+    do_fp16_conversion = False
+    if args.precision is not None:
+        if len(args.precision) == 0:
             quant_bits = [4, 8]
+            do_fp16_conversion = True
         else:
-            for q in args.quantize:
-                q = q.lower().replace("q", "")
-                if q not in ("4", "8"):
-                    parser.error(f"Invalid quantization: {q}. Use q4 or q8.")
-                quant_bits.append(int(q))
+            for p in args.precision:
+                p = p.lower()
+                if p == "fp16":
+                    do_fp16_conversion = True
+                elif p in ("q4", "q8"):
+                    quant_bits.append(int(p[1]))
+                else:
+                    parser.error(f"Invalid precision: {p}. Use fp16, q4, or q8.")
 
     exclude_lm_head = not args.no_exclude_lm_head
+    onnx_dir = output_dir / "onnx"
 
-    # Export FP32
     if not args.skip_export:
         logger.info("=" * 60)
-        logger.info("Exporting models (FP32)")
+        logger.info("Exporting model (FP32)")
         logger.info("=" * 60)
+        logger.info(f"Exporting {args.model} to {output_dir}...")
+        export_model(args.model, str(output_dir))
+        logger.info(f"  {model_name}: OK")
 
-        for size in sizes:
-            output_path = get_output_dir(size, args.output_dir)
-            logger.info(f"Exporting {MODELS[size]} to {output_path}...")
-            try:
-                export_model(MODELS[size], str(output_path))
-                logger.info(f"  {size}: OK")
-            except Exception as e:
-                logger.error(f"  {size}: FAILED - {e}")
+    if do_fp16_conversion:
+        logger.info("=" * 60)
+        logger.info("Converting to FP16")
+        logger.info("=" * 60)
+        do_fp16(onnx_dir)
+        logger.info(f"  {model_name}: OK")
 
-    # Quantize
     for bits in quant_bits:
         logger.info("=" * 60)
         logger.info(f"Quantizing to Q{bits}")
         logger.info("=" * 60)
 
-        for size in sizes:
-            onnx_dir = get_output_dir(size, args.output_dir) / "onnx"
-            try:
-                do_quantize(onnx_dir, bits, exclude_lm_head, args.block_size)
-                logger.info(f"  {size}: OK")
-            except Exception as e:
-                logger.error(f"  {size}: FAILED - {e}")
+        # Q4: symmetric by default (required for WebGPU), Q8: asymmetric
+        symmetric = (bits == 4) and not args.q4_asymmetric
+        do_quantize(onnx_dir, bits, exclude_lm_head, args.block_size, symmetric=symmetric)
+        logger.info(f"  {model_name}: OK")
 
-    # Summary
+    if not args.no_split_data:
+        chunk_size_bytes = int(args.split_data * 1024 * 1024 * 1024)
+        for onnx_file in onnx_dir.glob("model*.onnx"):
+            data_file = onnx_file.with_suffix(".onnx_data")
+            if data_file.exists() and data_file.stat().st_size > chunk_size_bytes:
+                logger.info("=" * 60)
+                logger.info(f"Splitting external data ({args.split_data:.1f} GB chunks)")
+                logger.info("=" * 60)
+                logger.info(f"  Splitting {onnx_file.name}...")
+                split_external_data(onnx_file, chunk_size=chunk_size_bytes)
+
     logger.info("=" * 60)
     logger.info("Output summary")
     logger.info("=" * 60)
-
-    for size in sizes:
-        out_dir = get_output_dir(size, args.output_dir)
-        if out_dir.exists():
-            onnx_dir = out_dir / "onnx"
-            files = list(onnx_dir.glob("model*.onnx"))
-            file_names = ", ".join(f.name for f in sorted(files))
-            total_size = sum(f.stat().st_size for f in out_dir.rglob("*") if f.is_file())
-            logger.info(f"  {out_dir} ({total_size / 1e9:.2f} GB)")
-            logger.info(f"    Files: {file_names}")
+    if output_dir.exists():
+        files = list(onnx_dir.glob("model*.onnx"))
+        file_names = ", ".join(f.name for f in sorted(files))
+        total_size = sum(f.stat().st_size for f in output_dir.rglob("*") if f.is_file())
+        logger.info(f"  {output_dir} ({total_size / 1e9:.2f} GB)")
+        logger.info(f"    Files: {file_names}")
 
 
 if __name__ == "__main__":

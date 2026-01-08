@@ -3,8 +3,8 @@
 Export LFM2-VL models to ONNX with optional quantization and FP16 conversion.
 
 Output Structure (Transformers.js compatible):
-    exports/
-    └── LFM2-VL-{size}-ONNX/
+    {output-dir}/
+    └── {model-name}-ONNX/
         ├── config.json
         ├── tokenizer.json
         ├── tokenizer_config.json
@@ -21,28 +21,24 @@ Output Structure (Transformers.js compatible):
             └── decoder_q8.onnx            # --precision q8
 
 Usage:
-    # Export from local model path
-    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461
-    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --precision
+    # Export from HuggingFace
+    uv run lfm2-vl-export LiquidAI/LFM2-VL-450M
+    uv run lfm2-vl-export LiquidAI/LFM2.5-VL-1.6B
 
-    # Export FP32 only (all sizes)
-    uv run lfm2-vl-export --sizes all
+    # Export from local path
+    uv run lfm2-vl-export /path/to/local/model
 
     # Export with all precisions (fp16, q4, q8)
-    uv run lfm2-vl-export --sizes all --precision
+    uv run lfm2-vl-export LiquidAI/LFM2-VL-450M --precision
 
     # Export with specific precisions
-    uv run lfm2-vl-export --sizes 450M --precision q4
-    uv run lfm2-vl-export --sizes 450M --precision fp16 q4 q8
+    uv run lfm2-vl-export LiquidAI/LFM2-VL-450M --precision fp16 q4
 
-    # Convert existing exports (skip FP32 export)
-    uv run lfm2-vl-export --sizes all --precision --skip-export
-
-    # Convert to FP16 (2x smaller, matches onnx-community format)
-    uv run lfm2-vl-export --model-path ./LFM2-VL-1.6B-3102461 --precision fp16
+    # Convert existing export (skip FP32 export)
+    uv run lfm2-vl-export LiquidAI/LFM2-VL-450M --precision --skip-export
 
     # Export with conv2d vision format (instead of default tiled)
-    uv run lfm2-vl-export --sizes 450M --vision-format conv2d
+    uv run lfm2-vl-export LiquidAI/LFM2-VL-450M --vision-format conv2d
 """
 
 import argparse
@@ -54,8 +50,9 @@ import pathlib
 import onnx
 from onnx import TensorProto, helper
 
+from liquidonnx.external_data import split_external_data
 from liquidonnx.lfm2.builder import LFM2Builder
-from liquidonnx.lfm2_vl import MODELS, VISION_MODE_CONV2D, VISION_MODE_TILED
+from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.builder import EmbedTokensBuilder, LFM2VLConfig, VisionEmbedBuilder
 from liquidonnx.quantize import get_model_size, get_total_model_size_mb, quantize_model
 
@@ -146,18 +143,19 @@ def convert_to_fp16(
     return output_path
 
 
-def get_output_dir(
-    size: str, output_base: pathlib.Path, vision_format: str = VISION_MODE_TILED
-) -> pathlib.Path:
-    suffix = f"-{vision_format}" if vision_format != VISION_MODE_TILED else ""
-    return output_base / "exports" / f"LFM2-VL-{size}-ONNX{suffix}"
+def get_model_name(model_path: str) -> str:
+    """Extract model name from HF slug or local path."""
+    # Handle HF slugs like "LiquidAI/LFM2-VL-450M" -> "LFM2-VL-450M"
+    if "/" in model_path:
+        return model_path.split("/")[-1]
+    # Handle local paths
+    return pathlib.Path(model_path).name
 
 
 def export_vl_model(
     model_path: str,
     output_dir: pathlib.Path | str,
     vision_input_format: str = VISION_MODE_TILED,
-    use_integrated_rope: bool = False,
 ):
     """Export LFM2-VL model to ONNX (embed_tokens + embed_images + decoder).
 
@@ -165,7 +163,6 @@ def export_vl_model(
         model_path: HuggingFace model path
         output_dir: Output directory for ONNX files
         vision_input_format: "tiled" for [B, N, 768] or "conv2d" for [B, 3, H, W]
-        use_integrated_rope: Use RoPE integrated in GroupQueryAttention (better precision)
     """
     import torch
     from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
@@ -238,10 +235,8 @@ def export_vl_model(
 
     # === 3. Export decoder ===
     logger.info("Exporting decoder (with inputs_embeds input)...")
-    if use_integrated_rope:
-        logger.info("Using integrated RoPE in GroupQueryAttention")
 
-    text_builder = LFM2Builder(vl_config.text_config, use_integrated_rope=use_integrated_rope)
+    text_builder = LFM2Builder(vl_config.text_config, use_integrated_rope=True, vl_naming=True)
 
     # Filter text model weights (they have "model.language_model." prefix in VL model)
     for name, weight in weights.items():
@@ -268,55 +263,51 @@ def export_vl_model(
             "attention_mask", TensorProto.INT64, ["batch_size", "total_sequence_length"]
         )
     )
-    text_builder.inputs.append(
-        helper.make_tensor_value_info(
-            "position_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
-        )
-    )
 
-    # Conv caches
-    for idx in text_builder.conv_indices:
-        text_builder.inputs.append(
-            helper.make_tensor_value_info(
-                f"past_conv.{idx}",
-                TensorProto.FLOAT,
-                ["batch_size", H, vl_config.text_config.conv_L_cache],
+    # Interleave cache inputs by layer index (community convention)
+    conv_set = set(text_builder.conv_indices)
+    attn_set = set(text_builder.attn_indices)
+    for idx in range(vl_config.text_config.num_hidden_layers):
+        if idx in conv_set:
+            text_builder.inputs.append(
+                helper.make_tensor_value_info(
+                    f"past_conv.{idx}",
+                    TensorProto.FLOAT,
+                    ["batch_size", H, vl_config.text_config.conv_L_cache],
+                )
             )
-        )
-
-    # KV caches
-    for idx in text_builder.attn_indices:
-        text_builder.inputs.append(
-            helper.make_tensor_value_info(
-                f"past_key_values.{idx}.key",
-                TensorProto.FLOAT,
-                [
-                    "batch_size",
-                    vl_config.text_config.num_key_value_heads,
-                    "past_sequence_length",
-                    text_builder.head_dim,
-                ],
+        elif idx in attn_set:
+            text_builder.inputs.append(
+                helper.make_tensor_value_info(
+                    f"past_key_values.{idx}.key",
+                    TensorProto.FLOAT,
+                    [
+                        "batch_size",
+                        vl_config.text_config.num_key_value_heads,
+                        "past_sequence_length",
+                        text_builder.head_dim,
+                    ],
+                )
             )
-        )
-        text_builder.inputs.append(
-            helper.make_tensor_value_info(
-                f"past_key_values.{idx}.value",
-                TensorProto.FLOAT,
-                [
-                    "batch_size",
-                    vl_config.text_config.num_key_value_heads,
-                    "past_sequence_length",
-                    text_builder.head_dim,
-                ],
+            text_builder.inputs.append(
+                helper.make_tensor_value_info(
+                    f"past_key_values.{idx}.value",
+                    TensorProto.FLOAT,
+                    [
+                        "batch_size",
+                        vl_config.text_config.num_key_value_heads,
+                        "past_sequence_length",
+                        text_builder.head_dim,
+                    ],
+                )
             )
-        )
 
     text_builder.build_outputs()
     text_builder.build_rope_cache()
     text_builder.build_attention_mask_subgraph()
 
     # Skip build_embedding() - use inputs_embeds directly as hidden_state
-    # But we still need embed_tokens weight for lm_head (tied weights)
+    # But still add embed_tokens weight for tied lm_head (build_lm_head uses it)
     text_builder.add_initializer(
         "model.embed_tokens.weight", text_builder.weights["model.embed_tokens.weight"]
     )
@@ -339,6 +330,9 @@ def export_vl_model(
     text_builder.weights.clear()
     gc.collect()
 
+    # Build ValueInfo for shape annotations (community convention)
+    text_builder.build_value_info()
+
     logger.info("Building decoder graph...")
     text_graph = helper.make_graph(
         text_builder.nodes,
@@ -346,6 +340,7 @@ def export_vl_model(
         text_builder.inputs,
         text_builder.outputs,
         text_builder.initializers,
+        value_info=text_builder.value_info,
     )
 
     text_model = helper.make_model(
@@ -354,9 +349,9 @@ def export_vl_model(
             helper.make_opsetid("", 21),
             helper.make_opsetid("com.microsoft", 1),
         ],
-        ir_version=9,
+        ir_version=10,
     )
-    text_model.producer_name = "lfm2-vl-builder"
+    text_model.producer_name = "liquidonnx"
 
     text_builder.nodes.clear()
     text_builder.initializers.clear()
@@ -425,7 +420,6 @@ def do_export(
     model_path: str,
     output_path: pathlib.Path,
     vision_format: str = VISION_MODE_TILED,
-    use_integrated_rope: bool = False,
 ):
     """Export a single VL model to ONNX (FP32)."""
     logger.info(f"Exporting {model_path} to {output_path}...")
@@ -433,18 +427,32 @@ def do_export(
         model_path,
         output_path,
         vision_input_format=vision_format,
-        use_integrated_rope=use_integrated_rope,
     )
 
 
 def do_quantize(
-    onnx_dir: pathlib.Path, decoder_bits: int, vision_bits: int = 8, block_size: int = 32
+    onnx_dir: pathlib.Path,
+    decoder_bits: int,
+    vision_bits: int = 8,
+    block_size: int = 32,
+    symmetric: bool = False,
 ):
+    """Quantize VL model components.
+
+    Args:
+        onnx_dir: Directory containing FP32 ONNX files
+        decoder_bits: Bits for decoder quantization (4 or 8)
+        vision_bits: Bits for vision encoder quantization (4 or 8)
+        block_size: Block size for quantization
+        symmetric: Use symmetric quantization (no zero points, better JSEP compatibility)
+    """
     if not onnx_dir.exists():
         raise FileNotFoundError(f"ONNX directory not found: {onnx_dir}")
 
+    quant_type = "symmetric" if symmetric else "asymmetric"
     logger.info(
-        f"Quantizing {onnx_dir.parent.name} -> decoder=q{decoder_bits}, vision=q{vision_bits}..."
+        f"Quantizing {onnx_dir.parent.name} -> decoder=q{decoder_bits}, "
+        f"vision=q{vision_bits} ({quant_type})..."
     )
 
     # Quantize embed_images
@@ -454,7 +462,12 @@ def do_quantize(
     if embed_fp32.exists() and not embed_output.exists():
         _, embed_orig_mb = get_model_size(embed_fp32)
         quantize_model(
-            embed_fp32, embed_output, bits=vision_bits, block_size=block_size, exclude_lm_head=False
+            embed_fp32,
+            embed_output,
+            bits=vision_bits,
+            block_size=block_size,
+            exclude_lm_head=False,
+            symmetric=symmetric,
         )
         _, embed_quant_mb = get_model_size(embed_output)
         logger.info(
@@ -474,6 +487,7 @@ def do_quantize(
             bits=decoder_bits,
             block_size=block_size,
             exclude_lm_head=True,
+            symmetric=symmetric,
         )
         _, decoder_quant_mb = get_model_size(decoder_output)
         logger.info(
@@ -521,27 +535,21 @@ def main():
         epilog=__doc__,
     )
 
-    # Model selection
     parser.add_argument(
-        "--sizes",
-        nargs="+",
-        help="Model sizes: 450M, 1.6B, 3B, or 'all'",
+        "model",
+        help="HuggingFace model ID or local path (e.g., LiquidAI/LFM2-VL-450M)",
     )
-    parser.add_argument(
-        "--model-path",
-        type=str,
-        help="Local model path (alternative to --sizes for local models)",
-    )
-
-    # Output
     parser.add_argument(
         "--output-dir",
         type=pathlib.Path,
         default=pathlib.Path("."),
         help="Output base directory (default: current directory)",
     )
-
-    # Output precision
+    parser.add_argument(
+        "--output-name",
+        type=str,
+        help="Output folder name (default: {model-name}-ONNX)",
+    )
     parser.add_argument(
         "--precision",
         nargs="*",
@@ -560,15 +568,27 @@ def main():
         help="Block size for quantization (default: 32)",
     )
     parser.add_argument(
-        "--integrated-rope",
+        "--q4-asymmetric",
         action="store_true",
-        help="Use RoPE integrated in GroupQueryAttention (better precision)",
+        help="Use asymmetric Q4 quantization. Default is symmetric (required for WebGPU)",
     )
     parser.add_argument(
         "--vision-format",
         choices=[VISION_MODE_TILED, VISION_MODE_CONV2D],
         default=VISION_MODE_TILED,
         help="Vision encoder format: tiled (default) or conv2d",
+    )
+    parser.add_argument(
+        "--split-data",
+        type=float,
+        default=2.0,
+        metavar="GB",
+        help="Split external data into chunks (default: 2GB per chunk)",
+    )
+    parser.add_argument(
+        "--no-split-data",
+        action="store_true",
+        help="Disable external data splitting",
     )
 
     args = parser.parse_args()
@@ -592,43 +612,38 @@ def main():
                 else:
                     parser.error(f"Invalid precision: {p}. Use fp16, q4, or q8.")
 
-    # Validate args
-    if args.model_path and args.sizes:
-        parser.error("Cannot specify both --model-path and --sizes")
-    if not args.model_path and not args.sizes:
-        parser.error("Must specify either --model-path or --sizes")
-
-    # Build list of (model_path, output_dir) pairs
+    # Derive output name from model path
+    model_name = get_model_name(args.model)
     vision_suffix = f"-{args.vision_format}" if args.vision_format != VISION_MODE_TILED else ""
-    exports = []
-    if args.model_path:
-        model_name = pathlib.Path(args.model_path).name
-        output_dir = args.output_dir / "exports" / f"{model_name}-ONNX{vision_suffix}"
-        exports.append((args.model_path, output_dir))
-    else:
-        sizes = list(MODELS.keys()) if "all" in args.sizes else args.sizes
-        for s in sizes:
-            if s not in MODELS:
-                parser.error(f"Unknown size: {s}. Available: {', '.join(MODELS.keys())}")
-        for size in sizes:
-            exports.append((MODELS[size], get_output_dir(size, args.output_dir, args.vision_format)))
+    output_name = args.output_name or f"{model_name}-ONNX{vision_suffix}"
+    output_dir = args.output_dir / "exports" / output_name
+    onnx_dir = output_dir / "onnx"
 
     # Export
     if not args.skip_export:
-        for model_path, output_dir in exports:
-            do_export(model_path, output_dir, args.vision_format, args.integrated_rope)
+        do_export(args.model, output_dir, args.vision_format)
 
     # Quantize
     for bits in quant_bits:
-        for _, output_dir in exports:
-            onnx_dir = output_dir / "onnx"
-            do_quantize(onnx_dir, bits, bits, args.block_size)
+        # Q4: symmetric by default (required for WebGPU), Q8: asymmetric
+        symmetric = (bits == 4) and not args.q4_asymmetric
+        do_quantize(onnx_dir, bits, bits, args.block_size, symmetric=symmetric)
 
     # FP16 conversion
     if do_fp16_conversion:
-        for _, output_dir in exports:
-            onnx_dir = output_dir / "onnx"
-            do_fp16(onnx_dir)
+        do_fp16(onnx_dir)
+
+    # Split external data
+    if not args.no_split_data:
+        chunk_size_bytes = int(args.split_data * 1024 * 1024 * 1024)
+        for onnx_file in onnx_dir.glob("*.onnx"):
+            data_file = onnx_file.with_suffix(".onnx_data")
+            if data_file.exists() and data_file.stat().st_size > chunk_size_bytes:
+                logger.info("=" * 60)
+                logger.info(f"Splitting external data ({args.split_data:.1f} GB chunks)")
+                logger.info("=" * 60)
+                logger.info(f"  Splitting {onnx_file.name}...")
+                split_external_data(onnx_file, chunk_size=chunk_size_bytes)
 
 
 if __name__ == "__main__":

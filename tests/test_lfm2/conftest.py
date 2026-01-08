@@ -7,47 +7,39 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from liquidonnx.lfm2 import MODELS
-
 logger = logging.getLogger(__name__)
-
-
-def load_pytorch_model(model_path: str) -> tuple:
-    """Load PyTorch model and tokenizer from HuggingFace."""
-    logger.info(f"Loading PyTorch model from {model_path}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=torch.float32,
-        trust_remote_code=True,
-    )
-    model.eval()
-    return model, tokenizer
 
 
 @pytest.fixture(scope="module")
 def model_tokenizer(request):
-    """Load tokenizer for model size. Use with indirect=True.
+    """Load tokenizer for model. Use with indirect=True.
 
     Lighter alternative to pytorch_model when full model isn't needed.
-    Returns (size, tokenizer) tuple.
+    Returns (model_id, tokenizer) tuple.
     """
-    size = request.param
-    tokenizer = AutoTokenizer.from_pretrained(MODELS[size], trust_remote_code=True)
-    return size, tokenizer
+    model_id = request.param
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    return model_id, tokenizer
 
 
 @pytest.fixture(scope="module")
 def pytorch_model(request):
     """Load PyTorch model for current test group. Use with indirect=True.
 
-    Returns (size, model, tokenizer) tuple.
+    Returns (model_id, model, tokenizer) tuple.
     """
-    size = request.param
-    model, tokenizer = load_pytorch_model(MODELS[size])
-    yield size, model, tokenizer
+    model_id = request.param
+    logger.info(f"Loading PyTorch model from {model_id}...")
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype=torch.float32,
+        trust_remote_code=True,
+    )
+    model.eval()
+    yield model_id, model, tokenizer
 
-    logger.info(f"Cleaning up {size} model...")
+    logger.info(f"Cleaning up {model_id} model...")
     del model
     del tokenizer
     gc.collect()

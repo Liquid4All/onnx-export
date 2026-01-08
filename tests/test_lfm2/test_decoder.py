@@ -14,14 +14,20 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from helpers import skip_if_missing
+from helpers import get_model_name, get_onnx_dir
 
-from liquidonnx.lfm2 import MODELS
-from liquidonnx.lfm2.infer import get_onnx_dir
 from liquidonnx.session import get_onnx_file, load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, compare_top_k, get_tolerances
 
 logger = logging.getLogger(__name__)
+
+# HuggingFace model IDs to test
+MODELS = [
+    "LiquidAI/LFM2-350M",
+    "LiquidAI/LFM2-700M",
+    "LiquidAI/LFM2-1.2B",
+    "LiquidAI/LFM2-2.6B",
+]
 
 PROMPTS = ["Hello, how are", "The sky is", "1 + 1 ="]
 
@@ -33,7 +39,7 @@ QUANT_CONFIGS = [
 ]
 
 
-@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 @pytest.mark.parametrize("precision,checks", QUANT_CONFIGS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_decoder(
@@ -44,14 +50,19 @@ def test_decoder(
     prompt: str,
 ):
     """Test single-step decoder logits against PyTorch."""
-    size, model, tokenizer = pytorch_model
-    logger.info(f"Testing {size}/{precision or 'fp32'}: '{prompt}'")
+    model_id, model, tokenizer = pytorch_model
+    model_name = get_model_name(model_id)
+    logger.info(f"Testing {model_name}/{precision or 'fp32'}: '{prompt}'")
 
-    onnx_dir = get_onnx_dir(exports_dir, size)
-    skip_if_missing(onnx_dir, "Export not found")
-
+    onnx_dir = get_onnx_dir(exports_dir, model_id)
     onnx_file = get_onnx_file(onnx_dir, precision)
-    skip_if_missing(onnx_file, f"ONNX file not found: {onnx_file.name}")
+
+    if not onnx_file.exists():
+        precision_arg = f" --precision {precision}" if precision else ""
+        pytest.fail(
+            f"ONNX file not found: {onnx_file}\n"
+            f"Export with: uv run lfm2-export {model_id}{precision_arg}"
+        )
 
     onnx_sess = load_onnx_session(onnx_file)
 

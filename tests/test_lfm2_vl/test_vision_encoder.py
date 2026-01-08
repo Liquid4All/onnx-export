@@ -16,16 +16,20 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from helpers import skip_if_missing
+from helpers import get_model_name, get_onnx_dir
 from PIL import Image
 
-from liquidonnx.lfm2_vl import MODELS
-from liquidonnx.lfm2_vl.infer import get_onnx_dir
 from liquidonnx.lfm2_vl.preprocessing import pad_to_square
 from liquidonnx.session import get_onnx_file, load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, compare_correlation, get_tolerances
 
 logger = logging.getLogger(__name__)
+
+# HuggingFace model IDs to test
+MODELS = [
+    "LiquidAI/LFM2-VL-450M",
+    "LiquidAI/LFM2-VL-1.6B",
+]
 
 VISION_CORRELATION_THRESHOLD = 0.89
 
@@ -79,41 +83,42 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, v
             "spatial_shapes": spatial_shapes.numpy().astype(np.int64),
         },
     )
+    # Output is 2D [total_tokens, hidden] after Compress
     onnx_embeddings = onnx_outputs[0]
+
+    # Concatenate PyTorch embeddings for comparison
+    pytorch_concat = torch.cat(pytorch_embeddings, dim=0).numpy()
+    min_tokens = min(pytorch_concat.shape[0], onnx_embeddings.shape[0])
 
     atol, rtol = get_tolerances(vision_type)
     results = []
-    for tile_idx, pytorch_tile in enumerate(pytorch_embeddings):
-        pytorch_np = pytorch_tile.numpy()
-        onnx_tile = onnx_embeddings[tile_idx]
-        min_tokens = min(pytorch_np.shape[0], onnx_tile.shape[0])
 
-        if "arrays" in checks:
-            results.append(
-                compare_arrays(
-                    f"vision_tile_{tile_idx}",
-                    pytorch_np[:min_tokens],
-                    onnx_tile[:min_tokens],
-                    atol,
-                    rtol,
-                )
+    if "arrays" in checks:
+        results.append(
+            compare_arrays(
+                "vision_embeddings",
+                pytorch_concat[:min_tokens],
+                onnx_embeddings[:min_tokens],
+                atol,
+                rtol,
             )
-        if "correlation" in checks:
-            results.append(
-                compare_correlation(
-                    f"vision_tile_{tile_idx}_corr",
-                    pytorch_np[:min_tokens],
-                    onnx_tile[:min_tokens],
-                    threshold=VISION_CORRELATION_THRESHOLD,
-                )
+        )
+    if "correlation" in checks:
+        results.append(
+            compare_correlation(
+                "vision_embeddings_corr",
+                pytorch_concat[:min_tokens],
+                onnx_embeddings[:min_tokens],
+                threshold=VISION_CORRELATION_THRESHOLD,
             )
+        )
 
     return results
 
 
 # pytorch_model outermost so same model runs consecutively (memory optimization)
 # Only tests tiled format (conv2d has different preprocessing, verified via coherence tests)
-@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 @pytest.mark.parametrize("vision_type,checks", QUANT_CONFIGS)
 def test_vision_encoder(
     exports_dir: pathlib.Path,
@@ -122,14 +127,17 @@ def test_vision_encoder(
     vision_type: str | None,
     checks: list[str],
 ):
-    size, model, processor = pytorch_model
-    logger.info(f"Testing vision encoder {size}/{vision_type or 'fp32'}")
+    model_id, model, processor = pytorch_model
+    model_name = get_model_name(model_id)
+    logger.info(f"Testing vision encoder {model_name}/{vision_type or 'fp32'}")
 
-    onnx_dir = get_onnx_dir(exports_dir, size)
-    skip_if_missing(onnx_dir, "Export not found")
+    onnx_dir = get_onnx_dir(exports_dir, model_id)
+    if not onnx_dir.exists():
+        pytest.skip(f"Export not found: {onnx_dir}")
 
     embed_images_file = get_onnx_file(onnx_dir, vision_type, "embed_images")
-    skip_if_missing(embed_images_file, "Vision encoder not found")
+    if not embed_images_file.exists():
+        pytest.skip(f"Vision encoder not found: {embed_images_file}")
 
     embed_images_sess = load_onnx_session(embed_images_file)
     image = Image.open(cardinal_image).convert("RGB")

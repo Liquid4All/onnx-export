@@ -350,11 +350,8 @@ def get_image_embeddings(
                     "spatial_shapes": spatial_shapes,
                 },
             )
-            # Output: [num_tiles, num_tokens_per_tile, hidden_dim]
-            # Flatten across tiles
-            onnx_embeds = outputs[0]
-            num_tiles, tokens_per_tile, hidden = onnx_embeds.shape
-            img_embeds = onnx_embeds.reshape(-1, hidden)
+            # Output: [total_tokens, hidden_dim] after Compress
+            img_embeds = outputs[0]
 
         embeddings.append(img_embeds)
 
