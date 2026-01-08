@@ -50,6 +50,7 @@ import pathlib
 import onnx
 from onnx import TensorProto, helper
 
+from liquidonnx.external_data import split_external_data
 from liquidonnx.lfm2.builder import LFM2Builder
 from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.builder import EmbedTokensBuilder, LFM2VLConfig, VisionEmbedBuilder
@@ -577,6 +578,18 @@ def main():
         default=VISION_MODE_TILED,
         help="Vision encoder format: tiled (default) or conv2d",
     )
+    parser.add_argument(
+        "--split-data",
+        type=float,
+        default=2.0,
+        metavar="GB",
+        help="Split external data into chunks (default: 2GB per chunk)",
+    )
+    parser.add_argument(
+        "--no-split-data",
+        action="store_true",
+        help="Disable external data splitting",
+    )
 
     args = parser.parse_args()
 
@@ -619,6 +632,18 @@ def main():
     # FP16 conversion
     if do_fp16_conversion:
         do_fp16(onnx_dir)
+
+    # Split external data
+    if not args.no_split_data:
+        chunk_size_bytes = int(args.split_data * 1024 * 1024 * 1024)
+        for onnx_file in onnx_dir.glob("*.onnx"):
+            data_file = onnx_file.with_suffix(".onnx_data")
+            if data_file.exists() and data_file.stat().st_size > chunk_size_bytes:
+                logger.info("=" * 60)
+                logger.info(f"Splitting external data ({args.split_data:.1f} GB chunks)")
+                logger.info("=" * 60)
+                logger.info(f"  Splitting {onnx_file.name}...")
+                split_external_data(onnx_file, chunk_size=chunk_size_bytes)
 
 
 if __name__ == "__main__":
