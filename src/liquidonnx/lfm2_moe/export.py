@@ -3,8 +3,8 @@
 Export LFM2-MoE models to ONNX with optional quantization and FP16 conversion.
 
 Output Structure (Transformers.js compatible):
-    exports/
-    └── LFM2-MoE-{size}-ONNX/
+    {output-dir}/
+    └── {model-name}-ONNX/
         ├── config.json
         ├── tokenizer.json
         └── onnx/
@@ -18,24 +18,24 @@ Output Structure (Transformers.js compatible):
             └── model_q4f16.onnx_data
 
 Usage:
-    # Export single model (FP32 only)
-    uv run lfm2-moe-export --sizes 8B-A1B
+    # Export from HuggingFace
+    uv run lfm2-moe-export LiquidAI/LFM2-MoE-8B-A1B
 
-    # Export all models
-    uv run lfm2-moe-export --sizes all
+    # Export from local path
+    uv run lfm2-moe-export /path/to/local/model
 
     # Export with all precisions (fp16, q4, q4f16)
-    uv run lfm2-moe-export --sizes all --precision
+    uv run lfm2-moe-export LiquidAI/LFM2-MoE-8B-A1B --precision
 
     # Export with specific precisions
-    uv run lfm2-moe-export --sizes 8B-A1B --precision q4
-    uv run lfm2-moe-export --sizes 8B-A1B --precision fp16 q4 q4f16
+    uv run lfm2-moe-export LiquidAI/LFM2-MoE-8B-A1B --precision q4
+    uv run lfm2-moe-export LiquidAI/LFM2-MoE-8B-A1B --precision fp16 q4 q4f16
 
-    # Convert existing exports (skip FP32 export)
-    uv run lfm2-moe-export --sizes all --precision --skip-export
+    # Convert existing export (skip FP32 export)
+    uv run lfm2-moe-export LiquidAI/LFM2-MoE-8B-A1B --precision --skip-export
 
     # Quantize with lm_head included
-    uv run lfm2-moe-export --sizes 8B-A1B --precision q4 --no-exclude-lm-head
+    uv run lfm2-moe-export LiquidAI/LFM2-MoE-8B-A1B --precision q4 --no-exclude-lm-head
 """
 
 import argparse
@@ -46,7 +46,6 @@ import pathlib
 import onnx
 from transformers import AutoConfig, AutoTokenizer
 
-from liquidonnx.lfm2_moe import MODELS
 from liquidonnx.lfm2_moe.builder import LFM2MoEBuilder, LFM2MoEConfig
 from liquidonnx.quantize import get_model_size, get_total_model_size_mb, quantize_model
 
@@ -292,8 +291,13 @@ def convert_q4_to_fp16(
     return output_path
 
 
-def get_output_dir(size: str, output_base: pathlib.Path) -> pathlib.Path:
-    return output_base / "exports" / f"LFM2-MoE-{size}-ONNX"
+def get_model_name(model_path: str) -> str:
+    """Extract model name from HF slug or local path."""
+    # Handle HF slugs like "LiquidAI/LFM2-MoE-8B-A1B" -> "LFM2-MoE-8B-A1B"
+    if "/" in model_path:
+        return model_path.split("/")[-1]
+    # Handle local paths
+    return pathlib.Path(model_path).name
 
 
 def export_model(
@@ -472,25 +476,25 @@ def main():
     )
 
     parser.add_argument(
-        "--sizes",
-        nargs="+",
-        required=True,
-        help="Model sizes: 8B-A1B, or 'all'",
+        "model",
+        help="HuggingFace model ID or local path (e.g., LiquidAI/LFM2-MoE-8B-A1B)",
     )
-
     parser.add_argument(
         "--output-dir",
         type=pathlib.Path,
         default=pathlib.Path("."),
         help="Output base directory (default: current directory)",
     )
-
+    parser.add_argument(
+        "--output-name",
+        type=str,
+        help="Output folder name (default: {model-name}-ONNX)",
+    )
     parser.add_argument(
         "--skip-export",
         action="store_true",
         help="Skip FP32 export, only run precision conversion",
     )
-
     parser.add_argument(
         "--precision",
         nargs="*",
@@ -534,10 +538,11 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
-    sizes = list(MODELS.keys()) if "all" in args.sizes else args.sizes
-    for s in sizes:
-        if s not in MODELS:
-            parser.error(f"Unknown size: {s}. Available: {', '.join(MODELS.keys())}")
+    # Derive output name from model path
+    model_name = get_model_name(args.model)
+    output_name = args.output_name or f"{model_name}-ONNX"
+    output_dir = args.output_dir / "exports" / output_name
+    onnx_dir = output_dir / "onnx"
 
     quant_bits = []
     do_fp16_conversion = False
@@ -569,81 +574,49 @@ def main():
             precision_label = "QMoE (INT4 experts only)"
         else:
             precision_label = "FP32"
-        logger.info(f"Exporting models ({precision_label})")
+        logger.info(f"Exporting model ({precision_label})")
         logger.info("=" * 60)
-
-        for size in sizes:
-            output_path = get_output_dir(size, args.output_dir)
-            logger.info(f"Exporting {MODELS[size]} to {output_path}...")
-            try:
-                export_model(
-                    MODELS[size],
-                    str(output_path),
-                    integrated_rope=args.integrated_rope,
-                    use_qmoe=args.qmoe,
-                    qmoe_block_size=args.qmoe_block_size,
-                    use_q4=args.q4,
-                )
-                logger.info(f"  {size}: OK")
-            except Exception as e:
-                logger.error(f"  {size}: FAILED - {e}")
-                raise
+        logger.info(f"Exporting {args.model} to {output_dir}...")
+        export_model(
+            args.model,
+            str(output_dir),
+            integrated_rope=args.integrated_rope,
+            use_qmoe=args.qmoe,
+            qmoe_block_size=args.qmoe_block_size,
+            use_q4=args.q4,
+        )
+        logger.info(f"  {model_name}: OK")
 
     if do_fp16_conversion:
         logger.info("=" * 60)
         logger.info("Converting to FP16")
         logger.info("=" * 60)
-
-        for size in sizes:
-            onnx_dir = get_output_dir(size, args.output_dir) / "onnx"
-            try:
-                do_fp16(onnx_dir)
-                logger.info(f"  {size}: OK")
-            except Exception as e:
-                logger.error(f"  {size}: FAILED - {e}")
-                raise
+        do_fp16(onnx_dir)
+        logger.info(f"  {model_name}: OK")
 
     for bits in quant_bits:
         logger.info("=" * 60)
         logger.info(f"Quantizing to Q{bits}")
         logger.info("=" * 60)
-
-        for size in sizes:
-            onnx_dir = get_output_dir(size, args.output_dir) / "onnx"
-            try:
-                do_quantize(onnx_dir, bits, exclude_lm_head, args.block_size)
-                logger.info(f"  {size}: OK")
-            except Exception as e:
-                logger.error(f"  {size}: FAILED - {e}")
-                raise
+        do_quantize(onnx_dir, bits, exclude_lm_head, args.block_size)
+        logger.info(f"  {model_name}: OK")
 
     if do_q4f16_conversion:
         logger.info("=" * 60)
         logger.info("Converting Q4 to Q4F16")
         logger.info("=" * 60)
-
-        for size in sizes:
-            onnx_dir = get_output_dir(size, args.output_dir) / "onnx"
-            try:
-                do_q4f16(onnx_dir)
-                logger.info(f"  {size}: OK")
-            except Exception as e:
-                logger.error(f"  {size}: FAILED - {e}")
-                raise
+        do_q4f16(onnx_dir)
+        logger.info(f"  {model_name}: OK")
 
     logger.info("=" * 60)
     logger.info("Output summary")
     logger.info("=" * 60)
-
-    for size in sizes:
-        out_dir = get_output_dir(size, args.output_dir)
-        if out_dir.exists():
-            onnx_dir = out_dir / "onnx"
-            files = list(onnx_dir.glob("model*.onnx"))
-            file_names = ", ".join(f.name for f in sorted(files))
-            total_size = sum(f.stat().st_size for f in out_dir.rglob("*") if f.is_file())
-            logger.info(f"  {out_dir} ({total_size / 1e9:.2f} GB)")
-            logger.info(f"    Files: {file_names}")
+    if output_dir.exists():
+        files = list(onnx_dir.glob("model*.onnx"))
+        file_names = ", ".join(f.name for f in sorted(files))
+        total_size = sum(f.stat().st_size for f in output_dir.rglob("*") if f.is_file())
+        logger.info(f"  {output_dir} ({total_size / 1e9:.2f} GB)")
+        logger.info(f"    Files: {file_names}")
 
 
 if __name__ == "__main__":

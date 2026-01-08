@@ -1,5 +1,4 @@
 import logging
-import os
 import pathlib
 import sys
 
@@ -28,10 +27,3 @@ def exports_dir(request) -> pathlib.Path:
     return base / "exports"
 
 
-@pytest.fixture(scope="session")
-def community_dir() -> pathlib.Path:
-    """Base directory for onnx-community models."""
-    env_dir = os.environ.get("ONNX_COMMUNITY_DIR")
-    if env_dir:
-        return pathlib.Path(env_dir)
-    return pathlib.Path("onnx-community")
