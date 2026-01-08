@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 MODELS = [
     "LiquidAI/LFM2-VL-450M",
     "LiquidAI/LFM2-VL-1.6B",
+    "LiquidAI/LFM2-VL-3B",
 ]
 
 PROMPTS = ["Hello, how are", "The image shows", "I can see"]

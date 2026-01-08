@@ -6,6 +6,16 @@ Usage:
     uv run lfm2-vl-infer --model exports/LFM2-VL-450M-ONNX
     uv run lfm2-vl-infer --model exports/LFM2-VL-450M-ONNX --images photo.jpg
     uv run lfm2-vl-infer --model exports/LFM2-VL-450M-ONNX --images a.jpg b.jpg --prompt "Compare"
+
+    # Run with quantized models
+    uv run lfm2-vl-infer --model exports/LFM2-VL-450M-ONNX --precision q4
+    uv run lfm2-vl-infer --model exports/LFM2-VL-450M-ONNX --precision fp16
+
+    # Specify individual component files
+    uv run lfm2-vl-infer --model exports/LFM2-VL-450M-ONNX \
+        --embed-tokens embed_tokens_fp16.onnx \
+        --embed-images embed_images_q4.onnx \
+        --decoder decoder_q4.onnx
 """
 
 import argparse
@@ -37,8 +47,17 @@ def get_onnx_dir(exports_dir: Path, size: str) -> Path:
 class VLModelInference:
     """ONNX inference for LFM2-VL models."""
 
-    def __init__(self, model_path: str):
+    def __init__(
+        self,
+        model_path: str,
+        embed_tokens_file: str | None = None,
+        embed_images_file: str | None = None,
+        decoder_file: str | None = None,
+    ):
         self.model_path = Path(model_path)
+        self.embed_tokens_file = embed_tokens_file
+        self.embed_images_file = embed_images_file
+        self.decoder_file = decoder_file
         self.processor = None
         self.tokenizer = None
         self.embed_tokens_sess = None
@@ -72,9 +91,18 @@ class VLModelInference:
 
         onnx_dir = self.model_path / "onnx"
 
-        self.embed_tokens_sess = load_onnx_session(onnx_dir / "embed_tokens.onnx")
-        self.embed_images_sess = load_onnx_session(onnx_dir / "embed_images.onnx")
-        self.decoder_sess = load_onnx_session(onnx_dir / "decoder.onnx")
+        # Resolve file paths (use provided or default)
+        embed_tokens_path = onnx_dir / (self.embed_tokens_file or "embed_tokens.onnx")
+        embed_images_path = onnx_dir / (self.embed_images_file or "embed_images.onnx")
+        decoder_path = onnx_dir / (self.decoder_file or "decoder.onnx")
+
+        logger.info(f"  embed_tokens: {embed_tokens_path.name}")
+        logger.info(f"  embed_images: {embed_images_path.name}")
+        logger.info(f"  decoder: {decoder_path.name}")
+
+        self.embed_tokens_sess = load_onnx_session(embed_tokens_path)
+        self.embed_images_sess = load_onnx_session(embed_images_path)
+        self.decoder_sess = load_onnx_session(decoder_path)
 
         self.vision_format = detect_vision_format(self.embed_images_sess)
         logger.info(f"Vision format: {self.vision_format}")
@@ -225,6 +253,30 @@ class VLModelInference:
         return self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
 
+def resolve_precision_files(
+    precision: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve file names from precision shorthand.
+
+    Args:
+        precision: One of "fp16", "q4", "q8", or None for default (fp32)
+
+    Returns:
+        Tuple of (embed_tokens_file, embed_images_file, decoder_file)
+    """
+    if precision is None:
+        return None, None, None
+
+    precision = precision.lower()
+    if precision == "fp16":
+        return "embed_tokens_fp16.onnx", "embed_images_fp16.onnx", "decoder_fp16.onnx"
+    elif precision in ("q4", "q8"):
+        # embed_tokens has no quantized version, use fp32
+        return "embed_tokens.onnx", f"embed_images_{precision}.onnx", f"decoder_{precision}.onnx"
+    else:
+        raise ValueError(f"Invalid precision: {precision}. Use fp16, q4, or q8.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="ONNX inference for LFM2-VL models (0-2 images per turn)"
@@ -234,13 +286,49 @@ def main():
     parser.add_argument("--prompt", default=None, help="Initial prompt (optional)")
     parser.add_argument("--max-tokens", type=int, default=100, help="Max tokens to generate")
     parser.add_argument("--no-stream", action="store_true", help="Disable streaming output")
+    parser.add_argument(
+        "--precision",
+        choices=["fp16", "q4", "q8"],
+        help="Model precision: fp16, q4, or q8 (default: fp32)",
+    )
+    parser.add_argument(
+        "--embed-tokens",
+        metavar="FILE",
+        help="Custom embed_tokens ONNX file (relative to onnx/ dir)",
+    )
+    parser.add_argument(
+        "--embed-images",
+        metavar="FILE",
+        help="Custom embed_images ONNX file (relative to onnx/ dir)",
+    )
+    parser.add_argument(
+        "--decoder",
+        metavar="FILE",
+        help="Custom decoder ONNX file (relative to onnx/ dir)",
+    )
     args = parser.parse_args()
 
     if len(args.images) > 2:
         print("Warning: Only 0-2 images supported per turn. Using first 2.")
         args.images = args.images[:2]
 
-    model = VLModelInference(args.model)
+    # Resolve component files from --precision or explicit file args
+    embed_tokens_file, embed_images_file, decoder_file = resolve_precision_files(args.precision)
+
+    # Explicit file args override --precision
+    if args.embed_tokens:
+        embed_tokens_file = args.embed_tokens
+    if args.embed_images:
+        embed_images_file = args.embed_images
+    if args.decoder:
+        decoder_file = args.decoder
+
+    model = VLModelInference(
+        args.model,
+        embed_tokens_file=embed_tokens_file,
+        embed_images_file=embed_images_file,
+        decoder_file=decoder_file,
+    )
     model.load()
 
     print("\n" + "=" * 50)

@@ -49,6 +49,7 @@ import pathlib
 import onnx
 from transformers import AutoConfig, AutoTokenizer
 
+from liquidonnx.external_data import split_external_data
 from liquidonnx.lfm2.builder import LFM2Builder, LFM2Config
 from liquidonnx.quantize import get_model_size, get_total_model_size_mb, quantize_model
 
@@ -303,6 +304,18 @@ def main():
         action="store_true",
         help="Use asymmetric Q4 quantization. Default is symmetric (required for WebGPU)",
     )
+    parser.add_argument(
+        "--split-data",
+        type=float,
+        default=2.0,
+        metavar="GB",
+        help="Split external data into chunks (default: 2GB per chunk)",
+    )
+    parser.add_argument(
+        "--no-split-data",
+        action="store_true",
+        help="Disable external data splitting",
+    )
 
     args = parser.parse_args()
 
@@ -356,6 +369,17 @@ def main():
         symmetric = (bits == 4) and not args.q4_asymmetric
         do_quantize(onnx_dir, bits, exclude_lm_head, args.block_size, symmetric=symmetric)
         logger.info(f"  {model_name}: OK")
+
+    if not args.no_split_data:
+        chunk_size_bytes = int(args.split_data * 1024 * 1024 * 1024)
+        for onnx_file in onnx_dir.glob("model*.onnx"):
+            data_file = onnx_file.with_suffix(".onnx_data")
+            if data_file.exists() and data_file.stat().st_size > chunk_size_bytes:
+                logger.info("=" * 60)
+                logger.info(f"Splitting external data ({args.split_data:.1f} GB chunks)")
+                logger.info("=" * 60)
+                logger.info(f"  Splitting {onnx_file.name}...")
+                split_external_data(onnx_file, chunk_size=chunk_size_bytes)
 
     logger.info("=" * 60)
     logger.info("Output summary")
