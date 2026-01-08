@@ -375,7 +375,9 @@ def test_coherence_community(
         pytest.skip(f"Local embed_tokens not found: {local_embed_tokens_file}")
 
     # Download community models from HuggingFace
-    community_embed_tokens_file = download_community_vl_onnx(model_id, "embed_tokens", use_fp16=False)
+    community_embed_tokens_file = download_community_vl_onnx(
+        model_id, "embed_tokens", use_fp16=False
+    )
     community_vision_file = download_community_vl_onnx(model_id, "vision_encoder", use_fp16=False)
     community_decoder_file = download_community_vl_onnx(model_id, "decoder", use_fp16=False)
 

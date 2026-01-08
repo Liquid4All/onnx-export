@@ -24,6 +24,7 @@ MODELS = [
     "LiquidAI/LFM2-VL-450M",
     "LiquidAI/LFM2-VL-1.6B",
     "LiquidAI/LFM2-VL-3B",
+    "LiquidAI/LFM2.5-VL-1.6B",
 ]
 
 PROMPTS = ["Hello, how are", "The image shows", "I can see"]
