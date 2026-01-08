@@ -6,9 +6,6 @@ Both are compared against PyTorch reference to show which is closer.
 Run with:
     uv run pytest tests/test_lfm2_vl/test_community.py -v
     uv run pytest tests/test_lfm2_vl/test_community.py -v -k "fp32"
-
-Set ONNX_COMMUNITY_DIR environment variable to the directory containing community models:
-    export ONNX_COMMUNITY_DIR=/path/to/onnx-community
 """
 
 import logging
@@ -17,15 +14,19 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from helpers import get_community_vl_files, get_community_vl_onnx_dir, skip_if_missing
+from helpers import download_community_vl_onnx, get_onnx_dir
 from PIL import Image
 
-from liquidonnx.lfm2_vl import MODELS
-from liquidonnx.lfm2_vl.infer import get_onnx_dir
 from liquidonnx.lfm2_vl.preprocessing import get_image_token_id, pad_to_square
 from liquidonnx.session import get_onnx_file, initialize_cache, load_onnx_session
 
 logger = logging.getLogger(__name__)
+
+# HuggingFace model IDs to test
+MODELS = [
+    "LiquidAI/LFM2-VL-450M",
+    "LiquidAI/LFM2-VL-1.6B",
+]
 
 QUANT_CONFIGS = [
     pytest.param(None, None, False, id="fp32"),
@@ -358,12 +359,11 @@ def run_community_onnx_vl_multi(
     return logits
 
 
-@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 @pytest.mark.parametrize("decoder_type,vision_type,use_fp16", QUANT_CONFIGS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_community_comparison(
     exports_dir: pathlib.Path,
-    community_dir: pathlib.Path,
     cardinal_image: pathlib.Path,
     pytorch_model,
     decoder_type: str | None,
@@ -372,38 +372,49 @@ def test_community_comparison(
     prompt: str,
 ):
     """Compare local and community ONNX VL exports against PyTorch reference."""
-    size, model, processor = pytorch_model
+    model_id, model, processor = pytorch_model
     quant_str = f"d{decoder_type or 'fp32'}/v{vision_type or 'fp32'}"
     if use_fp16:
         quant_str = "fp16"
-    logger.info(f"Comparing VL {size}/{quant_str}: '{prompt}'")
+    logger.info(f"Comparing VL {model_id}/{quant_str}: '{prompt}'")
 
     # Check local export exists
-    local_onnx_dir = get_onnx_dir(exports_dir, size)
-    skip_if_missing(local_onnx_dir, "Local VL export not found")
+    local_onnx_dir = get_onnx_dir(exports_dir, model_id)
+    if not local_onnx_dir.exists():
+        pytest.skip(f"Local VL export not found: {local_onnx_dir}")
 
     local_decoder_file = get_onnx_file(local_onnx_dir, decoder_type, "decoder")
     local_vision_file = get_onnx_file(local_onnx_dir, vision_type, "embed_images")
-    skip_if_missing(local_decoder_file, f"Local decoder not found: {local_decoder_file.name}")
-    skip_if_missing(local_vision_file, f"Local vision encoder not found: {local_vision_file.name}")
+    if not local_decoder_file.exists():
+        pytest.skip(f"Local decoder not found: {local_decoder_file}")
+    if not local_vision_file.exists():
+        pytest.skip(f"Local vision encoder not found: {local_vision_file}")
 
-    # Check community export exists
-    community_onnx_dir = get_community_vl_onnx_dir(community_dir, size)
-    skip_if_missing(community_onnx_dir, f"Community VL export not found: {community_onnx_dir}")
+    local_embed_tokens_file = local_onnx_dir / "embed_tokens.onnx"
+    if not local_embed_tokens_file.exists():
+        pytest.skip(f"Local embed_tokens not found: {local_embed_tokens_file}")
 
-    community_files = get_community_vl_files(community_onnx_dir, use_fp16)
-    for name, path in community_files.items():
-        skip_if_missing(path, f"Community {name} not found: {path}")
+    # Download community models from HuggingFace
+    community_embed_tokens_file = download_community_vl_onnx(model_id, "embed_tokens", use_fp16)
+    community_vision_file = download_community_vl_onnx(model_id, "vision_encoder", use_fp16)
+    community_decoder_file = download_community_vl_onnx(model_id, "decoder", use_fp16)
+
+    if not community_embed_tokens_file:
+        pytest.skip(f"Community embed_tokens not available on HF for {model_id}")
+    if not community_vision_file:
+        pytest.skip(f"Community vision_encoder not available on HF for {model_id}")
+    if not community_decoder_file:
+        pytest.skip(f"Community decoder not available on HF for {model_id}")
 
     # Load local models
-    local_embed_tokens = load_onnx_session(local_onnx_dir / "embed_tokens.onnx")
+    local_embed_tokens = load_onnx_session(local_embed_tokens_file)
     local_embed_images = load_onnx_session(local_vision_file)
     local_decoder = load_onnx_session(local_decoder_file)
 
     # Load community models
-    community_embed_tokens = load_onnx_session(community_files["embed_tokens"])
-    community_vision = load_onnx_session(community_files["vision_encoder"])
-    community_decoder = load_onnx_session(community_files["decoder"])
+    community_embed_tokens = load_onnx_session(community_embed_tokens_file)
+    community_vision = load_onnx_session(community_vision_file)
+    community_decoder = load_onnx_session(community_decoder_file)
 
     # Load and preprocess image
     image = Image.open(cardinal_image).convert("RGB")
@@ -464,12 +475,11 @@ def test_community_comparison(
     )
 
 
-@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 @pytest.mark.parametrize("decoder_type,vision_type,use_fp16", QUANT_CONFIGS)
 @pytest.mark.parametrize("prompt", MULTI_IMAGE_PROMPTS)
 def test_community_comparison_multi_image(
     exports_dir: pathlib.Path,
-    community_dir: pathlib.Path,
     cardinal_image: pathlib.Path,
     bluejay_image: pathlib.Path,
     pytorch_model,
@@ -479,38 +489,49 @@ def test_community_comparison_multi_image(
     prompt: str,
 ):
     """Compare local and community ONNX VL exports with multiple images."""
-    size, model, processor = pytorch_model
+    model_id, model, processor = pytorch_model
     quant_str = f"d{decoder_type or 'fp32'}/v{vision_type or 'fp32'}"
     if use_fp16:
         quant_str = "fp16"
-    logger.info(f"Comparing VL multi-image {size}/{quant_str}: '{prompt}'")
+    logger.info(f"Comparing VL multi-image {model_id}/{quant_str}: '{prompt}'")
 
     # Check local export exists
-    local_onnx_dir = get_onnx_dir(exports_dir, size)
-    skip_if_missing(local_onnx_dir, "Local VL export not found")
+    local_onnx_dir = get_onnx_dir(exports_dir, model_id)
+    if not local_onnx_dir.exists():
+        pytest.skip(f"Local VL export not found: {local_onnx_dir}")
 
     local_decoder_file = get_onnx_file(local_onnx_dir, decoder_type, "decoder")
     local_vision_file = get_onnx_file(local_onnx_dir, vision_type, "embed_images")
-    skip_if_missing(local_decoder_file, f"Local decoder not found: {local_decoder_file.name}")
-    skip_if_missing(local_vision_file, f"Local vision encoder not found: {local_vision_file.name}")
+    if not local_decoder_file.exists():
+        pytest.skip(f"Local decoder not found: {local_decoder_file}")
+    if not local_vision_file.exists():
+        pytest.skip(f"Local vision encoder not found: {local_vision_file}")
 
-    # Check community export exists
-    community_onnx_dir = get_community_vl_onnx_dir(community_dir, size)
-    skip_if_missing(community_onnx_dir, f"Community VL export not found: {community_onnx_dir}")
+    local_embed_tokens_file = local_onnx_dir / "embed_tokens.onnx"
+    if not local_embed_tokens_file.exists():
+        pytest.skip(f"Local embed_tokens not found: {local_embed_tokens_file}")
 
-    community_files = get_community_vl_files(community_onnx_dir, use_fp16)
-    for name, path in community_files.items():
-        skip_if_missing(path, f"Community {name} not found: {path}")
+    # Download community models from HuggingFace
+    community_embed_tokens_file = download_community_vl_onnx(model_id, "embed_tokens", use_fp16)
+    community_vision_file = download_community_vl_onnx(model_id, "vision_encoder", use_fp16)
+    community_decoder_file = download_community_vl_onnx(model_id, "decoder", use_fp16)
+
+    if not community_embed_tokens_file:
+        pytest.skip(f"Community embed_tokens not available on HF for {model_id}")
+    if not community_vision_file:
+        pytest.skip(f"Community vision_encoder not available on HF for {model_id}")
+    if not community_decoder_file:
+        pytest.skip(f"Community decoder not available on HF for {model_id}")
 
     # Load local models
-    local_embed_tokens = load_onnx_session(local_onnx_dir / "embed_tokens.onnx")
+    local_embed_tokens = load_onnx_session(local_embed_tokens_file)
     local_embed_images = load_onnx_session(local_vision_file)
     local_decoder = load_onnx_session(local_decoder_file)
 
     # Load community models
-    community_embed_tokens = load_onnx_session(community_files["embed_tokens"])
-    community_vision = load_onnx_session(community_files["vision_encoder"])
-    community_decoder = load_onnx_session(community_files["decoder"])
+    community_embed_tokens = load_onnx_session(community_embed_tokens_file)
+    community_vision = load_onnx_session(community_vision_file)
+    community_decoder = load_onnx_session(community_decoder_file)
 
     # Load and preprocess images
     images = [

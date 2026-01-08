@@ -12,14 +12,18 @@ import pathlib
 
 import numpy as np
 import pytest
-from helpers import skip_if_missing
+from helpers import get_onnx_dir
 from PIL import Image
 
-from liquidonnx.lfm2_vl.infer import get_onnx_dir
 from liquidonnx.lfm2_vl.preprocessing import get_image_token_id
 from liquidonnx.session import initialize_cache, load_onnx_session
 
 logger = logging.getLogger(__name__)
+
+# HuggingFace model IDs to test
+MODELS = [
+    "LiquidAI/LFM2-VL-450M",
+]
 
 
 def run_embed_images(embed_images_sess, processor, image):
@@ -90,7 +94,11 @@ def run_full_inference(
 # === Image Size Edge Cases ===
 
 # Model hidden sizes: 450M=1024, 1.6B=1536, 3B=2048
-MODEL_HIDDEN_SIZES = {"450M": 1024, "1.6B": 1536, "3B": 2048}
+MODEL_HIDDEN_SIZES = {
+    "LiquidAI/LFM2-VL-450M": 1024,
+    "LiquidAI/LFM2-VL-1.6B": 1536,
+    "LiquidAI/LFM2-VL-3B": 2048,
+}
 
 IMAGE_SIZE_CASES = [
     pytest.param((64, 64), id="tiny_64x64"),
@@ -109,7 +117,7 @@ ASPECT_RATIO_CASES = [
 ]
 
 
-@pytest.mark.parametrize("pytorch_model", ["450M"], indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 @pytest.mark.parametrize("size", IMAGE_SIZE_CASES)
 def test_image_sizes(
     exports_dir: pathlib.Path,
@@ -117,12 +125,17 @@ def test_image_sizes(
     size: tuple[int, int],
 ):
     """Test that different image sizes process correctly."""
-    model_size, model, processor = pytorch_model
+    model_id, model, processor = pytorch_model
 
-    onnx_dir = get_onnx_dir(exports_dir, model_size)
-    skip_if_missing(onnx_dir, "Export not found")
+    onnx_dir = get_onnx_dir(exports_dir, model_id)
+    if not onnx_dir.exists():
+        pytest.skip(f"Export not found: {onnx_dir}")
 
-    embed_images_sess = load_onnx_session(onnx_dir / "embed_images.onnx")
+    embed_images_file = onnx_dir / "embed_images.onnx"
+    if not embed_images_file.exists():
+        pytest.skip(f"embed_images not found: {embed_images_file}")
+
+    embed_images_sess = load_onnx_session(embed_images_file)
 
     # Create test image with gradient pattern
     w, h = size
@@ -140,7 +153,7 @@ def test_image_sizes(
     embeddings = run_embed_images(embed_images_sess, processor, img)
 
     # Verify output shape (hidden size varies by model)
-    expected_hidden = MODEL_HIDDEN_SIZES.get(model_size, 1024)
+    expected_hidden = MODEL_HIDDEN_SIZES.get(model_id, 1024)
     assert embeddings.ndim == 2, f"Expected 2D output, got {embeddings.ndim}D"
     assert embeddings.shape[1] == expected_hidden, (
         f"Expected hidden={expected_hidden}, got {embeddings.shape[1]}"
@@ -150,7 +163,7 @@ def test_image_sizes(
     logger.info(f"  {w}x{h} -> {embeddings.shape[0]} tokens, hidden={embeddings.shape[1]}")
 
 
-@pytest.mark.parametrize("pytorch_model", ["450M"], indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 @pytest.mark.parametrize("size", ASPECT_RATIO_CASES)
 def test_aspect_ratios(
     exports_dir: pathlib.Path,
@@ -158,12 +171,17 @@ def test_aspect_ratios(
     size: tuple[int, int],
 ):
     """Test that different aspect ratios process correctly."""
-    model_size, model, processor = pytorch_model
+    model_id, model, processor = pytorch_model
 
-    onnx_dir = get_onnx_dir(exports_dir, model_size)
-    skip_if_missing(onnx_dir, "Export not found")
+    onnx_dir = get_onnx_dir(exports_dir, model_id)
+    if not onnx_dir.exists():
+        pytest.skip(f"Export not found: {onnx_dir}")
 
-    embed_images_sess = load_onnx_session(onnx_dir / "embed_images.onnx")
+    embed_images_file = onnx_dir / "embed_images.onnx"
+    if not embed_images_file.exists():
+        pytest.skip(f"embed_images not found: {embed_images_file}")
+
+    embed_images_sess = load_onnx_session(embed_images_file)
 
     # Create test image
     w, h = size
@@ -173,7 +191,7 @@ def test_aspect_ratios(
     embeddings = run_embed_images(embed_images_sess, processor, img)
 
     # Verify output (hidden size varies by model)
-    expected_hidden = MODEL_HIDDEN_SIZES.get(model_size, 1024)
+    expected_hidden = MODEL_HIDDEN_SIZES.get(model_id, 1024)
     assert embeddings.ndim == 2
     assert embeddings.shape[1] == expected_hidden
     assert embeddings.shape[0] > 0
@@ -181,7 +199,7 @@ def test_aspect_ratios(
     logger.info(f"  {w}x{h} (ratio={w / h:.2f}) -> {embeddings.shape[0]} tokens")
 
 
-@pytest.mark.parametrize("pytorch_model", ["450M"], indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 def test_batch_different_sizes(
     exports_dir: pathlib.Path,
     pytorch_model,
@@ -192,12 +210,17 @@ def test_batch_different_sizes(
     This test verifies that different-sized images can be processed in
     the same session without issues.
     """
-    model_size, model, processor = pytorch_model
+    model_id, model, processor = pytorch_model
 
-    onnx_dir = get_onnx_dir(exports_dir, model_size)
-    skip_if_missing(onnx_dir, "Export not found")
+    onnx_dir = get_onnx_dir(exports_dir, model_id)
+    if not onnx_dir.exists():
+        pytest.skip(f"Export not found: {onnx_dir}")
 
-    embed_images_sess = load_onnx_session(onnx_dir / "embed_images.onnx")
+    embed_images_file = onnx_dir / "embed_images.onnx"
+    if not embed_images_file.exists():
+        pytest.skip(f"embed_images not found: {embed_images_file}")
+
+    embed_images_sess = load_onnx_session(embed_images_file)
 
     # Create images with different sizes
     images = [
@@ -214,7 +237,7 @@ def test_batch_different_sizes(
         logger.info(f"  Image {i + 1} ({img.size[0]}x{img.size[1]}): {embeddings.shape[0]} tokens")
 
     # Verify all processed successfully
-    expected_hidden = MODEL_HIDDEN_SIZES.get(model_size, 1024)
+    expected_hidden = MODEL_HIDDEN_SIZES.get(model_id, 1024)
     assert len(results) == 4
     for emb in results:
         assert emb.ndim == 2
@@ -222,20 +245,32 @@ def test_batch_different_sizes(
         assert emb.shape[0] > 0
 
 
-@pytest.mark.parametrize("pytorch_model", ["450M"], indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 def test_full_inference_different_sizes(
     exports_dir: pathlib.Path,
     pytorch_model,
 ):
     """Test full inference pipeline with different image sizes."""
-    model_size, model, processor = pytorch_model
+    model_id, model, processor = pytorch_model
 
-    onnx_dir = get_onnx_dir(exports_dir, model_size)
-    skip_if_missing(onnx_dir, "Export not found")
+    onnx_dir = get_onnx_dir(exports_dir, model_id)
+    if not onnx_dir.exists():
+        pytest.skip(f"Export not found: {onnx_dir}")
 
-    embed_tokens_sess = load_onnx_session(onnx_dir / "embed_tokens.onnx")
-    embed_images_sess = load_onnx_session(onnx_dir / "embed_images.onnx")
-    decoder_sess = load_onnx_session(onnx_dir / "decoder.onnx")
+    embed_tokens_file = onnx_dir / "embed_tokens.onnx"
+    embed_images_file = onnx_dir / "embed_images.onnx"
+    decoder_file = onnx_dir / "decoder.onnx"
+
+    if not embed_tokens_file.exists():
+        pytest.skip(f"embed_tokens not found: {embed_tokens_file}")
+    if not embed_images_file.exists():
+        pytest.skip(f"embed_images not found: {embed_images_file}")
+    if not decoder_file.exists():
+        pytest.skip(f"decoder not found: {decoder_file}")
+
+    embed_tokens_sess = load_onnx_session(embed_tokens_file)
+    embed_images_sess = load_onnx_session(embed_images_file)
+    decoder_sess = load_onnx_session(decoder_file)
 
     prompt = "What do you see?"
 

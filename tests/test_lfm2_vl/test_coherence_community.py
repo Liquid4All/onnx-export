@@ -15,16 +15,20 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from helpers import get_community_vl_files, get_community_vl_onnx_dir, skip_if_missing
+from helpers import download_community_vl_onnx, get_onnx_dir
 from PIL import Image
 
-from liquidonnx.lfm2_vl import MODELS
-from liquidonnx.lfm2_vl.infer import get_onnx_dir
 from liquidonnx.lfm2_vl.preprocessing import get_image_token_id, pad_to_square
 from liquidonnx.session import get_onnx_file, initialize_cache, load_onnx_session, update_cache
 from liquidonnx.verify import compare_logits_similarity
 
 logger = logging.getLogger(__name__)
+
+# HuggingFace model IDs to test
+MODELS = [
+    "LiquidAI/LFM2-VL-450M",
+    "LiquidAI/LFM2-VL-1.6B",
+]
 
 MAX_NEW_TOKENS = 20
 SIMILARITY_THRESHOLD = 0.75
@@ -338,11 +342,10 @@ def run_coherence_comparison(
     return local_avg, community_avg
 
 
-@pytest.mark.parametrize("pytorch_model", MODELS.keys(), indirect=True)
+@pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 @pytest.mark.parametrize("scenario,prompts", COHERENCE_SCENARIOS)
 def test_coherence_community(
     exports_dir: pathlib.Path,
-    community_dir: pathlib.Path,
     cardinal_image: pathlib.Path,
     bluejay_image: pathlib.Path,
     pytorch_model,
@@ -353,36 +356,47 @@ def test_coherence_community(
 
     Uses fp32 precision for both local and community models.
     """
-    size, model, processor = pytorch_model
+    model_id, model, processor = pytorch_model
 
     # Check local exports
-    local_onnx_dir = get_onnx_dir(exports_dir, size)
-    skip_if_missing(local_onnx_dir, "Local export not found")
+    local_onnx_dir = get_onnx_dir(exports_dir, model_id)
+    if not local_onnx_dir.exists():
+        pytest.skip(f"Local export not found: {local_onnx_dir}")
 
     local_decoder = get_onnx_file(local_onnx_dir, None, "decoder")
     local_embed_images = get_onnx_file(local_onnx_dir, None, "embed_images")
-    skip_if_missing(local_decoder, "Local decoder not found")
-    skip_if_missing(local_embed_images, "Local embed_images not found")
+    if not local_decoder.exists():
+        pytest.skip(f"Local decoder not found: {local_decoder}")
+    if not local_embed_images.exists():
+        pytest.skip(f"Local embed_images not found: {local_embed_images}")
 
-    # Check community exports
-    community_onnx_dir = get_community_vl_onnx_dir(community_dir, size)
-    skip_if_missing(community_onnx_dir, f"Community export not found: {community_onnx_dir}")
+    local_embed_tokens_file = local_onnx_dir / "embed_tokens.onnx"
+    if not local_embed_tokens_file.exists():
+        pytest.skip(f"Local embed_tokens not found: {local_embed_tokens_file}")
 
-    community_files = get_community_vl_files(community_onnx_dir, use_fp16=False)
-    skip_if_missing(community_files["decoder"], "Community decoder not found")
-    skip_if_missing(community_files["vision_encoder"], "Community vision encoder not found")
+    # Download community models from HuggingFace
+    community_embed_tokens_file = download_community_vl_onnx(model_id, "embed_tokens", use_fp16=False)
+    community_vision_file = download_community_vl_onnx(model_id, "vision_encoder", use_fp16=False)
+    community_decoder_file = download_community_vl_onnx(model_id, "decoder", use_fp16=False)
 
-    logger.info(f"Testing coherence {size}/{scenario}: local vs community")
+    if not community_embed_tokens_file:
+        pytest.skip(f"Community embed_tokens not available on HF for {model_id}")
+    if not community_vision_file:
+        pytest.skip(f"Community vision_encoder not available on HF for {model_id}")
+    if not community_decoder_file:
+        pytest.skip(f"Community decoder not available on HF for {model_id}")
+
+    logger.info(f"Testing coherence {model_id}/{scenario}: local vs community")
 
     # Load local sessions
-    local_embed_tokens_sess = load_onnx_session(local_onnx_dir / "embed_tokens.onnx")
+    local_embed_tokens_sess = load_onnx_session(local_embed_tokens_file)
     local_embed_images_sess = load_onnx_session(local_embed_images)
     local_decoder_sess = load_onnx_session(local_decoder)
 
     # Load community sessions
-    community_embed_tokens_sess = load_onnx_session(community_files["embed_tokens"])
-    community_vision_sess = load_onnx_session(community_files["vision_encoder"])
-    community_decoder_sess = load_onnx_session(community_files["decoder"])
+    community_embed_tokens_sess = load_onnx_session(community_embed_tokens_file)
+    community_vision_sess = load_onnx_session(community_vision_file)
+    community_decoder_sess = load_onnx_session(community_decoder_file)
 
     # Prepare images
     if scenario == "single":
