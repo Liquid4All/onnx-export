@@ -14,6 +14,12 @@ COMMUNITY_MODELS = {
     "LiquidAI/LFM2-2.6B": "onnx-community/LFM2-2.6B-ONNX",
 }
 
+# === LFM2-MoE Model Mappings ===
+
+COMMUNITY_MOE_MODELS = {
+    "LiquidAI/LFM2-8B-A1B": "onnx-community/LFM2-8B-A1B-ONNX",
+}
+
 
 def get_model_name(model_id: str) -> str:
     """Extract model name from HF slug (e.g., 'LiquidAI/LFM2-350M' -> 'LFM2-350M')."""
@@ -59,6 +65,40 @@ def download_community_onnx(model_id: str, precision: str | None) -> pathlib.Pat
     from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
 
     community_id = get_community_model_id(model_id)
+    if not community_id:
+        return None
+
+    filename = "model.onnx" if precision is None else f"model_{precision}.onnx"
+    onnx_path = f"onnx/{filename}"
+
+    try:
+        local_path = hf_hub_download(repo_id=community_id, filename=onnx_path)
+    except (EntryNotFoundError, RepositoryNotFoundError):
+        return None
+
+    # Download all associated data files (model.onnx_data, model.onnx_data_1, etc.)
+    repo_files = list_repo_files(repo_id=community_id)
+    data_files = [f for f in repo_files if f.startswith(f"{onnx_path}_data")]
+    for data_file in data_files:
+        hf_hub_download(repo_id=community_id, filename=data_file)
+
+    return pathlib.Path(local_path)
+
+
+def get_community_moe_model_id(model_id: str) -> str | None:
+    """Get onnx-community HF repo for a MoE model, or None if not available."""
+    return COMMUNITY_MOE_MODELS.get(model_id)
+
+
+def download_community_moe_onnx(model_id: str, precision: str | None) -> pathlib.Path | None:
+    """Download community MoE ONNX file from HuggingFace if available.
+
+    Returns path to downloaded file, or None if not found.
+    """
+    from huggingface_hub import hf_hub_download, list_repo_files
+    from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
+
+    community_id = get_community_moe_model_id(model_id)
     if not community_id:
         return None
 
