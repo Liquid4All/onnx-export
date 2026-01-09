@@ -1179,9 +1179,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         )
 
         # Community naming: Add_1 for attention residual
-        hidden_state = self.make_node(
-            "Add", [residual, out_proj], [f"{layer}/Add_1/output_0"]
-        )
+        hidden_state = self.make_node("Add", [residual, out_proj], [f"{layer}/Add_1/output_0"])
 
         residual2 = hidden_state
         normed2 = self.make_vision_layernorm(
@@ -1535,8 +1533,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
     def build_value_info(self):
         """Build ValueInfo entries for weights and intermediate tensors."""
         H = self.vision_hidden
-        nh = self.vision_config.num_attention_heads
-        hd = self.head_dim
         intermediate = self.vision_config.intermediate_size
         num_layers = self.vision_config.num_hidden_layers
         text_hidden = self.text_hidden
@@ -1704,5 +1700,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         self.build_value_info()
 
         model = self.build_graph("embed_images")
-        logger.info(f"Vision + projector model built: {len(self.nodes)} nodes, {len(self.value_info)} value_info")
+        logger.info(
+            f"Vision + projector model built: {len(self.nodes)} nodes, {len(self.value_info)} value_info"
+        )
         return model

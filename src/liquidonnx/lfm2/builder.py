@@ -58,7 +58,9 @@ class LFM2Config:
             if multiplier is not None:
                 intermediate_size = int(multiplier * intermediate_size)
                 multiple_of = getattr(config, "block_multiple_of", 256)
-                intermediate_size = multiple_of * ((intermediate_size + multiple_of - 1) // multiple_of)
+                intermediate_size = multiple_of * (
+                    (intermediate_size + multiple_of - 1) // multiple_of
+                )
 
         return cls(
             hidden_size=config.hidden_size,
@@ -83,7 +85,9 @@ class LFM2Builder(ONNXBuilderBase):
     - Fused Microsoft operators (SimplifiedLayerNormalization, RotaryEmbedding, GroupQueryAttention)
     """
 
-    def __init__(self, config: LFM2Config, use_integrated_rope: bool = False, vl_naming: bool = False):
+    def __init__(
+        self, config: LFM2Config, use_integrated_rope: bool = False, vl_naming: bool = False
+    ):
         """
         Args:
             config: Model configuration
@@ -819,7 +823,10 @@ class LFM2Builder(ONNXBuilderBase):
         self.add_initializer(final_norm_weight, self.weights["model.embedding_norm.weight"])
         # Community uses SkipLayerNorm as node name suffix
         normed = self.make_skip_layernorm(
-            hidden_state, hidden_state, final_norm_weight, final_norm_output,
+            hidden_state,
+            hidden_state,
+            final_norm_weight,
+            final_norm_output,
             name=f"/model/layers.{num_layers}/final_norm_layernorm/SkipLayerNorm",
         )
 
@@ -843,12 +850,10 @@ class LFM2Builder(ONNXBuilderBase):
         the community model format.
         """
         H = self.config.hidden_size
-        nh = self.config.num_attention_heads
         nkv = self.config.num_key_value_heads
         hd = self.head_dim
         kv_hidden = nkv * hd
         intermediate = self.config.intermediate_size
-        L = self.config.conv_L_cache
         num_layers = self.config.num_hidden_layers
         mask_prefix = "/model/attn_mask_reformat/attn_mask_subgraph"
 
@@ -872,7 +877,9 @@ class LFM2Builder(ONNXBuilderBase):
 
         # === Embedding output ===
         self.add_value_info(
-            "/model/embed_tokens/Gather/output_0", TensorProto.FLOAT, ["batch_size", "sequence_length", H]
+            "/model/embed_tokens/Gather/output_0",
+            TensorProto.FLOAT,
+            ["batch_size", "sequence_length", H],
         )
 
         # === Per-layer outputs ===
@@ -900,16 +907,24 @@ class LFM2Builder(ONNXBuilderBase):
                     ["batch_size", 3 * H, "sequence_length"],
                 )
                 self.add_value_info(
-                    f"{prefix}/conv/Split/output_0", TensorProto.FLOAT, ["batch_size", H, "sequence_length"]
+                    f"{prefix}/conv/Split/output_0",
+                    TensorProto.FLOAT,
+                    ["batch_size", H, "sequence_length"],
                 )
                 self.add_value_info(
-                    f"{prefix}/conv/Split/output_1", TensorProto.FLOAT, ["batch_size", H, "sequence_length"]
+                    f"{prefix}/conv/Split/output_1",
+                    TensorProto.FLOAT,
+                    ["batch_size", H, "sequence_length"],
                 )
                 self.add_value_info(
-                    f"{prefix}/conv/Split/output_2", TensorProto.FLOAT, ["batch_size", H, "sequence_length"]
+                    f"{prefix}/conv/Split/output_2",
+                    TensorProto.FLOAT,
+                    ["batch_size", H, "sequence_length"],
                 )
                 self.add_value_info(
-                    f"{prefix}/conv/Mul_1/output_0", TensorProto.FLOAT, ["batch_size", H, "sequence_length"]
+                    f"{prefix}/conv/Mul_1/output_0",
+                    TensorProto.FLOAT,
+                    ["batch_size", H, "sequence_length"],
                 )
                 self.add_value_info(
                     f"{prefix}/conv/Conv_Input/output_0",
@@ -921,11 +936,17 @@ class LFM2Builder(ONNXBuilderBase):
                 conv_gather_name = "Gather_1" if self.vl_naming else "Gather_for_slice"
                 self.add_value_info(f"{prefix}/conv/split_sizes", TensorProto.INT64, [3])
                 self.add_value_info(f"{prefix}/conv/{shape_name}/output_0", TensorProto.INT64, [3])
-                self.add_value_info(f"{prefix}/conv/{conv_gather_name}/output_0", TensorProto.INT64, [])
-                self.add_value_info(f"{prefix}/conv/Neg_Seq_Len/output_0", TensorProto.INT64, [])
-                self.add_value_info(f"{prefix}/conv/Unsqueeze_starts/output_0", TensorProto.INT64, [1])
                 self.add_value_info(
-                    f"{prefix}/conv/Mul_2/output_0", TensorProto.FLOAT, ["batch_size", H, "sequence_length"]
+                    f"{prefix}/conv/{conv_gather_name}/output_0", TensorProto.INT64, []
+                )
+                self.add_value_info(f"{prefix}/conv/Neg_Seq_Len/output_0", TensorProto.INT64, [])
+                self.add_value_info(
+                    f"{prefix}/conv/Unsqueeze_starts/output_0", TensorProto.INT64, [1]
+                )
+                self.add_value_info(
+                    f"{prefix}/conv/Mul_2/output_0",
+                    TensorProto.FLOAT,
+                    ["batch_size", H, "sequence_length"],
                 )
                 self.add_value_info(
                     f"{prefix}/conv/Transpose_2/output_0",
@@ -1062,7 +1083,9 @@ class LFM2Builder(ONNXBuilderBase):
             TensorProto.FLOAT,
             ["batch_size", "sequence_length", H],
         )
-        self.add_value_info("/lm_head/Transpose/output_0", TensorProto.FLOAT, [H, self.config.vocab_size])
+        self.add_value_info(
+            "/lm_head/Transpose/output_0", TensorProto.FLOAT, [H, self.config.vocab_size]
+        )
 
     def load_weights(self, model_path: str):
         """Load weights from HuggingFace model."""

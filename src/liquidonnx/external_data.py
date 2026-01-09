@@ -24,10 +24,7 @@ MIN_EXTERNAL_SIZE = 1024
 def _model_uses_external_data(model: onnx.ModelProto) -> bool:
     """Check if any tensor in the model uses external data."""
     for tensor in model.graph.initializer:
-        if (
-            tensor.HasField("data_location")
-            and tensor.data_location == onnx.TensorProto.EXTERNAL
-        ):
+        if tensor.HasField("data_location") and tensor.data_location == onnx.TensorProto.EXTERNAL:
             return True
     return False
 
@@ -143,8 +140,7 @@ def split_external_data(
     current_chunk_file.close()
     if current_chunk_size > 0:
         logger.info(
-            f"  Chunk {chunk_idx}: {current_chunk_path.name} "
-            f"({current_chunk_size / 1e9:.2f} GB)"
+            f"  Chunk {chunk_idx}: {current_chunk_path.name} ({current_chunk_size / 1e9:.2f} GB)"
         )
     else:
         # Remove empty file
