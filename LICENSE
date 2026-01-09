@@ -1,869 +1,71 @@
-<!doctype html>
-<html class="">
-	<head>
-		<meta charset="utf-8" />
-
-		<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-
-		<meta name="description" content="We’re on a journey to advance and democratize artificial intelligence through open source and open science." />
-
-		<meta property="fb:app_id" content="1321688464574422" />
-
-		<meta name="twitter:card" content="summary_large_image" />
-
-		<meta name="twitter:site" content="@huggingface" />
-
-		<meta name="twitter:image" content="https://cdn-thumbnails.huggingface.co/social-thumbnails/models/LiquidAI/LFM2-1.2B.png" />
-
-		<meta property="og:title" content="LICENSE · LiquidAI/LFM2-1.2B at main" />
-
-		<meta property="og:type" content="website" />
-
-		<meta property="og:url" content="https://huggingface.co/LiquidAI/LFM2-1.2B/blob/main/LICENSE" />
-
-		<meta property="og:image" content="https://cdn-thumbnails.huggingface.co/social-thumbnails/models/LiquidAI/LFM2-1.2B.png" />
-
-		<link rel="stylesheet" href="/front/build/kube-c77f16c/style.css" />
-
-		<link rel="preconnect" href="https://fonts.gstatic.com" />
-
-		<link
-			href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:ital,wght@0,200;0,300;0,400;0,600;0,700;1,200;1,300;1,400;1,600;1,700&display=swap"
-			rel="stylesheet"
-		/>
-
-		<link
-			href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&display=swap"
-			rel="stylesheet"
-		/>
-
-		<link
-			rel="preload"
-			href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.12.0/katex.min.css"
-			as="style"
-			onload="this.onload=null;this.rel='stylesheet'"
-		/>
-
-		<noscript>
-			<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.12.0/katex.min.css" />
-		</noscript>
-		<script>const guestTheme = document.cookie.match(/theme=(\w+)/)?.[1]; document.documentElement.classList.toggle('dark', guestTheme === 'dark' || ( (!guestTheme || guestTheme === 'system') && window.matchMedia('(prefers-color-scheme: dark)').matches));</script>
-<link rel="canonical" href="https://huggingface.co/LiquidAI/LFM2-1.2B/blob/main/LICENSE">  <!-- HEAD_svelte-1oal594_START --><style>.blob-line-num::before {
-			content: attr(data-line-num);
-		}
-	</style><!-- HEAD_svelte-1oal594_END -->
-		<title>LICENSE · LiquidAI/LFM2-1.2B at main</title>
-
-		<script defer src="/js/script.js"></script>
-
-		<script>
-			(window.plausible =
-				window.plausible ||
-				function () {
-					(plausible.q = plausible.q || []).push(arguments);
-				}),
-				(plausible.init =
-					plausible.init ||
-					function (i) {
-						plausible.o = i || {};
-					});
-			plausible.init({
-				customProperties: {
-					loggedIn: "false",
-				},
-				endpoint: "/api/event",
-			});
-		</script>
-
-		<script>
-			window.hubConfig = {"features":{"signupDisabled":false},"sshGitUrl":"git@hf.co","moonHttpUrl":"https:\/\/huggingface.co","captchaApiKey":"bd5f2066-93dc-4bdd-a64b-a24646ca3859","datasetViewerPublicUrl":"https:\/\/datasets-server.huggingface.co","stripePublicKey":"pk_live_x2tdjFXBCvXo2FFmMybezpeM00J6gPCAAc","environment":"production","userAgent":"HuggingFace (production)","spacesIframeDomain":"hf.space","spacesApiUrl":"https:\/\/api.hf.space","docSearchKey":"ece5e02e57300e17d152c08056145326e90c4bff3dd07d7d1ae40cf1c8d39cb6","logoDev":{"apiUrl":"https:\/\/img.logo.dev\/","apiKey":"pk_UHS2HZOeRnaSOdDp7jbd5w"}};
-			window.requestId = "Root=1-695af162-7b2880d028e6d9787f5ad46b";
-		</script>
-		<script type="text/javascript" src="https://de5282c3ca0c.edge.sdk.awswaf.com/de5282c3ca0c/526cf06acb0d/challenge.js" defer></script> 
-	</head>
-	<body class="flex flex-col min-h-dvh bg-white dark:bg-gray-950 text-black ViewerBlobPage">
-		<div class="flex min-h-dvh flex-col"><div class="SVELTE_HYDRATER contents" data-target="DeviceProvider" data-props="{}"></div>
-	<div class="SVELTE_HYDRATER contents" data-target="SystemThemeMonitor" data-props="{&quot;isLoggedIn&quot;:false}"></div>
-
-	<div class="SVELTE_HYDRATER contents" data-target="MainHeader" data-props="{&quot;classNames&quot;:&quot;&quot;,&quot;isWide&quot;:false,&quot;isZh&quot;:false,&quot;isPro&quot;:false}"><header class="border-b border-gray-100 "><div class="w-full px-4 container flex h-16 items-center"><div class="flex flex-1 items-center"><a class="mr-5 flex flex-none items-center lg:mr-6" href="/"><img alt="Hugging Face's logo" class="w-7 md:mr-2" src="/front/assets/huggingface_logo-noborder.svg">
-				<span class="hidden whitespace-nowrap text-lg font-bold md:block">Hugging Face</span></a>
-			<div class="relative flex-1 lg:max-w-sm mr-2 sm:mr-4 md:mr-3 xl:mr-6"><input autocomplete="off" class="w-full dark:bg-gray-950 pl-8 form-input-alt h-9 pr-3 focus:shadow-xl " name="" placeholder="Search models, datasets, users..."   spellcheck="false" type="text" value="">
-	<svg class="absolute left-2.5 text-gray-400 top-1/2 transform -translate-y-1/2" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32"><path d="M30 28.59L22.45 21A11 11 0 1 0 21 22.45L28.59 30zM5 14a9 9 0 1 1 9 9a9 9 0 0 1-9-9z" fill="currentColor"></path></svg>
-	</div>
-			<div class="flex flex-none items-center justify-center p-0.5 place-self-stretch lg:hidden"><button class="relative z-40 flex h-6 w-8 items-center justify-center" type="button"><svg width="1em" height="1em" viewBox="0 0 10 10" class="text-xl" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" preserveAspectRatio="xMidYMid meet" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M1.65039 2.9999C1.65039 2.8066 1.80709 2.6499 2.00039 2.6499H8.00039C8.19369 2.6499 8.35039 2.8066 8.35039 2.9999C8.35039 3.1932 8.19369 3.3499 8.00039 3.3499H2.00039C1.80709 3.3499 1.65039 3.1932 1.65039 2.9999ZM1.65039 4.9999C1.65039 4.8066 1.80709 4.6499 2.00039 4.6499H8.00039C8.19369 4.6499 8.35039 4.8066 8.35039 4.9999C8.35039 5.1932 8.19369 5.3499 8.00039 5.3499H2.00039C1.80709 5.3499 1.65039 5.1932 1.65039 4.9999ZM2.00039 6.6499C1.80709 6.6499 1.65039 6.8066 1.65039 6.9999C1.65039 7.1932 1.80709 7.3499 2.00039 7.3499H8.00039C8.19369 7.3499 8.35039 7.1932 8.35039 6.9999C8.35039 6.8066 8.19369 6.6499 8.00039 6.6499H2.00039Z"></path></svg>
-		</button>
-
-	</div></div>
-		<nav aria-label="Main" class="ml-auto hidden lg:block"><ul class="flex items-center gap-x-1 2xl:gap-x-2"><li class="hover:text-indigo-700"><a class="group flex items-center px-2 py-0.5 dark:text-gray-300 dark:hover:text-gray-100" href="/models"><svg class="mr-1.5 text-gray-400 group-hover:text-indigo-500" style="" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 24 24"><path class="uim-quaternary" d="M20.23 7.24L12 12L3.77 7.24a1.98 1.98 0 0 1 .7-.71L11 2.76c.62-.35 1.38-.35 2 0l6.53 3.77c.29.173.531.418.7.71z" opacity=".25" fill="currentColor"></path><path class="uim-tertiary" d="M12 12v9.5a2.09 2.09 0 0 1-.91-.21L4.5 17.48a2.003 2.003 0 0 1-1-1.73v-7.5a2.06 2.06 0 0 1 .27-1.01L12 12z" opacity=".5" fill="currentColor"></path><path class="uim-primary" d="M20.5 8.25v7.5a2.003 2.003 0 0 1-1 1.73l-6.62 3.82c-.275.13-.576.198-.88.2V12l8.23-4.76c.175.308.268.656.27 1.01z" fill="currentColor"></path></svg>
-						Models</a>
-				</li><li class="hover:text-red-700"><a class="group flex items-center px-2 py-0.5 dark:text-gray-300 dark:hover:text-gray-100" href="/datasets"><svg class="mr-1.5 text-gray-400 group-hover:text-red-500" style="" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 25 25"><ellipse cx="12.5" cy="5" fill="currentColor" fill-opacity="0.25" rx="7.5" ry="2"></ellipse><path d="M12.5 15C16.6421 15 20 14.1046 20 13V20C20 21.1046 16.6421 22 12.5 22C8.35786 22 5 21.1046 5 20V13C5 14.1046 8.35786 15 12.5 15Z" fill="currentColor" opacity="0.5"></path><path d="M12.5 7C16.6421 7 20 6.10457 20 5V11.5C20 12.6046 16.6421 13.5 12.5 13.5C8.35786 13.5 5 12.6046 5 11.5V5C5 6.10457 8.35786 7 12.5 7Z" fill="currentColor" opacity="0.5"></path><path d="M5.23628 12C5.08204 12.1598 5 12.8273 5 13C5 14.1046 8.35786 15 12.5 15C16.6421 15 20 14.1046 20 13C20 12.8273 19.918 12.1598 19.7637 12C18.9311 12.8626 15.9947 13.5 12.5 13.5C9.0053 13.5 6.06886 12.8626 5.23628 12Z" fill="currentColor"></path></svg>
-						Datasets</a>
-				</li><li class="hover:text-blue-700"><a class="group flex items-center px-2 py-0.5 dark:text-gray-300 dark:hover:text-gray-100" href="/spaces"><svg class="mr-1.5 text-gray-400 group-hover:text-blue-500" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" viewBox="0 0 25 25"><path opacity=".5" d="M6.016 14.674v4.31h4.31v-4.31h-4.31ZM14.674 14.674v4.31h4.31v-4.31h-4.31ZM6.016 6.016v4.31h4.31v-4.31h-4.31Z" fill="currentColor"></path><path opacity=".75" fill-rule="evenodd" clip-rule="evenodd" d="M3 4.914C3 3.857 3.857 3 4.914 3h6.514c.884 0 1.628.6 1.848 1.414a5.171 5.171 0 0 1 7.31 7.31c.815.22 1.414.964 1.414 1.848v6.514A1.914 1.914 0 0 1 20.086 22H4.914A1.914 1.914 0 0 1 3 20.086V4.914Zm3.016 1.102v4.31h4.31v-4.31h-4.31Zm0 12.968v-4.31h4.31v4.31h-4.31Zm8.658 0v-4.31h4.31v4.31h-4.31Zm0-10.813a2.155 2.155 0 1 1 4.31 0 2.155 2.155 0 0 1-4.31 0Z" fill="currentColor"></path><path opacity=".25" d="M16.829 6.016a2.155 2.155 0 1 0 0 4.31 2.155 2.155 0 0 0 0-4.31Z" fill="currentColor"></path></svg>
-						Spaces</a>
-				</li><li class="max-xl:hidden relative"><div class="relative ">
-	<button class="group flex items-center px-2 py-0.5 dark:text-gray-300 hover:text-yellow-700 dark:hover:text-gray-100 " type="button">
-		<svg class="mr-1.5 mr-1.5 text-gray-400 text-yellow-500! group-hover:text-yellow-500" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32"><path d="M20.6081 3C21.7684 3 22.8053 3.49196 23.5284 4.38415C23.9756 4.93678 24.4428 5.82749 24.4808 7.16133C24.9674 7.01707 25.4353 6.93643 25.8725 6.93643C26.9833 6.93643 27.9865 7.37587 28.696 8.17411C29.6075 9.19872 30.0124 10.4579 29.8361 11.7177C29.7523 12.3177 29.5581 12.8555 29.2678 13.3534C29.8798 13.8646 30.3306 14.5763 30.5485 15.4322C30.719 16.1032 30.8939 17.5006 29.9808 18.9403C30.0389 19.0342 30.0934 19.1319 30.1442 19.2318C30.6932 20.3074 30.7283 21.5229 30.2439 22.6548C29.5093 24.3704 27.6841 25.7219 24.1397 27.1727C21.9347 28.0753 19.9174 28.6523 19.8994 28.6575C16.9842 29.4379 14.3477 29.8345 12.0653 29.8345C7.87017 29.8345 4.8668 28.508 3.13831 25.8921C0.356375 21.6797 0.754104 17.8269 4.35369 14.1131C6.34591 12.058 7.67023 9.02782 7.94613 8.36275C8.50224 6.39343 9.97271 4.20438 12.4172 4.20438H12.4179C12.6236 4.20438 12.8314 4.2214 13.0364 4.25468C14.107 4.42854 15.0428 5.06476 15.7115 6.02205C16.4331 5.09583 17.134 4.359 17.7682 3.94323C18.7242 3.31737 19.6794 3 20.6081 3ZM20.6081 5.95917C20.2427 5.95917 19.7963 6.1197 19.3039 6.44225C17.7754 7.44319 14.8258 12.6772 13.7458 14.7131C13.3839 15.3952 12.7655 15.6837 12.2086 15.6837C11.1036 15.6837 10.2408 14.5497 12.1076 13.1085C14.9146 10.9402 13.9299 7.39584 12.5898 7.1776C12.5311 7.16799 12.4731 7.16355 12.4172 7.16355C11.1989 7.16355 10.6615 9.33114 10.6615 9.33114C10.6615 9.33114 9.0863 13.4148 6.38031 16.206C3.67434 18.998 3.5346 21.2388 5.50675 24.2246C6.85185 26.2606 9.42666 26.8753 12.0653 26.8753C14.8021 26.8753 17.6077 26.2139 19.1799 25.793C19.2574 25.7723 28.8193 22.984 27.6081 20.6107C27.4046 20.212 27.0693 20.0522 26.6471 20.0522C24.9416 20.0522 21.8393 22.6726 20.5057 22.6726C20.2076 22.6726 19.9976 22.5416 19.9116 22.222C19.3433 20.1173 28.552 19.2325 27.7758 16.1839C27.639 15.6445 27.2677 15.4256 26.746 15.4263C24.4923 15.4263 19.4358 19.5181 18.3759 19.5181C18.2949 19.5181 18.2368 19.4937 18.2053 19.4419C17.6743 18.557 17.9653 17.9394 21.7082 15.6009C25.4511 13.2617 28.0783 11.8545 26.5841 10.1752C26.4121 9.98141 26.1684 9.8956 25.8725 9.8956C23.6001 9.89634 18.2311 14.9403 18.2311 14.9403C18.2311 14.9403 16.7821 16.496 15.9057 16.496C15.7043 16.496 15.533 16.4139 15.4169 16.2112C14.7956 15.1296 21.1879 10.1286 21.5484 8.06535C21.7928 6.66715 21.3771 5.95917 20.6081 5.95917Z" fill="#FF9D00"></path><path d="M5.50686 24.2246C3.53472 21.2387 3.67446 18.9979 6.38043 16.206C9.08641 13.4147 10.6615 9.33111 10.6615 9.33111C10.6615 9.33111 11.2499 6.95933 12.59 7.17757C13.93 7.39581 14.9139 10.9401 12.1069 13.1084C9.29997 15.276 12.6659 16.7489 13.7459 14.713C14.8258 12.6772 17.7747 7.44316 19.304 6.44221C20.8326 5.44128 21.9089 6.00204 21.5484 8.06532C21.188 10.1286 14.795 15.1295 15.4171 16.2118C16.0391 17.2934 18.2312 14.9402 18.2312 14.9402C18.2312 14.9402 25.0907 8.49588 26.5842 10.1752C28.0776 11.8545 25.4512 13.2616 21.7082 15.6008C17.9646 17.9393 17.6744 18.557 18.2054 19.4418C18.7372 20.3266 26.9998 13.1351 27.7759 16.1838C28.5513 19.2324 19.3434 20.1173 19.9117 22.2219C20.48 24.3274 26.3979 18.2382 27.6082 20.6107C28.8193 22.9839 19.2574 25.7722 19.18 25.7929C16.0914 26.62 8.24723 28.3726 5.50686 24.2246Z" fill="#FFD21E"></path></svg>
-			Community
-		</button>
-	
-	
-	</div>
-				</li><li class="hover:text-yellow-700"><a class="group flex items-center px-2 py-0.5 dark:text-gray-300 dark:hover:text-gray-100" href="/docs"><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" role="img" class="mr-1.5 text-gray-400 group-hover:text-yellow-500" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 16 16"><path d="m2.28 3.7-.3.16a.67.67 0 0 0-.34.58v8.73l.01.04.02.07.01.04.03.06.02.04.02.03.04.06.05.05.04.04.06.04.06.04.08.04.08.02h.05l.07.02h.11l.04-.01.07-.02.03-.01.07-.03.22-.12a5.33 5.33 0 0 1 5.15.1.67.67 0 0 0 .66 0 5.33 5.33 0 0 1 5.33 0 .67.67 0 0 0 1-.58V4.36a.67.67 0 0 0-.34-.5l-.3-.17v7.78a.63.63 0 0 1-.87.59 4.9 4.9 0 0 0-4.35.35l-.65.39a.29.29 0 0 1-.15.04.29.29 0 0 1-.16-.04l-.65-.4a4.9 4.9 0 0 0-4.34-.34.63.63 0 0 1-.87-.59V3.7Z" fill="currentColor" class="dark:opacity-40"></path><path fill-rule="evenodd" clip-rule="evenodd" d="M8 3.1a5.99 5.99 0 0 0-5.3-.43.66.66 0 0 0-.42.62v8.18c0 .45.46.76.87.59a4.9 4.9 0 0 1 4.34.35l.65.39c.05.03.1.04.16.04.05 0 .1-.01.15-.04l.65-.4a4.9 4.9 0 0 1 4.35-.34.63.63 0 0 0 .86-.59V3.3a.67.67 0 0 0-.41-.62 5.99 5.99 0 0 0-5.3.43l-.3.17L8 3.1Zm.73 1.87a.43.43 0 1 0-.86 0v5.48a.43.43 0 0 0 .86 0V4.97Z" fill="currentColor" class="opacity-40 dark:opacity-100"></path><path d="M8.73 4.97a.43.43 0 1 0-.86 0v5.48a.43.43 0 1 0 .86 0V4.96Z" fill="currentColor" class="dark:opacity-40"></path></svg>
-						Docs</a>
-				</li><li class="hover:text-black dark:hover:text-white max-2xl:hidden"><a class="group flex items-center px-2 py-0.5 dark:text-gray-300 dark:hover:text-gray-100" href="/enterprise"><svg class="mr-1.5 text-gray-400 group-hover:text-black dark:group-hover:text-white" xmlns="http://www.w3.org/2000/svg" fill="none" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 12 12"><path fill-rule="evenodd" clip-rule="evenodd" d="M4.9 1.35a3.16 3.16 0 0 0-2.8 2.07L.37 8.58C0 9.71.7 10.65 1.86 10.65H7.3a3.2 3.2 0 0 0 2.84-2.07l1.67-5.16c.36-1.13-.3-2.07-1.46-2.07H4.91Zm.4 2.07L3.57 8.47h3.57l.36-1.12H5.4l.28-.91h1.75l.4-1.1H6.07l.3-.83h2l.36-1.1H5.27h.04Z" fill="currentColor"></path></svg>
-						Enterprise</a>
-				</li>
-
-		<li><a class="group flex items-center px-2 py-0.5 dark:text-gray-300 dark:hover:text-gray-100" href="/pricing">Pricing
-			</a></li>
-
-		<li><div class="relative group">
-	<button class="px-2 py-0.5 hover:text-gray-500 dark:hover:text-gray-600 flex items-center " type="button">
-		<svg class=" text-gray-500 w-5 group-hover:text-gray-400 dark:text-gray-300 dark:group-hover:text-gray-100" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" viewBox="0 0 32 18" preserveAspectRatio="xMidYMid meet"><path fill-rule="evenodd" clip-rule="evenodd" d="M14.4504 3.30221C14.4504 2.836 14.8284 2.45807 15.2946 2.45807H28.4933C28.9595 2.45807 29.3374 2.836 29.3374 3.30221C29.3374 3.76842 28.9595 4.14635 28.4933 4.14635H15.2946C14.8284 4.14635 14.4504 3.76842 14.4504 3.30221Z" fill="currentColor"></path><path fill-rule="evenodd" clip-rule="evenodd" d="M14.4504 9.00002C14.4504 8.53382 14.8284 8.15588 15.2946 8.15588H28.4933C28.9595 8.15588 29.3374 8.53382 29.3374 9.00002C29.3374 9.46623 28.9595 9.84417 28.4933 9.84417H15.2946C14.8284 9.84417 14.4504 9.46623 14.4504 9.00002Z" fill="currentColor"></path><path fill-rule="evenodd" clip-rule="evenodd" d="M14.4504 14.6978C14.4504 14.2316 14.8284 13.8537 15.2946 13.8537H28.4933C28.9595 13.8537 29.3374 14.2316 29.3374 14.6978C29.3374 15.164 28.9595 15.542 28.4933 15.542H15.2946C14.8284 15.542 14.4504 15.164 14.4504 14.6978Z" fill="currentColor"></path><path fill-rule="evenodd" clip-rule="evenodd" d="M1.94549 6.87377C2.27514 6.54411 2.80962 6.54411 3.13928 6.87377L6.23458 9.96907L9.32988 6.87377C9.65954 6.54411 10.194 6.54411 10.5237 6.87377C10.8533 7.20343 10.8533 7.73791 10.5237 8.06756L6.23458 12.3567L1.94549 8.06756C1.61583 7.73791 1.61583 7.20343 1.94549 6.87377Z" fill="currentColor"></path></svg>
-			
-		</button>
-	
-	
-	</div></li>
-		<li><hr class="h-5 w-0.5 border-none bg-gray-100 dark:bg-gray-800"></li>
-		<li><a class="block cursor-pointer whitespace-nowrap px-2 py-0.5 hover:text-gray-500 dark:text-gray-300 dark:hover:text-gray-100" href="/login">Log In
-				</a></li>
-			<li><a class="whitespace-nowrap rounded-full border border-transparent bg-gray-900 px-3 py-1 leading-none text-white hover:border-black hover:bg-white hover:text-black" href="/join">Sign Up
-					</a></li></ul></nav></div></header></div>
-	
-	
-	
-	<div class="SVELTE_HYDRATER contents" data-target="SSOBanner" data-props="{}"></div>
-	
-
-	<main class="flex flex-1 flex-col">
-	<div class="SVELTE_HYDRATER contents" data-target="ModelHeader" data-props="{&quot;activeTab&quot;:&quot;files&quot;,&quot;author&quot;:{&quot;_id&quot;:&quot;663b52dd95085055e93f29ba&quot;,&quot;avatarUrl&quot;:&quot;https://cdn-avatars.huggingface.co/v1/production/uploads/61b8e2ba285851687028d395/lJeGmNS6KV4y34ERo0Aop.jpeg&quot;,&quot;fullname&quot;:&quot;Liquid AI&quot;,&quot;name&quot;:&quot;LiquidAI&quot;,&quot;type&quot;:&quot;org&quot;,&quot;isHf&quot;:false,&quot;isHfAdmin&quot;:false,&quot;isMod&quot;:false,&quot;isEnterprise&quot;:true,&quot;plan&quot;:&quot;team&quot;,&quot;followerCount&quot;:1642},&quot;canReadRepoSettings&quot;:false,&quot;canWriteRepoContent&quot;:false,&quot;canDisable&quot;:false,&quot;model&quot;:{&quot;author&quot;:&quot;LiquidAI&quot;,&quot;cardData&quot;:{&quot;library_name&quot;:&quot;transformers&quot;,&quot;license&quot;:&quot;other&quot;,&quot;license_name&quot;:&quot;lfm1.0&quot;,&quot;license_link&quot;:&quot;LICENSE&quot;,&quot;language&quot;:[&quot;en&quot;,&quot;ar&quot;,&quot;zh&quot;,&quot;fr&quot;,&quot;de&quot;,&quot;ja&quot;,&quot;ko&quot;,&quot;es&quot;],&quot;pipeline_tag&quot;:&quot;text-generation&quot;,&quot;tags&quot;:[&quot;liquid&quot;,&quot;lfm2&quot;,&quot;edge&quot;]},&quot;cardExists&quot;:true,&quot;config&quot;:{&quot;architectures&quot;:[&quot;Lfm2ForCausalLM&quot;],&quot;model_type&quot;:&quot;lfm2&quot;,&quot;tokenizer_config&quot;:{&quot;bos_token&quot;:&quot;<|startoftext|>&quot;,&quot;eos_token&quot;:&quot;<|im_end|>&quot;,&quot;pad_token&quot;:&quot;<|pad|>&quot;,&quot;use_default_system_prompt&quot;:false},&quot;chat_template_jinja&quot;:&quot;{{- bos_token -}}\n{%- set system_prompt = \&quot;\&quot; -%}\n{%- set ns = namespace(system_prompt=\&quot;\&quot;) -%}\n{%- if messages[0][\&quot;role\&quot;] == \&quot;system\&quot; -%}\n\t{%- set ns.system_prompt = messages[0][\&quot;content\&quot;] -%}\n\t{%- set messages = messages[1:] -%}\n{%- endif -%}\n{%- if tools -%}\n\t{%- set ns.system_prompt = ns.system_prompt + (\&quot;\\n\&quot; if ns.system_prompt else \&quot;\&quot;) + \&quot;List of tools: <|tool_list_start|>[\&quot; -%}\n\t{%- for tool in tools -%}\n\t\t{%- if tool is not string -%}\n            {%- set tool = tool | tojson -%}\n\t\t{%- endif -%}\n\t\t{%- set ns.system_prompt = ns.system_prompt + tool -%}\n        {%- if not loop.last -%}\n            {%- set ns.system_prompt = ns.system_prompt + \&quot;, \&quot; -%}\n        {%- endif -%}\n\t{%- endfor -%}\n\t{%- set ns.system_prompt = ns.system_prompt + \&quot;]<|tool_list_end|>\&quot; -%}\n{%- endif -%}\n{%- if ns.system_prompt -%}\n\t{{- \&quot;<|im_start|>system\\n\&quot; + ns.system_prompt + \&quot;<|im_end|>\\n\&quot; -}}\n{%- endif -%}\n{%- for message in messages -%}\n\t{{- \&quot;<|im_start|>\&quot; + message[\&quot;role\&quot;] + \&quot;\\n\&quot; -}}\n\t{%- set content = message[\&quot;content\&quot;] -%}\n\t{%- if content is not string -%}\n\t\t{%- set content = content | tojson -%}\n\t{%- endif -%}\n\t{%- if message[\&quot;role\&quot;] == \&quot;tool\&quot; -%}\n\t\t{%- set content = \&quot;<|tool_response_start|>\&quot; + content + \&quot;<|tool_response_end|>\&quot; -%}\n\t{%- endif -%}\n\t{{- content + \&quot;<|im_end|>\\n\&quot; -}}\n{%- endfor -%}\n{%- if add_generation_prompt -%}\n\t{{- \&quot;<|im_start|>assistant\\n\&quot; -}}\n{%- endif -%}&quot;},&quot;createdAt&quot;:&quot;2025-07-10T12:01:50.000Z&quot;,&quot;discussionsDisabled&quot;:false,&quot;discussionsSorting&quot;:&quot;recently-created&quot;,&quot;downloads&quot;:410117,&quot;downloadsAllTime&quot;:1741503,&quot;id&quot;:&quot;LiquidAI/LFM2-1.2B&quot;,&quot;isLikedByUser&quot;:false,&quot;availableInferenceProviders&quot;:[],&quot;inference&quot;:&quot;&quot;,&quot;lastModified&quot;:&quot;2025-12-05T17:57:54.000Z&quot;,&quot;likes&quot;:337,&quot;pipeline_tag&quot;:&quot;text-generation&quot;,&quot;library_name&quot;:&quot;transformers&quot;,&quot;librariesOther&quot;:[],&quot;trackDownloads&quot;:true,&quot;model-index&quot;:null,&quot;private&quot;:false,&quot;repoType&quot;:&quot;model&quot;,&quot;gated&quot;:false,&quot;tags&quot;:[&quot;transformers&quot;,&quot;safetensors&quot;,&quot;lfm2&quot;,&quot;text-generation&quot;,&quot;liquid&quot;,&quot;edge&quot;,&quot;conversational&quot;,&quot;en&quot;,&quot;ar&quot;,&quot;zh&quot;,&quot;fr&quot;,&quot;de&quot;,&quot;ja&quot;,&quot;ko&quot;,&quot;es&quot;,&quot;arxiv:2511.23404&quot;,&quot;license:other&quot;,&quot;endpoints_compatible&quot;,&quot;region:us&quot;],&quot;tag_objs&quot;:[{&quot;id&quot;:&quot;text-generation&quot;,&quot;label&quot;:&quot;Text Generation&quot;,&quot;type&quot;:&quot;pipeline_tag&quot;,&quot;subType&quot;:&quot;nlp&quot;},{&quot;id&quot;:&quot;transformers&quot;,&quot;label&quot;:&quot;Transformers&quot;,&quot;type&quot;:&quot;library&quot;},{&quot;id&quot;:&quot;safetensors&quot;,&quot;label&quot;:&quot;Safetensors&quot;,&quot;type&quot;:&quot;library&quot;},{&quot;id&quot;:&quot;en&quot;,&quot;label&quot;:&quot;English&quot;,&quot;type&quot;:&quot;language&quot;},{&quot;id&quot;:&quot;ar&quot;,&quot;label&quot;:&quot;Arabic&quot;,&quot;type&quot;:&quot;language&quot;},{&quot;id&quot;:&quot;zh&quot;,&quot;label&quot;:&quot;Chinese&quot;,&quot;type&quot;:&quot;language&quot;},{&quot;id&quot;:&quot;fr&quot;,&quot;label&quot;:&quot;French&quot;,&quot;type&quot;:&quot;language&quot;},{&quot;id&quot;:&quot;de&quot;,&quot;label&quot;:&quot;German&quot;,&quot;type&quot;:&quot;language&quot;},{&quot;id&quot;:&quot;ja&quot;,&quot;label&quot;:&quot;Japanese&quot;,&quot;type&quot;:&quot;language&quot;},{&quot;id&quot;:&quot;ko&quot;,&quot;label&quot;:&quot;Korean&quot;,&quot;type&quot;:&quot;language&quot;},{&quot;id&quot;:&quot;es&quot;,&quot;label&quot;:&quot;Spanish&quot;,&quot;type&quot;:&quot;language&quot;},{&quot;id&quot;:&quot;lfm2&quot;,&quot;label&quot;:&quot;lfm2&quot;,&quot;type&quot;:&quot;other&quot;,&quot;clickable&quot;:true},{&quot;id&quot;:&quot;liquid&quot;,&quot;label&quot;:&quot;liquid&quot;,&quot;type&quot;:&quot;other&quot;,&quot;clickable&quot;:true},{&quot;id&quot;:&quot;edge&quot;,&quot;label&quot;:&quot;edge&quot;,&quot;type&quot;:&quot;other&quot;,&quot;clickable&quot;:true},{&quot;id&quot;:&quot;conversational&quot;,&quot;label&quot;:&quot;conversational&quot;,&quot;type&quot;:&quot;other&quot;,&quot;clickable&quot;:true},{&quot;id&quot;:&quot;endpoints_compatible&quot;,&quot;label&quot;:&quot;Inference Endpoints&quot;,&quot;type&quot;:&quot;other&quot;,&quot;clickable&quot;:true},{&quot;id&quot;:&quot;arxiv:2511.23404&quot;,&quot;label&quot;:&quot;arxiv:2511.23404&quot;,&quot;type&quot;:&quot;arxiv&quot;,&quot;extra&quot;:{&quot;paperTitle&quot;:&quot;LFM2 Technical Report&quot;}},{&quot;id&quot;:&quot;license:other&quot;,&quot;label&quot;:&quot;other&quot;,&quot;type&quot;:&quot;license&quot;},{&quot;type&quot;:&quot;region&quot;,&quot;label&quot;:&quot;🇺🇸 Region: US&quot;,&quot;id&quot;:&quot;region:us&quot;}],&quot;transformersInfo&quot;:{&quot;auto_model&quot;:&quot;AutoModelForCausalLM&quot;,&quot;pipeline_tag&quot;:&quot;text-generation&quot;,&quot;processor&quot;:&quot;AutoTokenizer&quot;},&quot;widgetData&quot;:[{&quot;text&quot;:&quot;Hi, what can you help me with?&quot;},{&quot;text&quot;:&quot;What is 84 * 3 / 2?&quot;},{&quot;text&quot;:&quot;Tell me an interesting fact about the universe!&quot;},{&quot;text&quot;:&quot;Explain quantum computing in simple terms.&quot;}],&quot;safetensors&quot;:{&quot;parameters&quot;:{&quot;BF16&quot;:1170340608},&quot;total&quot;:1170340608,&quot;sharded&quot;:false},&quot;hasBlockedOids&quot;:false,&quot;region&quot;:&quot;us&quot;,&quot;isQuantized&quot;:false,&quot;licenseFilePath&quot;:&quot;LICENSE&quot;},&quot;discussionsStats&quot;:{&quot;closed&quot;:9,&quot;open&quot;:11,&quot;total&quot;:20},&quot;query&quot;:{},&quot;inferenceContextData&quot;:{&quot;billableEntities&quot;:[],&quot;entityName2Providers&quot;:{}}}"><header class="bg-linear-to-t border-b border-gray-100 pt-6 sm:pt-9 from-gray-50-to-white via-white dark:via-gray-950"><div class="container relative "><h1 class="flex flex-wrap items-center max-md:leading-tight mb-3 text-lg max-sm:gap-y-1.5 md:text-xl">
-			<div class="group flex flex-none items-center"><div class="relative mr-1 flex items-center">
-
-			
-
-<span class="inline-block "><span class="contents"><a href="/LiquidAI" class="text-gray-400 hover:text-blue-600"><div class="flex-none  "><img alt="" class="size-3.5 rounded-sm  flex-none select-none" src="https://cdn-avatars.huggingface.co/v1/production/uploads/61b8e2ba285851687028d395/lJeGmNS6KV4y34ERo0Aop.jpeg" crossorigin="anonymous">
-	</div></a></span>
-	</span></div>
-		
+LFM Open License v1.0
 
-<span class="inline-block "><span class="contents"><a href="/LiquidAI" class="text-gray-400 hover:text-blue-600">LiquidAI</a></span>
-	</span>
-		<div class="mx-0.5 text-gray-300">/</div></div>
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 
-<div class="max-w-full "><a class="break-words font-mono font-semibold hover:text-blue-600 " href="/LiquidAI/LFM2-1.2B">LFM2-1.2B</a>
-	<button class="text-sm mr-4 focus:outline-hidden inline-flex cursor-pointer items-center text-sm  mx-0.5   text-gray-600 " title="Copy model name to clipboard" type="button"><svg class="" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" fill="currentColor" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32"><path d="M28,10V28H10V10H28m0-2H10a2,2,0,0,0-2,2V28a2,2,0,0,0,2,2H28a2,2,0,0,0,2-2V10a2,2,0,0,0-2-2Z" transform="translate(0)"></path><path d="M4,18H2V4A2,2,0,0,1,4,2H18V4H4Z" transform="translate(0)"></path><rect fill="none" width="32" height="32"></rect></svg>
-		</button></div>
-			<div class="inline-flex items-center overflow-hidden whitespace-nowrap rounded-md border bg-white text-sm leading-none text-gray-500  mr-2"><button class="relative flex items-center overflow-hidden from-red-50 to-transparent dark:from-red-900 px-1.5 py-1 hover:bg-linear-to-t focus:outline-hidden"  title="Like"><svg class="left-1.5 absolute" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32" fill="currentColor"><path d="M22.45,6a5.47,5.47,0,0,1,3.91,1.64,5.7,5.7,0,0,1,0,8L16,26.13,5.64,15.64a5.7,5.7,0,0,1,0-8,5.48,5.48,0,0,1,7.82,0L16,10.24l2.53-2.58A5.44,5.44,0,0,1,22.45,6m0-2a7.47,7.47,0,0,0-5.34,2.24L16,7.36,14.89,6.24a7.49,7.49,0,0,0-10.68,0,7.72,7.72,0,0,0,0,10.82L16,29,27.79,17.06a7.72,7.72,0,0,0,0-10.82A7.49,7.49,0,0,0,22.45,4Z"></path></svg>
-
-		
-		<span class="ml-4 pl-0.5 ">like</span></button>
-	<button class="focus:outline-hidden flex items-center border-l px-1.5 py-1 text-gray-400 hover:bg-gray-50 focus:bg-gray-100 dark:hover:bg-gray-900 dark:focus:bg-gray-800" title="See users who liked this repository">337</button></div>
-
-<dialog class="shadow-alternate z-40 mx-4 my-auto h-fit select-text overflow-hidden rounded-xl bg-white max-sm:max-w-[calc(100dvw-2rem)] sm:mx-auto lg:mt-26 md:portrait:mt-30 xl:mt-30 2xl:mt-32 w-full sm:w-96 max-w-[calc(100%-4rem)] text-base ">
-	<div tabindex="-1" class="outline-none focus:ring-0 focus-visible:ring-0"></div></dialog>
-			<div class="relative flex items-center gap-1.5  "><div class="mr-2 inline-flex h-6 items-center overflow-hidden whitespace-nowrap rounded-md border text-sm text-gray-500"><button class="focus:outline-hidden relative flex h-full max-w-56 items-center gap-1.5 overflow-hidden px-1.5 hover:bg-gray-50 focus:bg-gray-100 dark:hover:bg-gray-900 dark:focus:bg-gray-800" type="button" ><div class="flex h-full flex-1 items-center justify-center ">Follow</div>
-		<img alt="" class="rounded-xs size-3 flex-none select-none" src="https://cdn-avatars.huggingface.co/v1/production/uploads/61b8e2ba285851687028d395/lJeGmNS6KV4y34ERo0Aop.jpeg" loading="lazy">
-		<span class="truncate">Liquid AI</span></button>
-	<button class="focus:outline-hidden flex h-full items-center border-l pl-1.5 pr-1.5 text-gray-400 hover:bg-gray-50 focus:bg-gray-100 dark:hover:bg-gray-900 dark:focus:bg-gray-800" title="Show Liquid AI's followers" type="button">1.64k</button></div>
-
-		</div>
-			
-	</h1>
-		<div class="mb-3 flex flex-wrap md:mb-4">
-	<a class="mb-1 mr-1 md:mb-1.5 md:mr-1.5 rounded-lg" href="/models?pipeline_tag=text-generation"><div class="tag   tag-white "><div class="tag-ico -ml-2 tag-ico-red"><svg class="-mr-0.5" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" fill="currentColor" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 18 18"><path d="M16.2607 8.08202L14.468 6.28928C14.3063 6.12804 14.0873 6.03749 13.859 6.03749C13.6307 6.03749 13.4117 6.12804 13.25 6.28928L5.6375 13.904V16.9125H8.64607L16.2607 9.30002C16.422 9.13836 16.5125 8.91935 16.5125 8.69102C16.5125 8.4627 16.422 8.24369 16.2607 8.08202V8.08202ZM8.1953 15.825H6.725V14.3547L11.858 9.22118L13.3288 10.6915L8.1953 15.825ZM14.0982 9.92262L12.6279 8.45232L13.8606 7.21964L15.3309 8.68994L14.0982 9.92262Z"></path><path d="M6.18125 9.84373H7.26875V6.03748H8.9V4.94998H4.55V6.03748H6.18125V9.84373Z"></path><path d="M4.55 11.475H2.375V2.775H11.075V4.95H12.1625V2.775C12.1625 2.48658 12.0479 2.20997 11.844 2.00602C11.64 1.80208 11.3634 1.6875 11.075 1.6875H2.375C2.08658 1.6875 1.80997 1.80208 1.60602 2.00602C1.40207 2.20997 1.2875 2.48658 1.2875 2.775V11.475C1.2875 11.7634 1.40207 12.04 1.60602 12.244C1.80997 12.4479 2.08658 12.5625 2.375 12.5625H4.55V11.475Z"></path></svg></div>
-
-	
-
-	<span>Text Generation</span>
-	
-
-	</div></a>
-	<a class="mb-1 mr-1 md:mb-1.5 md:mr-1.5 rounded-lg" href="/models?library=transformers"><div class="tag   tag-white "><svg class="text-black inline-block text-sm" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" preserveAspectRatio="xMidYMid meet" width="1em" height="1em" viewBox="0 0 95 88"><path fill="#fff" d="M94.25 70.08a8.28 8.28 0 0 1-.43 6.46 10.57 10.57 0 0 1-3 3.6 25.18 25.18 0 0 1-5.7 3.2 65.74 65.74 0 0 1-7.56 2.65 46.67 46.67 0 0 1-11.42 1.68c-5.42.05-10.09-1.23-13.4-4.5a40.4 40.4 0 0 1-10.14.03c-3.34 3.25-7.99 4.52-13.39 4.47a46.82 46.82 0 0 1-11.43-1.68 66.37 66.37 0 0 1-7.55-2.65c-2.28-.98-4.17-2-5.68-3.2a10.5 10.5 0 0 1-3.02-3.6c-.99-2-1.18-4.3-.42-6.46a8.54 8.54 0 0 1-.33-5.63c.25-.95.66-1.83 1.18-2.61a8.67 8.67 0 0 1 2.1-8.47 8.23 8.23 0 0 1 2.82-2.07 41.75 41.75 0 1 1 81.3-.12 8.27 8.27 0 0 1 3.11 2.19 8.7 8.7 0 0 1 2.1 8.47c.52.78.93 1.66 1.18 2.61a8.61 8.61 0 0 1-.32 5.63Z"></path><path fill="#FFD21E" d="M47.21 76.5a34.75 34.75 0 1 0 0-69.5 34.75 34.75 0 0 0 0 69.5Z"></path><path fill="#FF9D0B" d="M81.96 41.75a34.75 34.75 0 1 0-69.5 0 34.75 34.75 0 0 0 69.5 0Zm-73.5 0a38.75 38.75 0 1 1 77.5 0 38.75 38.75 0 0 1-77.5 0Z"></path><path fill="#3A3B45" d="M58.5 32.3c1.28.44 1.78 3.06 3.07 2.38a5 5 0 1 0-6.76-2.07c.61 1.15 2.55-.72 3.7-.32ZM34.95 32.3c-1.28.44-1.79 3.06-3.07 2.38a5 5 0 1 1 6.76-2.07c-.61 1.15-2.56-.72-3.7-.32Z"></path><path fill="#FF323D" d="M46.96 56.29c9.83 0 13-8.76 13-13.26 0-2.34-1.57-1.6-4.09-.36-2.33 1.15-5.46 2.74-8.9 2.74-7.19 0-13-6.88-13-2.38s3.16 13.26 13 13.26Z"></path><path fill="#3A3B45" fill-rule="evenodd" d="M39.43 54a8.7 8.7 0 0 1 5.3-4.49c.4-.12.81.57 1.24 1.28.4.68.82 1.37 1.24 1.37.45 0 .9-.68 1.33-1.35.45-.7.89-1.38 1.32-1.25a8.61 8.61 0 0 1 5 4.17c3.73-2.94 5.1-7.74 5.1-10.7 0-2.34-1.57-1.6-4.09-.36l-.14.07c-2.31 1.15-5.39 2.67-8.77 2.67s-6.45-1.52-8.77-2.67c-2.6-1.29-4.23-2.1-4.23.29 0 3.05 1.46 8.06 5.47 10.97Z" clip-rule="evenodd"></path><path fill="#FF9D0B" d="M70.71 37a3.25 3.25 0 1 0 0-6.5 3.25 3.25 0 0 0 0 6.5ZM24.21 37a3.25 3.25 0 1 0 0-6.5 3.25 3.25 0 0 0 0 6.5ZM17.52 48c-1.62 0-3.06.66-4.07 1.87a5.97 5.97 0 0 0-1.33 3.76 7.1 7.1 0 0 0-1.94-.3c-1.55 0-2.95.59-3.94 1.66a5.8 5.8 0 0 0-.8 7 5.3 5.3 0 0 0-1.79 2.82c-.24.9-.48 2.8.8 4.74a5.22 5.22 0 0 0-.37 5.02c1.02 2.32 3.57 4.14 8.52 6.1 3.07 1.22 5.89 2 5.91 2.01a44.33 44.33 0 0 0 10.93 1.6c5.86 0 10.05-1.8 12.46-5.34 3.88-5.69 3.33-10.9-1.7-15.92-2.77-2.78-4.62-6.87-5-7.77-.78-2.66-2.84-5.62-6.25-5.62a5.7 5.7 0 0 0-4.6 2.46c-1-1.26-1.98-2.25-2.86-2.82A7.4 7.4 0 0 0 17.52 48Zm0 4c.51 0 1.14.22 1.82.65 2.14 1.36 6.25 8.43 7.76 11.18.5.92 1.37 1.31 2.14 1.31 1.55 0 2.75-1.53.15-3.48-3.92-2.93-2.55-7.72-.68-8.01.08-.02.17-.02.24-.02 1.7 0 2.45 2.93 2.45 2.93s2.2 5.52 5.98 9.3c3.77 3.77 3.97 6.8 1.22 10.83-1.88 2.75-5.47 3.58-9.16 3.58-3.81 0-7.73-.9-9.92-1.46-.11-.03-13.45-3.8-11.76-7 .28-.54.75-.76 1.34-.76 2.38 0 6.7 3.54 8.57 3.54.41 0 .7-.17.83-.6.79-2.85-12.06-4.05-10.98-8.17.2-.73.71-1.02 1.44-1.02 3.14 0 10.2 5.53 11.68 5.53.11 0 .2-.03.24-.1.74-1.2.33-2.04-4.9-5.2-5.21-3.16-8.88-5.06-6.8-7.33.24-.26.58-.38 1-.38 3.17 0 10.66 6.82 10.66 6.82s2.02 2.1 3.25 2.1c.28 0 .52-.1.68-.38.86-1.46-8.06-8.22-8.56-11.01-.34-1.9.24-2.85 1.31-2.85Z"></path><path fill="#FFD21E" d="M38.6 76.69c2.75-4.04 2.55-7.07-1.22-10.84-3.78-3.77-5.98-9.3-5.98-9.3s-.82-3.2-2.69-2.9c-1.87.3-3.24 5.08.68 8.01 3.91 2.93-.78 4.92-2.29 2.17-1.5-2.75-5.62-9.82-7.76-11.18-2.13-1.35-3.63-.6-3.13 2.2.5 2.79 9.43 9.55 8.56 11-.87 1.47-3.93-1.71-3.93-1.71s-9.57-8.71-11.66-6.44c-2.08 2.27 1.59 4.17 6.8 7.33 5.23 3.16 5.64 4 4.9 5.2-.75 1.2-12.28-8.53-13.36-4.4-1.08 4.11 11.77 5.3 10.98 8.15-.8 2.85-9.06-5.38-10.74-2.18-1.7 3.21 11.65 6.98 11.76 7.01 4.3 1.12 15.25 3.49 19.08-2.12Z"></path><path fill="#FF9D0B" d="M77.4 48c1.62 0 3.07.66 4.07 1.87a5.97 5.97 0 0 1 1.33 3.76 7.1 7.1 0 0 1 1.95-.3c1.55 0 2.95.59 3.94 1.66a5.8 5.8 0 0 1 .8 7 5.3 5.3 0 0 1 1.78 2.82c.24.9.48 2.8-.8 4.74a5.22 5.22 0 0 1 .37 5.02c-1.02 2.32-3.57 4.14-8.51 6.1-3.08 1.22-5.9 2-5.92 2.01a44.33 44.33 0 0 1-10.93 1.6c-5.86 0-10.05-1.8-12.46-5.34-3.88-5.69-3.33-10.9 1.7-15.92 2.78-2.78 4.63-6.87 5.01-7.77.78-2.66 2.83-5.62 6.24-5.62a5.7 5.7 0 0 1 4.6 2.46c1-1.26 1.98-2.25 2.87-2.82A7.4 7.4 0 0 1 77.4 48Zm0 4c-.51 0-1.13.22-1.82.65-2.13 1.36-6.25 8.43-7.76 11.18a2.43 2.43 0 0 1-2.14 1.31c-1.54 0-2.75-1.53-.14-3.48 3.91-2.93 2.54-7.72.67-8.01a1.54 1.54 0 0 0-.24-.02c-1.7 0-2.45 2.93-2.45 2.93s-2.2 5.52-5.97 9.3c-3.78 3.77-3.98 6.8-1.22 10.83 1.87 2.75 5.47 3.58 9.15 3.58 3.82 0 7.73-.9 9.93-1.46.1-.03 13.45-3.8 11.76-7-.29-.54-.75-.76-1.34-.76-2.38 0-6.71 3.54-8.57 3.54-.42 0-.71-.17-.83-.6-.8-2.85 12.05-4.05 10.97-8.17-.19-.73-.7-1.02-1.44-1.02-3.14 0-10.2 5.53-11.68 5.53-.1 0-.19-.03-.23-.1-.74-1.2-.34-2.04 4.88-5.2 5.23-3.16 8.9-5.06 6.8-7.33-.23-.26-.57-.38-.98-.38-3.18 0-10.67 6.82-10.67 6.82s-2.02 2.1-3.24 2.1a.74.74 0 0 1-.68-.38c-.87-1.46 8.05-8.22 8.55-11.01.34-1.9-.24-2.85-1.31-2.85Z"></path><path fill="#FFD21E" d="M56.33 76.69c-2.75-4.04-2.56-7.07 1.22-10.84 3.77-3.77 5.97-9.3 5.97-9.3s.82-3.2 2.7-2.9c1.86.3 3.23 5.08-.68 8.01-3.92 2.93.78 4.92 2.28 2.17 1.51-2.75 5.63-9.82 7.76-11.18 2.13-1.35 3.64-.6 3.13 2.2-.5 2.79-9.42 9.55-8.55 11 .86 1.47 3.92-1.71 3.92-1.71s9.58-8.71 11.66-6.44c2.08 2.27-1.58 4.17-6.8 7.33-5.23 3.16-5.63 4-4.9 5.2.75 1.2 12.28-8.53 13.36-4.4 1.08 4.11-11.76 5.3-10.97 8.15.8 2.85 9.05-5.38 10.74-2.18 1.69 3.21-11.65 6.98-11.76 7.01-4.31 1.12-15.26 3.49-19.08-2.12Z"></path></svg>
-
-	
-
-	<span>Transformers</span>
-	
-
-	</div></a>
-	<a class="mb-1 mr-1 md:mb-1.5 md:mr-1.5 rounded-lg" href="/models?library=safetensors"><div class="tag   tag-white "><svg class="text-black inline-block text-sm" viewBox="0 0 57 44" fill="none" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet"><path d="M36.816 20.1474L54.9918 27.4409C55.5142 27.6506 55.9623 28.0112 56.2788 28.4766C56.5954 28.9421 56.7661 29.4913 56.7691 30.0542C56.7722 30.6171 56.6074 31.1682 56.2959 31.637C55.9844 32.1059 55.5402 32.4713 55.0201 32.6866L29.953 43.0646C29.2593 43.3518 28.4799 43.3518 27.7862 43.0646L2.71624 32.6894C2.19613 32.4741 1.75197 32.1087 1.44044 31.6398C1.12892 31.171 0.964165 30.62 0.967204 30.057C0.970244 29.4941 1.14094 28.9449 1.45751 28.4794C1.77408 28.014 2.22216 27.6534 2.74456 27.4437L21.2404 20.0227C22.2997 19.5979 25.6477 20.8441 28.8682 20.8555C32.3096 20.8668 35.6292 19.6715 36.816 20.1474ZM11.3042 30.1119L28.8682 37.3828L46.435 30.1119L28.8682 23.0619L11.3042 30.1119ZM29.9247 0.388251L54.9918 10.4462C55.5142 10.6559 55.9623 11.0165 56.2788 11.482C56.5954 11.9474 56.7661 12.4967 56.7691 13.0596C56.7722 13.6225 56.6074 14.1735 56.2959 14.6424C55.9844 15.1112 55.5402 15.4766 55.0201 15.6919L29.953 26.07C29.2593 26.3572 28.4799 26.3572 27.7862 26.07L2.71624 15.6948C2.19613 15.4795 1.75197 15.1141 1.44044 14.6452C1.12892 14.1763 0.964165 13.6253 0.967204 13.0624C0.970244 12.4995 1.14094 11.9503 1.45751 11.4848C1.77408 11.0193 2.22216 10.6588 2.74456 10.4491L27.8117 0.388251C28.4896 0.1157 29.2467 0.1157 29.9247 0.388251ZM11.3042 13.1172L28.8682 20.3881L46.435 13.1172L28.8682 6.06729L11.3042 13.1172Z" fill="currentColor"></path></svg>
-
-	
-
-	<span>Safetensors</span>
-	
-
-	</div></a>
-			
-	<button class="mb-1 mr-1 md:mb-1.5 md:mr-1.5 rounded-lg" type="button"><div class="tag   tag-white ">
-		<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" role="img" class="text-green-600/80" preserveAspectRatio="xMidYMid meet" width="1em" height="1em" viewBox="0 0 10 10"><path fill-rule="evenodd" clip-rule="evenodd" d="M0.625 5C0.625 6.16032 1.08594 7.27312 1.90641 8.09359C2.72688 8.91406 3.83968 9.375 5 9.375C6.16032 9.375 7.27312 8.91406 8.09359 8.09359C8.91406 7.27312 9.375 6.16032 9.375 5C9.375 3.83968 8.91406 2.72688 8.09359 1.90641C7.27312 1.08594 6.16032 0.625 5 0.625C3.83968 0.625 2.72688 1.08594 1.90641 1.90641C1.08594 2.72688 0.625 3.83968 0.625 5ZM7.64365 7.48027C7.61734 7.50832 7.59054 7.53598 7.56326 7.56326C7.13828 7.98824 6.61864 8.2968 6.0539 8.46842C6.29802 8.11949 6.49498 7.64804 6.63475 7.09483C7.00845 7.18834 7.35014 7.3187 7.64365 7.48027ZM8.10076 6.87776C8.37677 6.42196 8.55005 5.90894 8.60556 5.37499H6.86808C6.85542 5.71597 6.82551 6.04557 6.77971 6.35841C7.25309 6.47355 7.68808 6.6414 8.062 6.85549C8.07497 6.86283 8.08789 6.87025 8.10076 6.87776ZM6.03795 6.22536C6.07708 5.95737 6.1044 5.67232 6.11705 5.37499H3.88295C3.89666 5.69742 3.92764 6.00542 3.9722 6.29287C4.37075 6.21726 4.79213 6.17749 5.224 6.17749C5.50054 6.17749 5.77294 6.19376 6.03795 6.22536ZM4.1261 7.02673C4.34894 7.84835 4.68681 8.375 5 8.375C5.32122 8.375 5.66839 7.82101 5.8908 6.963C5.67389 6.93928 5.45082 6.92699 5.224 6.92699C4.84316 6.92699 4.47332 6.96176 4.1261 7.02673ZM3.39783 7.21853C3.53498 7.71842 3.72038 8.14579 3.9461 8.46842C3.42141 8.30898 2.93566 8.03132 2.52857 7.65192C2.77253 7.48017 3.06711 7.33382 3.39783 7.21853ZM3.23916 6.48077C3.18263 6.13193 3.14625 5.76074 3.13192 5.37499H1.39444C1.4585 5.99112 1.67936 6.57938 2.03393 7.08403C2.3706 6.83531 2.78055 6.63162 3.23916 6.48077ZM1.39444 4.62499H3.13192C3.14615 4.24204 3.18211 3.87344 3.23794 3.52681C2.77814 3.37545 2.36731 3.17096 2.03024 2.92123C1.67783 3.42469 1.45828 4.011 1.39444 4.62499ZM2.5237 2.35262C2.76812 2.52552 3.06373 2.67281 3.39584 2.78875C3.53318 2.28573 3.71928 1.85578 3.9461 1.53158C3.41932 1.69166 2.93178 1.97089 2.5237 2.35262ZM3.97101 3.71489C3.92709 4.00012 3.89654 4.30547 3.88295 4.62499H6.11705C6.10453 4.33057 6.07761 4.04818 6.03909 3.78248C5.77372 3.81417 5.50093 3.83049 5.224 3.83049C4.79169 3.83049 4.3699 3.79065 3.97101 3.71489ZM5.8928 3.04476C5.67527 3.06863 5.45151 3.08099 5.224 3.08099C4.84241 3.08099 4.47186 3.04609 4.12405 2.98086C4.34686 2.1549 4.68584 1.625 5 1.625C5.32218 1.625 5.67048 2.18233 5.8928 3.04476ZM6.78083 3.6493C6.826 3.95984 6.85552 4.28682 6.86808 4.62499H8.60556C8.55029 4.09337 8.37827 3.58251 8.10436 3.1282C8.0903 3.1364 8.07618 3.14449 8.062 3.15249C7.68838 3.36641 7.25378 3.53417 6.78083 3.6493ZM7.64858 2.52499C7.35446 2.68754 7.0117 2.81868 6.63664 2.91268C6.49676 2.35623 6.29913 1.88209 6.0539 1.53158C6.61864 1.7032 7.13828 2.01176 7.56326 2.43674C7.59224 2.46572 7.62068 2.49514 7.64858 2.52499Z" fill="currentColor"></path></svg>
-
-	
-
-	<span>8 languages</span>
-	
-
-	</div></button>
-	<a class="mb-1 mr-1 md:mb-1.5 md:mr-1.5 rounded-lg" href="/models?other=lfm2"><div class="tag   tag-white ">
-
-	
-
-	<span>lfm2</span>
-	
-
-	</div></a>
-	<a class="mb-1 mr-1 md:mb-1.5 md:mr-1.5 rounded-lg" href="/models?other=liquid"><div class="tag   tag-white ">
+1. Definitions.
 
-	
+"License" shall mean the terms and conditions for use, reproduction, and distribution as defined by this document.
 
-	<span>liquid</span>
-	
+"Licensor" shall mean Liquid AI, Inc.
 
-	</div></a>
-	<a class="mb-1 mr-1 md:mb-1.5 md:mr-1.5 rounded-lg" href="/models?other=edge"><div class="tag   tag-white ">
+"Legal Entity" shall mean the union of the acting entity and all other entities that control, are controlled by, or are under common control with that entity. For the purposes of this definition, "control" means (i) the power, direct or indirect, to cause the direction or management of such entity, whether by contract or otherwise, or (ii) ownership of fifty percent (50%) or more of the outstanding shares, or (iii) beneficial ownership of such entity.
 
-	
+"You" (or "Your") shall mean an individual or Legal Entity exercising permissions granted by this License.
 
-	<span>edge</span>
-	
+"Source" form shall mean the preferred form for making modifications, including but not limited to software source code, documentation source, and configuration files.
 
-	</div></a>
-	<a class="mb-1 mr-1 md:mb-1.5 md:mr-1.5 rounded-lg" href="/models?other=conversational"><div class="tag   tag-white ">
+"Object" form shall mean any form resulting from mechanical transformation or translation of a Source form, including but not limited to compiled object code, generated documentation, and conversions to other media types.
 
-	
+"Work" shall mean the work of authorship, whether in Source or Object form, made available under the License, as indicated by a copyright notice that is included in or attached to the work.
 
-	<span>conversational</span>
-	
+"Derivative Works" shall mean any work, whether in Source or Object form, that is based on (or derived from) the Work and for which the editorial revisions, annotations, elaborations, or other modifications represent, as a whole, an original work of authorship. For the purposes of this License, Derivative Works shall not include works that remain separable from, or merely link (or bind by name) to the interfaces of, the Work and Derivative Works thereof.
 
-	</div></a>
+"Contribution" shall mean any work of authorship, including the original version of the Work and any modifications or additions to that Work or Derivative Works thereof, that is intentionally submitted to Licensor for inclusion in the Work by the copyright owner or by an individual or Legal Entity authorized to submit on behalf of the copyright owner. For the purposes of this definition, "submitted" means any form of electronic, verbal, or written communication sent to the Licensor or its representatives, including but not limited to communication on electronic mailing lists, source code control systems, and issue tracking systems that are managed by, or on behalf of, the Licensor for the purpose of discussing and improving the Work, but excluding communication that is conspicuously marked or otherwise designated in writing by the copyright owner as "Not a Contribution."
 
-	<div class="relative inline-block ">
-	<button class="group mr-1 mb-1 md:mr-1.5 md:mb-1.5  rounded-full rounded-br-none " type="button">
-		<div slot="button"><div class="tag rounded-full  tag-white relative rounded-br-none pr-2.5">
-		<svg class="-mr-1 text-gray-400" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" viewBox="0 0 12 12" preserveAspectRatio="xMidYMid meet" fill="none"><path fill="currentColor" fill-rule="evenodd" d="M8.007 1.814a1.176 1.176 0 0 0-.732-.266H3.088c-.64 0-1.153.512-1.153 1.152v6.803c0 .64.513 1.152 1.153 1.152h5.54c.632 0 1.144-.511 1.144-1.152V3.816c0-.338-.137-.658-.412-.887L8.007 1.814Zm-1.875 1.81c0 .695.55 1.253 1.244 1.253h.983a.567.567 0 0 1 .553.585v4.041c0 .165-.119.302-.283.302h-5.55c-.156 0-.275-.137-.275-.302V2.7a.284.284 0 0 1 .284-.301h2.468a.574.574 0 0 1 .434.19.567.567 0 0 1 .142.395v.64Z" clip-rule="evenodd" fill-opacity=".8"></path><path fill="currentColor" fill-opacity=".2" fill-rule="evenodd" d="M6.132 3.624c0 .695.55 1.253 1.244 1.253h.97a.567.567 0 0 1 .566.585v4.041c0 .165-.119.302-.283.302h-5.55c-.156 0-.275-.137-.275-.302V2.7a.284.284 0 0 1 .284-.301h2.468a.567.567 0 0 1 .576.585v.64Z" clip-rule="evenodd"></path></svg>
+"Contributor" shall mean Licensor and any individual or Legal Entity on behalf of whom a Contribution has been received by Licensor and subsequently incorporated within the Work.
 
-	
+"Commercial Use" shall mean any use of the Work for direct or indirect commercial advantage or monetary compensation.
 
-	<span class="-mr-2 text-gray-400">arxiv:</span>
-		<span>2511.23404</span>
-	
+"Qualified Non-Profit Organization" shall mean a Legal Entity that is organized and operated exclusively for religious, charitable, scientific, testing for public safety, literary, or educational purposes, and which is exempt from federal income tax under Section 501(c)(3) of the United States Internal Revenue Code of 1986, as amended, or any equivalent non-profit or charitable organization in a foreign jurisdiction.
 
-	<div class="border-br-gray-200 absolute bottom-0.5 right-0.5 h-1 w-1 border-[3px] border-l-transparent border-t-transparent border-b-gray-200 border-r-gray-200 group-hover:border-b-gray-400 group-hover:border-r-gray-400 dark:border-b-gray-700 dark:border-r-gray-700 group-hover:dark:border-b-gray-400 group-hover:dark:border-r-gray-400"></div></div></div>
-		</button>
-	
-	
-	</div><div class="relative inline-block ">
-	<button class="group mr-1 mb-1 md:mr-1.5 md:mb-1.5  rounded-full rounded-br-none " type="button">
-		<div slot="button"><div class="tag rounded-full  tag-white relative rounded-br-none pr-2.5">
-		<svg class="text-xs text-gray-900" width="1em" height="1em" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1.46009 5.0945V6.88125C1.46009 7.25201 1.75937 7.55129 2.13012 7.55129C2.50087 7.55129 2.80016 7.25201 2.80016 6.88125V5.0945C2.80016 4.72375 2.50087 4.42446 2.13012 4.42446C1.75937 4.42446 1.46009 4.72375 1.46009 5.0945ZM4.14022 5.0945V6.88125C4.14022 7.25201 4.4395 7.55129 4.81026 7.55129C5.18101 7.55129 5.48029 7.25201 5.48029 6.88125V5.0945C5.48029 4.72375 5.18101 4.42446 4.81026 4.42446C4.4395 4.42446 4.14022 4.72375 4.14022 5.0945ZM1.23674 9.78473H8.38377C8.75452 9.78473 9.0538 9.48545 9.0538 9.1147C9.0538 8.74395 8.75452 8.44466 8.38377 8.44466H1.23674C0.865993 8.44466 0.566711 8.74395 0.566711 9.1147C0.566711 9.48545 0.865993 9.78473 1.23674 9.78473ZM6.82036 5.0945V6.88125C6.82036 7.25201 7.11964 7.55129 7.49039 7.55129C7.86114 7.55129 8.16042 7.25201 8.16042 6.88125V5.0945C8.16042 4.72375 7.86114 4.42446 7.49039 4.42446C7.11964 4.42446 6.82036 4.72375 6.82036 5.0945ZM4.39484 0.623142L0.865993 2.48137C0.682851 2.57517 0.566711 2.76725 0.566711 2.97273C0.566711 3.28094 0.816857 3.53109 1.12507 3.53109H8.49991C8.80365 3.53109 9.0538 3.28094 9.0538 2.97273C9.0538 2.76725 8.93766 2.57517 8.75452 2.48137L5.22568 0.623142C4.9666 0.484669 4.65391 0.484669 4.39484 0.623142V0.623142Z" fill="currentColor"></path></svg>
+"Non-Commercial or Research Purposes" shall mean purposes that do not involve any use of the Work or a Derivative Work for Commercial Use.
 
-	<span class="-mr-1 text-gray-400">License:</span>
+"Threshold" shall mean annual revenue of 10 million United States dollars ($10,000,000) or more.
 
-	<span>lfm1.0</span>
-	
+2. Grant of Copyright License. Subject to the terms and conditions of this License, including the Commercial Use limitation set forth in Section 5, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable copyright license to reproduce, prepare Derivative Works of, publicly display, publicly perform, sublicense, and distribute the Work and such Derivative Works in Source or Object form.
 
-	<div class="border-br-gray-200 absolute bottom-0.5 right-0.5 h-1 w-1 border-[3px] border-l-transparent border-t-transparent border-b-gray-200 border-r-gray-200 group-hover:border-b-gray-400 group-hover:border-r-gray-400 dark:border-b-gray-700 dark:border-r-gray-700 group-hover:dark:border-b-gray-400 group-hover:dark:border-r-gray-400"></div></div></div>
-		</button>
-	
-	
-	</div></div>
+3. Grant of Patent License. Subject to the terms and conditions of this License, including the Commercial Use limitation set forth in Section 5, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable (except as stated in this section) patent license to make, have made, use, offer to sell, sell, import, and otherwise transfer the Work, where such license applies only to those patent claims licensable by such Contributor that are necessarily infringed by their Contribution(s) alone or by combination of their Contribution(s) with the Work to which such Contribution(s) was submitted. If You institute patent litigation against any entity (including a cross-claim or counterclaim in a lawsuit) alleging that the Work or a Contribution incorporated within the Work constitutes direct or contributory patent infringement, then any patent licenses granted to You under this License for that Work shall terminate as of the date such litigation is filed.
 
-		<div class="flex flex-col-reverse lg:flex-row lg:items-center lg:justify-between"><div class="-mb-px flex h-12 items-center overflow-x-auto overflow-y-hidden ">
-	<a class="tab-alternate" href="/LiquidAI/LFM2-1.2B"><svg class="mr-1.5 text-gray-400 flex-none" style="" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 24 24"><path class="uim-quaternary" d="M20.23 7.24L12 12L3.77 7.24a1.98 1.98 0 0 1 .7-.71L11 2.76c.62-.35 1.38-.35 2 0l6.53 3.77c.29.173.531.418.7.71z" opacity=".25" fill="currentColor"></path><path class="uim-tertiary" d="M12 12v9.5a2.09 2.09 0 0 1-.91-.21L4.5 17.48a2.003 2.003 0 0 1-1-1.73v-7.5a2.06 2.06 0 0 1 .27-1.01L12 12z" opacity=".5" fill="currentColor"></path><path class="uim-primary" d="M20.5 8.25v7.5a2.003 2.003 0 0 1-1 1.73l-6.62 3.82c-.275.13-.576.198-.88.2V12l8.23-4.76c.175.308.268.656.27 1.01z" fill="currentColor"></path></svg>
-	Model card
-	
+4. Redistribution. You may reproduce and distribute copies of the Work or Derivative Works thereof in any medium, with or without modifications, and in Source or Object form, provided that You meet the following conditions:
 
-	
-		</a><a class="tab-alternate active" href="/LiquidAI/LFM2-1.2B/tree/main"><svg class="mr-1.5 text-gray-400 flex-none" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 24 24"><path class="uim-tertiary" d="M21 19h-8a1 1 0 0 1 0-2h8a1 1 0 0 1 0 2zm0-4h-8a1 1 0 0 1 0-2h8a1 1 0 0 1 0 2zm0-8h-8a1 1 0 0 1 0-2h8a1 1 0 0 1 0 2zm0 4h-8a1 1 0 0 1 0-2h8a1 1 0 0 1 0 2z" opacity=".5" fill="currentColor"></path><path class="uim-primary" d="M9 19a1 1 0 0 1-1-1V6a1 1 0 0 1 2 0v12a1 1 0 0 1-1 1zm-6-4.333a1 1 0 0 1-.64-1.769L3.438 12l-1.078-.898a1 1 0 0 1 1.28-1.538l2 1.667a1 1 0 0 1 0 1.538l-2 1.667a.999.999 0 0 1-.64.231z" fill="currentColor"></path></svg>
-	<span class="xl:hidden">Files</span>
-		<span class="hidden xl:inline">Files and versions</span>
-	
-
-	
-
-<span class="inline-block "><span class="contents"><div slot="anchor" class="shadow-purple-500/10 ml-2 inline-flex -translate-y-px items-center gap-0.5 rounded-md border bg-white px-1 py-0.5 align-middle text-xs font-semibold leading-none text-gray-800 shadow-sm dark:border-gray-700 dark:bg-gradient-to-b dark:from-gray-925 dark:to-gray-925 dark:text-gray-300"><svg class="size-3 " xmlns="http://www.w3.org/2000/svg" aria-hidden="true" fill="currentColor" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 12 12"><path fill-rule="evenodd" clip-rule="evenodd" d="M6.14 3.64 5.1 4.92 2.98 2.28h2.06l1.1 1.36Zm0 4.72-1.1 1.36H2.98l2.13-2.64 1.03 1.28Zm4.9 1.36L8.03 6l3-3.72H8.96L5.97 6l3 3.72h2.06Z" fill="#7875FF"></path><path d="M4.24 6 2.6 8.03.97 6 2.6 3.97 4.24 6Z" fill="#FF7F41" opacity="1"></path></svg>
-						<span>xet</span>
-					</div></span>
-	</span>
-		</a><a class="tab-alternate" href="/LiquidAI/LFM2-1.2B/discussions"><svg class="mr-1.5 text-gray-400 flex-none" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32"><path d="M20.6081 3C21.7684 3 22.8053 3.49196 23.5284 4.38415C23.9756 4.93678 24.4428 5.82749 24.4808 7.16133C24.9674 7.01707 25.4353 6.93643 25.8725 6.93643C26.9833 6.93643 27.9865 7.37587 28.696 8.17411C29.6075 9.19872 30.0124 10.4579 29.8361 11.7177C29.7523 12.3177 29.5581 12.8555 29.2678 13.3534C29.8798 13.8646 30.3306 14.5763 30.5485 15.4322C30.719 16.1032 30.8939 17.5006 29.9808 18.9403C30.0389 19.0342 30.0934 19.1319 30.1442 19.2318C30.6932 20.3074 30.7283 21.5229 30.2439 22.6548C29.5093 24.3704 27.6841 25.7219 24.1397 27.1727C21.9347 28.0753 19.9174 28.6523 19.8994 28.6575C16.9842 29.4379 14.3477 29.8345 12.0653 29.8345C7.87017 29.8345 4.8668 28.508 3.13831 25.8921C0.356375 21.6797 0.754104 17.8269 4.35369 14.1131C6.34591 12.058 7.67023 9.02782 7.94613 8.36275C8.50224 6.39343 9.97271 4.20438 12.4172 4.20438H12.4179C12.6236 4.20438 12.8314 4.2214 13.0364 4.25468C14.107 4.42854 15.0428 5.06476 15.7115 6.02205C16.4331 5.09583 17.134 4.359 17.7682 3.94323C18.7242 3.31737 19.6794 3 20.6081 3ZM20.6081 5.95917C20.2427 5.95917 19.7963 6.1197 19.3039 6.44225C17.7754 7.44319 14.8258 12.6772 13.7458 14.7131C13.3839 15.3952 12.7655 15.6837 12.2086 15.6837C11.1036 15.6837 10.2408 14.5497 12.1076 13.1085C14.9146 10.9402 13.9299 7.39584 12.5898 7.1776C12.5311 7.16799 12.4731 7.16355 12.4172 7.16355C11.1989 7.16355 10.6615 9.33114 10.6615 9.33114C10.6615 9.33114 9.0863 13.4148 6.38031 16.206C3.67434 18.998 3.5346 21.2388 5.50675 24.2246C6.85185 26.2606 9.42666 26.8753 12.0653 26.8753C14.8021 26.8753 17.6077 26.2139 19.1799 25.793C19.2574 25.7723 28.8193 22.984 27.6081 20.6107C27.4046 20.212 27.0693 20.0522 26.6471 20.0522C24.9416 20.0522 21.8393 22.6726 20.5057 22.6726C20.2076 22.6726 19.9976 22.5416 19.9116 22.222C19.3433 20.1173 28.552 19.2325 27.7758 16.1839C27.639 15.6445 27.2677 15.4256 26.746 15.4263C24.4923 15.4263 19.4358 19.5181 18.3759 19.5181C18.2949 19.5181 18.2368 19.4937 18.2053 19.4419C17.6743 18.557 17.9653 17.9394 21.7082 15.6009C25.4511 13.2617 28.0783 11.8545 26.5841 10.1752C26.4121 9.98141 26.1684 9.8956 25.8725 9.8956C23.6001 9.89634 18.2311 14.9403 18.2311 14.9403C18.2311 14.9403 16.7821 16.496 15.9057 16.496C15.7043 16.496 15.533 16.4139 15.4169 16.2112C14.7956 15.1296 21.1879 10.1286 21.5484 8.06535C21.7928 6.66715 21.3771 5.95917 20.6081 5.95917Z" fill="#FF9D00"></path><path d="M5.50686 24.2246C3.53472 21.2387 3.67446 18.9979 6.38043 16.206C9.08641 13.4147 10.6615 9.33111 10.6615 9.33111C10.6615 9.33111 11.2499 6.95933 12.59 7.17757C13.93 7.39581 14.9139 10.9401 12.1069 13.1084C9.29997 15.276 12.6659 16.7489 13.7459 14.713C14.8258 12.6772 17.7747 7.44316 19.304 6.44221C20.8326 5.44128 21.9089 6.00204 21.5484 8.06532C21.188 10.1286 14.795 15.1295 15.4171 16.2118C16.0391 17.2934 18.2312 14.9402 18.2312 14.9402C18.2312 14.9402 25.0907 8.49588 26.5842 10.1752C28.0776 11.8545 25.4512 13.2616 21.7082 15.6008C17.9646 17.9393 17.6744 18.557 18.2054 19.4418C18.7372 20.3266 26.9998 13.1351 27.7759 16.1838C28.5513 19.2324 19.3434 20.1173 19.9117 22.2219C20.48 24.3274 26.3979 18.2382 27.6082 20.6107C28.8193 22.9839 19.2574 25.7722 19.18 25.7929C16.0914 26.62 8.24723 28.3726 5.50686 24.2246Z" fill="#FFD21E"></path></svg>
-	Community
-	<div class="ml-1.5 flex h-4 min-w-[1rem] items-center justify-center rounded px-1 text-xs leading-none shadow-sm bg-black text-white dark:bg-gray-800 dark:text-gray-200">20</div>
-
-	
-		</a></div>
-	
-			
-
-
-<div class="relative mb-1.5 flex flex-wrap gap-1.5 sm:flex-nowrap lg:mb-0"><div class="order-last sm:order-first"><div class="relative ">
-	<button class="btn px-1.5 py-1.5 " type="button">
-		
-			<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" role="img" class="p-0.5" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32"><circle cx="16" cy="7" r="3" fill="currentColor"></circle><circle cx="16" cy="16" r="3" fill="currentColor"></circle><circle cx="16" cy="25" r="3" fill="currentColor"></circle></svg>
-		
-		</button>
-	
-	
-	</div></div>
-
-<dialog class="shadow-alternate z-40 mx-4 my-auto h-fit select-text overflow-hidden rounded-xl bg-white max-sm:max-w-[calc(100dvw-2rem)] sm:mx-auto lg:mt-26 md:portrait:mt-30 xl:mt-30 2xl:mt-32 w-full lg:w-10/12 xl:w-8/12 2xl:w-7/12 max-w-[calc(100%-4rem)] lg:max-w-4xl ">
-	<div tabindex="-1" class="outline-none focus:ring-0 focus-visible:ring-0"></div></dialog>
-
-
-
-
-
-
-
-
-
-
-
-
-	<div class="flex-none w-full sm:w-auto"><div class="relative ">
-	<button class="text-sm btn btn w-full cursor-pointer text-sm" type="button">
-		<svg class="mr-1.5 " xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" fill="currentColor" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32"><rect x="6.34" y="19" width="11.31" height="2" transform="translate(-10.63 14.34) rotate(-45)"></rect><path d="M17,30a1,1,0,0,1-.37-.07,1,1,0,0,1-.62-.79l-1-7,2-.28.75,5.27L21,24.52V17a1,1,0,0,1,.29-.71l4.07-4.07A8.94,8.94,0,0,0,28,5.86V4H26.14a8.94,8.94,0,0,0-6.36,2.64l-4.07,4.07A1,1,0,0,1,15,11H7.48L4.87,14.26l5.27.75-.28,2-7-1a1,1,0,0,1-.79-.62,1,1,0,0,1,.15-1l4-5A1,1,0,0,1,7,9h7.59l3.77-3.78A10.92,10.92,0,0,1,26.14,2H28a2,2,0,0,1,2,2V5.86a10.92,10.92,0,0,1-3.22,7.78L23,17.41V25a1,1,0,0,1-.38.78l-5,4A1,1,0,0,1,17,30Z"></path></svg>
-			Deploy
-		<svg class="-mr-1 text-gray-500 " xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 24 24"><path d="M16.293 9.293L12 13.586L7.707 9.293l-1.414 1.414L12 16.414l5.707-5.707z" fill="currentColor"></path></svg></button>
-	
-	
-	</div>
-
-		<dialog class="shadow-alternate z-40 mx-4 my-auto h-fit select-text overflow-hidden rounded-xl bg-white max-sm:max-w-[calc(100dvw-2rem)] sm:mx-auto lg:mt-26 md:portrait:mt-30 xl:mt-30 2xl:mt-32 w-full lg:w-10/12 xl:w-8/12 2xl:w-7/12 max-w-[calc(100%-4rem)] lg:max-w-4xl ">
-	<div tabindex="-1" class="outline-none focus:ring-0 focus-visible:ring-0"></div></dialog>
-
-		<dialog class="shadow-alternate z-40 mx-4 my-auto h-fit select-text overflow-hidden rounded-xl bg-white max-sm:max-w-[calc(100dvw-2rem)] sm:mx-auto lg:mt-26 md:portrait:mt-30 xl:mt-30 2xl:mt-32 w-full lg:w-10/12 xl:w-8/12 2xl:w-7/12 max-w-[calc(100%-4rem)] lg:max-w-4xl ">
-	<div tabindex="-1" class="outline-none focus:ring-0 focus-visible:ring-0"></div></dialog>
-
-		
-		<dialog class="shadow-alternate z-40 mx-4 my-auto h-fit select-text overflow-hidden rounded-xl bg-white max-sm:max-w-[calc(100dvw-2rem)] sm:mx-auto lg:mt-26 md:portrait:mt-30 xl:mt-30 2xl:mt-32 w-full lg:w-10/12 xl:w-8/12 2xl:w-7/12 max-w-[calc(100%-4rem)] lg:max-w-4xl ">
-	<div tabindex="-1" class="outline-none focus:ring-0 focus-visible:ring-0"></div></dialog>
-
-		<dialog class="shadow-alternate z-40 mx-4 my-auto h-fit select-text overflow-hidden rounded-xl bg-white max-sm:max-w-[calc(100dvw-2rem)] sm:mx-auto lg:mt-26 md:portrait:mt-30 xl:mt-30 2xl:mt-32 w-full lg:w-7/12 max-w-[calc(100%-4rem)] md:max-w-2xl flex overflow-hidden">
-	<div tabindex="-1" class="outline-none focus:ring-0 focus-visible:ring-0"></div></dialog>
-
-		<dialog class="shadow-alternate z-40 mx-4 my-auto h-fit select-text overflow-hidden rounded-xl bg-white max-sm:max-w-[calc(100dvw-2rem)] sm:mx-auto lg:mt-26 md:portrait:mt-30 xl:mt-30 2xl:mt-32 w-full lg:w-10/12 xl:w-8/12 2xl:w-7/12 max-w-[calc(100%-4rem)] lg:max-w-4xl ">
-	<div tabindex="-1" class="outline-none focus:ring-0 focus-visible:ring-0"></div></dialog></div>
-		<div class="relative flex-auto sm:flex-none">
-	<button class="from-gray-800! to-black! text-white! gap-1! border-gray-800! dark:border-gray-900!  btn w-full cursor-pointer text-sm" type="button">
-		<svg class="mr-1.5 mr-0.5! " xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32"><path fill="currentColor" d="M28 4H4a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h8v4H8v2h16v-2h-4v-4h8a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2ZM18 28h-4v-4h4Zm10-6H4V6h24Z"></path></svg>
-			Use this model
-		<svg class="-mr-1 text-gray-500 " xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 24 24"><path d="M16.293 9.293L12 13.586L7.707 9.293l-1.414 1.414L12 16.414l5.707-5.707z" fill="currentColor"></path></svg></button>
-	
-	
-	</div>
-
-
-
-</div>
-	</div></div></header>
-<dialog class="shadow-alternate z-40 mx-4 my-auto h-fit select-text overflow-hidden rounded-xl bg-white max-sm:max-w-[calc(100dvw-2rem)] sm:mx-auto lg:mt-26 md:portrait:mt-30 xl:mt-30 2xl:mt-32 w-full sm:w-96 max-w-[calc(100%-4rem)] text-base ">
-	<div tabindex="-1" class="outline-none focus:ring-0 focus-visible:ring-0"></div></dialog></div>
-	
-<div class="container relative flex flex-col md:grid md:space-y-0 w-full md:grid-cols-12  space-y-4 md:gap-6 mb-16"><section class="pt-8 border-gray-100 col-span-full"><div class="SVELTE_HYDRATER contents" data-target="ViewerHeader" data-props="{&quot;context&quot;:{&quot;repo&quot;:{&quot;name&quot;:&quot;LiquidAI/LFM2-1.2B&quot;,&quot;type&quot;:&quot;model&quot;},&quot;rev&quot;:&quot;main&quot;,&quot;path&quot;:&quot;LICENSE&quot;,&quot;subpaths&quot;:[{&quot;dir&quot;:&quot;LICENSE&quot;}]},&quot;refs&quot;:{&quot;branches&quot;:[{&quot;name&quot;:&quot;main&quot;,&quot;ref&quot;:&quot;refs/heads/main&quot;,&quot;targetCommit&quot;:&quot;c97ace0b31ef13f116c70bc537ee6a1a8c501bc8&quot;}],&quot;tags&quot;:[],&quot;converts&quot;:[]},&quot;view&quot;:&quot;blob&quot;,&quot;isMac&quot;:false}"><header class="flex flex-wrap items-center justify-start pb-2 md:justify-end lg:flex-nowrap"><div class="grow max-md:flex max-md:w-full max-md:items-start max-md:justify-between"><div class="relative mr-4 flex min-w-0 basis-auto flex-wrap items-center gap-x-3 md:grow md:basis-full lg:basis-auto lg:flex-nowrap"><div class="relative mb-2">
-	<button class="text-sm md:text-base btn w-full cursor-pointer text-sm" type="button">
-		<svg class="mr-1.5 text-gray-700 dark:text-gray-400" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 24 24" style="transform: rotate(360deg);"><path d="M13 14c-3.36 0-4.46 1.35-4.82 2.24C9.25 16.7 10 17.76 10 19a3 3 0 0 1-3 3a3 3 0 0 1-3-3c0-1.31.83-2.42 2-2.83V7.83A2.99 2.99 0 0 1 4 5a3 3 0 0 1 3-3a3 3 0 0 1 3 3c0 1.31-.83 2.42-2 2.83v5.29c.88-.65 2.16-1.12 4-1.12c2.67 0 3.56-1.34 3.85-2.23A3.006 3.006 0 0 1 14 7a3 3 0 0 1 3-3a3 3 0 0 1 3 3c0 1.34-.88 2.5-2.09 2.86C17.65 11.29 16.68 14 13 14m-6 4a1 1 0 0 0-1 1a1 1 0 0 0 1 1a1 1 0 0 0 1-1a1 1 0 0 0-1-1M7 4a1 1 0 0 0-1 1a1 1 0 0 0 1 1a1 1 0 0 0 1-1a1 1 0 0 0-1-1m10 2a1 1 0 0 0-1 1a1 1 0 0 0 1 1a1 1 0 0 0 1-1a1 1 0 0 0-1-1z" fill="currentColor"></path></svg>
-			main
-		<svg class="-mr-1 text-gray-500 " xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 24 24"><path d="M16.293 9.293L12 13.586L7.707 9.293l-1.414 1.414L12 16.414l5.707-5.707z" fill="currentColor"></path></svg></button>
-	
-	
-	</div>
-			<div class="relative mb-2 flex flex-wrap items-center"><a class="truncate text-gray-800 hover:underline" href="/LiquidAI/LFM2-1.2B/tree/main">LFM2-1.2B</a>
-				<span class="mx-1 text-gray-300">/</span>
-					<span class="dark:text-gray-300">LICENSE</span>
-					<button class="text-xs ml-2 focus:outline-hidden inline-flex cursor-pointer items-center text-sm  mx-0.5   text-gray-600 " title="Copy path" type="button"><svg class="" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" fill="currentColor" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32"><path d="M28,10V28H10V10H28m0-2H10a2,2,0,0,0-2,2V28a2,2,0,0,0,2,2H28a2,2,0,0,0,2-2V10a2,2,0,0,0-2-2Z" transform="translate(0)"></path><path d="M4,18H2V4A2,2,0,0,1,4,2H18V4H4Z" transform="translate(0)"></path><rect fill="none" width="32" height="32"></rect></svg>
-		</button></div>
-			</div>
-		</div>
-	
-	</header></div>
-			<div class="SVELTE_HYDRATER contents" data-target="LastCommit" data-props="{&quot;commitLast&quot;:{&quot;date&quot;:&quot;2025-07-10T12:01:58.000Z&quot;,&quot;verified&quot;:&quot;verified&quot;,&quot;subject&quot;:&quot;Upload all model files&quot;,&quot;authors&quot;:[{&quot;_id&quot;:&quot;61b8e2ba285851687028d395&quot;,&quot;avatar&quot;:&quot;https://cdn-avatars.huggingface.co/v1/production/uploads/61b8e2ba285851687028d395/Rq3xWG7mJ3aCRoBsq340h.jpeg&quot;,&quot;isHf&quot;:false,&quot;user&quot;:&quot;mlabonne&quot;}],&quot;commit&quot;:{&quot;id&quot;:&quot;6dae451d2ecff1b14b43601685927492c4727811&quot;,&quot;parentIds&quot;:[&quot;9275449e5968dac85b34435a622d488433c96719&quot;]},&quot;title&quot;:&quot;Upload all model files&quot;},&quot;repo&quot;:{&quot;name&quot;:&quot;LiquidAI/LFM2-1.2B&quot;,&quot;type&quot;:&quot;model&quot;}}"><div class="from-gray-100-to-white bg-linear-to-t flex flex-wrap items-baseline gap-y-1 rounded-t-lg border border-b-0 px-3 py-2 dark:border-gray-800"><img class="mr-2.5 mt-0.5 h-4 w-4 self-center rounded-full" alt="mlabonne's picture" src="https://cdn-avatars.huggingface.co/v1/production/uploads/61b8e2ba285851687028d395/Rq3xWG7mJ3aCRoBsq340h.jpeg">
-			<div class="mr-4 flex flex-none items-center truncate"><a class="hover:underline" href="/mlabonne">mlabonne
-					</a>
-				
-			</div>
-		<div class="mr-4 truncate font-mono text-xs text-gray-500 hover:prose-a:underline sm:text-sm"><!-- HTML_TAG_START -->Upload all model files<!-- HTML_TAG_END --></div>
-		<a class="rounded-sm border bg-gray-50 px-1.5 text-sm hover:underline dark:border-gray-800 dark:bg-gray-900" href="/LiquidAI/LFM2-1.2B/commit/6dae451d2ecff1b14b43601685927492c4727811">6dae451</a>
-		<span class="mx-2 text-green-500 dark:text-green-600 px-1.5 border-green-100 dark:border-green-800 rounded-full border text-xs uppercase" title="This commit is signed and the signature is verified">verified</span>
-		<time class="ml-auto hidden flex-none truncate pl-2 text-gray-500 dark:text-gray-400 lg:block" datetime="2025-07-10T12:01:58" title="Thu, 10 Jul 2025 12:01:58 GMT">6 months ago</time></div></div>
-			<div class="relative flex flex-wrap items-center border px-3 py-1.5 text-sm text-gray-800 dark:border-gray-800 dark:bg-gray-900 ">
-				<a class="group my-1 mr-4 flex items-center " href="/LiquidAI/LFM2-1.2B/raw/main/LICENSE"><span class="flex items-center group-hover:underline"><svg class="mr-1.5" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32" style="transform: rotate(360deg);"><path d="M31 16l-7 7l-1.41-1.41L28.17 16l-5.58-5.59L24 9l7 7z" fill="currentColor"></path><path d="M1 16l7-7l1.41 1.41L3.83 16l5.58 5.59L8 23l-7-7z" fill="currentColor"></path><path d="M12.419 25.484L17.639 6l1.932.518L14.35 26z" fill="currentColor"></path></svg>
-								raw</span>
-							
-						</a><div class="SVELTE_HYDRATER contents" data-target="CopyButton" data-props="{&quot;value&quot;:&quot;https://huggingface.co/LiquidAI/LFM2-1.2B/resolve/main/LICENSE&quot;,&quot;style&quot;:&quot;blank&quot;,&quot;label&quot;:&quot;Copy download link&quot;,&quot;classNames&quot;:&quot;my-1 mr-4 flex items-center no-underline hover:underline&quot;}"><button class="my-1 mr-4 flex items-center no-underline hover:underline       " title="Copy download link" type="button"><svg class="" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" fill="currentColor" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32"><path d="M28,10V28H10V10H28m0-2H10a2,2,0,0,0-2,2V28a2,2,0,0,0,2,2H28a2,2,0,0,0,2-2V10a2,2,0,0,0-2-2Z" transform="translate(0)"></path><path d="M4,18H2V4A2,2,0,0,1,4,2H18V4H4Z" transform="translate(0)"></path><rect fill="none" width="32" height="32"></rect></svg>
-		<span class="ml-1.5 ">Copy download link</span></button></div><a class="group my-1 mr-4 flex items-center " href="/LiquidAI/LFM2-1.2B/commits/main/LICENSE"><span class="flex items-center group-hover:underline"><svg class="mr-1.5" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32" style="transform: rotate(360deg);"><path d="M16 4C9.383 4 4 9.383 4 16s5.383 12 12 12s12-5.383 12-12S22.617 4 16 4zm0 2c5.535 0 10 4.465 10 10s-4.465 10-10 10S6 21.535 6 16S10.465 6 16 6zm-1 2v9h7v-2h-5V8z" fill="currentColor"></path></svg>
-								history</span>
-							
-						</a><a class="group my-1 mr-4 flex items-center " href="/LiquidAI/LFM2-1.2B/blame/main/LICENSE"><span class="flex items-center group-hover:underline"><svg class="mr-1.5" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32" style="transform: rotate(360deg);"><path d="M16 2a14 14 0 1 0 14 14A14 14 0 0 0 16 2zm0 26a12 12 0 1 1 12-12a12 12 0 0 1-12 12z" fill="currentColor"></path><path d="M11.5 11a2.5 2.5 0 1 0 2.5 2.5a2.48 2.48 0 0 0-2.5-2.5z" fill="currentColor"></path><path d="M20.5 11a2.5 2.5 0 1 0 2.5 2.5a2.48 2.48 0 0 0-2.5-2.5z" fill="currentColor"></path></svg>
-								blame</span>
-							
-						</a><a class="group my-1 mr-4 flex items-center text-green-600 dark:text-green-500" href="/LiquidAI/LFM2-1.2B/edit/main/LICENSE"><span class="flex items-center group-hover:underline"><svg class="mr-1.5" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32"><path d="M2 26h28v2H2z" fill="currentColor"></path><path d="M25.4 9c.8-.8.8-2 0-2.8l-3.6-3.6c-.8-.8-2-.8-2.8 0l-15 15V24h6.4l15-15zm-5-5L24 7.6l-3 3L17.4 7l3-3zM6 22v-3.6l10-10l3.6 3.6l-10 10H6z" fill="currentColor"></path></svg>
-								contribute</span>
-							
-						</a><a class="group my-1 mr-4 flex items-center " href="/LiquidAI/LFM2-1.2B/delete/main/LICENSE"><span class="flex items-center group-hover:underline"><svg class="mr-1.5" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" focusable="false" role="img" width="1em" height="1em" preserveAspectRatio="xMidYMid meet" viewBox="0 0 32 32"><path d="M12 12h2v12h-2z" fill="currentColor"></path><path d="M18 12h2v12h-2z" fill="currentColor"></path><path d="M4 6v2h2v20a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8h2V6zm4 22V8h16v20z" fill="currentColor"></path><path d="M12 2h8v2h-8z" fill="currentColor"></path></svg>
-								delete</span>
-							
-						</a>
-
-				<div class="mr-4 flex items-center"><div class="SVELTE_HYDRATER contents" data-target="ScanStatusBadge" data-props="{&quot;classNames&quot;:&quot;mr-2&quot;,&quot;scanStatus&quot;:{&quot;status&quot;:&quot;safe&quot;,&quot;protectAiScan&quot;:{&quot;status&quot;:&quot;unscanned&quot;,&quot;message&quot;:null,&quot;reportLink&quot;:&quot;https://protectai.com/insights/models/LiquidAI/LFM2-1.2B/c97ace0b31ef13f116c70bc537ee6a1a8c501bc8/files?blob-id=7fb1127cc01c34199fa391322ea59a1d5c8c692e&amp;utm_source=huggingface&quot;},&quot;avScan&quot;:{&quot;status&quot;:&quot;safe&quot;,&quot;message&quot;:&quot;No security issues detected&quot;,&quot;reportLink&quot;:&quot;https://fdtn.ai/ai-supply-chain/hugging-face?utm_source=huggingface&quot;,&quot;reportLabel&quot;:&quot;Learn more at Cisco Foundation AI&quot;},&quot;pickleImportScan&quot;:{&quot;status&quot;:&quot;unscanned&quot;,&quot;pickleImports&quot;:[],&quot;version&quot;:&quot;0.0.0&quot;},&quot;virusTotalScan&quot;:{&quot;status&quot;:&quot;unscanned&quot;},&quot;jFrogScan&quot;:{&quot;status&quot;:&quot;unscanned&quot;,&quot;message&quot;:&quot;Not a machine-learning model&quot;,&quot;reportLink&quot;:&quot;&quot;,&quot;reportLabel&quot;:&quot;&quot;}},&quot;repo&quot;:{&quot;name&quot;:&quot;LiquidAI/LFM2-1.2B&quot;,&quot;type&quot;:&quot;model&quot;},&quot;revision&quot;:&quot;main&quot;,&quot;filePath&quot;:&quot;LICENSE&quot;,&quot;openByDefault&quot;:false}"><div class="sm:relative mr-2"><button class="flex h-[1.125rem] select-none items-center gap-0.5 rounded border pl-0.5 pr-0.5 text-xs leading-tight text-gray-400 hover:cursor-pointer text-gray-400 hover:border-gray-200 hover:bg-gray-50 hover:text-gray-500 dark:border-gray-800 dark:hover:bg-gray-800 dark:hover:text-gray-200 "><svg class="flex-none" width="1em" height="1em" viewBox="0 0 22 28" fill="none" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M15.3634 10.3639C15.8486 10.8491 15.8486 11.6357 15.3634 12.1209L10.9292 16.5551C10.6058 16.8785 10.0814 16.8785 9.7579 16.5551L7.03051 13.8277C6.54532 13.3425 6.54532 12.5558 7.03051 12.0707C7.51569 11.5855 8.30234 11.5855 8.78752 12.0707L9.7579 13.041C10.0814 13.3645 10.6058 13.3645 10.9292 13.041L13.6064 10.3639C14.0916 9.8787 14.8782 9.8787 15.3634 10.3639Z" fill="currentColor"></path><path fill-rule="evenodd" clip-rule="evenodd" d="M10.6666 27.12C4.93329 25.28 0 19.2267 0 12.7867V6.52001C0 5.40001 0.693334 4.41334 1.73333 4.01334L9.73333 1.01334C10.3333 0.786673 11 0.786673 11.6 1.02667L19.6 4.02667C20.1083 4.21658 20.5465 4.55701 20.8562 5.00252C21.1659 5.44803 21.3324 5.97742 21.3333 6.52001V12.7867C21.3333 19.24 16.4 25.28 10.6666 27.12Z" fill="currentColor" fill-opacity="0.22"></path><path d="M10.0845 1.94967L10.0867 1.94881C10.4587 1.8083 10.8666 1.81036 11.2286 1.95515L11.2387 1.95919L11.2489 1.963L19.2489 4.963L19.25 4.96342C19.5677 5.08211 19.8416 5.29488 20.0351 5.57333C20.2285 5.85151 20.3326 6.18203 20.3333 6.52082C20.3333 6.52113 20.3333 6.52144 20.3333 6.52176L20.3333 12.7867C20.3333 18.6535 15.8922 24.2319 10.6666 26.0652C5.44153 24.2316 1 18.6409 1 12.7867V6.52001C1 5.82357 1.42893 5.20343 2.08883 4.94803L10.0845 1.94967Z" stroke="currentColor" stroke-opacity="0.30" stroke-width="2"></path></svg>
-
-			<span class="mr-0.5 max-sm:hidden">Safe</span></button>
-
-	</div></div>
-						</div>
-
-				<div class="flex items-center gap-x-3 dark:text-gray-300 sm:ml-auto"><div class="SVELTE_HYDRATER contents" data-target="LineWrapButton" data-props="{&quot;classNames&quot;:&quot;text-xs&quot;,&quot;lineSelectorClass&quot;:&quot;blob-line&quot;}">
-
-<button class="text-xs focus:outline-hidden inline-flex cursor-pointer items-center justify-center text-sm  mx-0.5  " type="button"><svg class="opacity-40" width="1em" height="1em" viewBox="0 0 12 11" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M0.75 1.25H11.25M0.75 5H9C9.75 5 11.25 5.375 11.25 6.875C11.25 8.375 9.99975 8.75 9.375 8.75H6M6 8.75L7.5 7.25M6 8.75L7.5 10.25M0.75 8.75H3.75" stroke="currentColor" stroke-width="1.125" stroke-linecap="round" stroke-linejoin="round"></path></svg></button></div>
-					10.6 kB</div></div>
-
-			<div class="relative min-h-[100px] rounded-b-lg border border-t-0 leading-tight dark:border-gray-800 dark:bg-gray-925">
-				<div class="py-3"><div class="SVELTE_HYDRATER contents" data-target="BlobContent" data-props="{&quot;lines&quot;:[&quot;LFM Open License <span class=\&quot;hljs-built_in\&quot;>v1</span>.<span class=\&quot;hljs-number\&quot;>0</span> \r&quot;,&quot;\r&quot;,&quot;TERMS <span class=\&quot;hljs-keyword\&quot;>AND </span>CONDITIONS FOR USE, REPRODUCTION, <span class=\&quot;hljs-keyword\&quot;>AND </span><span class=\&quot;hljs-keyword\&quot;>DISTRIBUTION\r</span>&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-number\&quot;>1</span>. Definitions.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-string\&quot;>&amp;quot;License&amp;quot;</span> <span class=\&quot;hljs-keyword\&quot;>shall </span>mean the terms <span class=\&quot;hljs-keyword\&quot;>and </span>conditions for use, reproduction, <span class=\&quot;hljs-keyword\&quot;>and </span><span class=\&quot;hljs-keyword\&quot;>distribution </span>as defined <span class=\&quot;hljs-keyword\&quot;>by </span>this document.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-string\&quot;>&amp;quot;Licensor&amp;quot;</span> <span class=\&quot;hljs-keyword\&quot;>shall </span>mean Liquid AI, Inc.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-string\&quot;>&amp;quot;Legal Entity&amp;quot;</span> <span class=\&quot;hljs-keyword\&quot;>shall </span>mean the union of the acting entity <span class=\&quot;hljs-keyword\&quot;>and </span>all other entities that control, are controlled <span class=\&quot;hljs-keyword\&quot;>by, </span><span class=\&quot;hljs-keyword\&quot;>or </span>are under common control with that entity. For the purposes of this definition, <span class=\&quot;hljs-string\&quot;>&amp;quot;control&amp;quot;</span> means (i) the power, <span class=\&quot;hljs-keyword\&quot;>direct </span><span class=\&quot;hljs-keyword\&quot;>or </span>indirect, to <span class=\&quot;hljs-built_in\&quot;>cause</span> the <span class=\&quot;hljs-keyword\&quot;>direction </span><span class=\&quot;hljs-keyword\&quot;>or </span>management of such entity, whether <span class=\&quot;hljs-keyword\&quot;>by </span>contract <span class=\&quot;hljs-keyword\&quot;>or </span>otherwise, <span class=\&quot;hljs-keyword\&quot;>or </span>(ii) ownership of fifty percent (<span class=\&quot;hljs-number\&quot;>50</span>%) <span class=\&quot;hljs-keyword\&quot;>or </span>more of the outstanding <span class=\&quot;hljs-keyword\&quot;>shares, </span><span class=\&quot;hljs-keyword\&quot;>or </span>(iii) <span class=\&quot;hljs-keyword\&quot;>beneficial </span>ownership of such entity.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-string\&quot;>&amp;quot;You&amp;quot;</span> (<span class=\&quot;hljs-keyword\&quot;>or </span><span class=\&quot;hljs-string\&quot;>&amp;quot;Your&amp;quot;</span>) <span class=\&quot;hljs-keyword\&quot;>shall </span>mean an individual <span class=\&quot;hljs-keyword\&quot;>or </span>Legal Entity exercising permissions granted <span class=\&quot;hljs-keyword\&quot;>by </span>this License.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-string\&quot;>&amp;quot;Source&amp;quot;</span> form <span class=\&quot;hljs-keyword\&quot;>shall </span>mean the <span class=\&quot;hljs-keyword\&quot;>preferred </span>form for making modifications, including <span class=\&quot;hljs-keyword\&quot;>but </span>not limited to software source code, documentation source, <span class=\&quot;hljs-keyword\&quot;>and </span>configuration files.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-string\&quot;>&amp;quot;Object&amp;quot;</span> form <span class=\&quot;hljs-keyword\&quot;>shall </span>mean any form resulting from mechanical transformation <span class=\&quot;hljs-keyword\&quot;>or </span>translation of a Source form, including <span class=\&quot;hljs-keyword\&quot;>but </span>not limited to compiled object code, generated documentation, <span class=\&quot;hljs-keyword\&quot;>and </span>conversions to other media types.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-string\&quot;>&amp;quot;Work&amp;quot;</span> <span class=\&quot;hljs-keyword\&quot;>shall </span>mean the work of authorship, whether in Source <span class=\&quot;hljs-keyword\&quot;>or </span>Object form, made available under the License, as indicated <span class=\&quot;hljs-keyword\&quot;>by </span>a copyright notice that is included in <span class=\&quot;hljs-keyword\&quot;>or </span>attached to the work.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-string\&quot;>&amp;quot;Derivative Works&amp;quot;</span> <span class=\&quot;hljs-keyword\&quot;>shall </span>mean any work, whether in Source <span class=\&quot;hljs-keyword\&quot;>or </span>Object form, that is <span class=\&quot;hljs-keyword\&quot;>based </span>on (<span class=\&quot;hljs-keyword\&quot;>or </span>derived from) the Work <span class=\&quot;hljs-keyword\&quot;>and </span>for which the editorial revisions, annotations, elaborations, <span class=\&quot;hljs-keyword\&quot;>or </span>other modifications represent, as a whole, an <span class=\&quot;hljs-keyword\&quot;>original </span>work of authorship. For the purposes of this License, Derivative Works <span class=\&quot;hljs-keyword\&quot;>shall </span>not include works that remain separable from, <span class=\&quot;hljs-keyword\&quot;>or </span>merely link (<span class=\&quot;hljs-keyword\&quot;>or </span><span class=\&quot;hljs-keyword\&quot;>bind </span><span class=\&quot;hljs-keyword\&quot;>by </span>name) to the interfaces of, the Work <span class=\&quot;hljs-keyword\&quot;>and </span>Derivative Works thereof.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-string\&quot;>&amp;quot;Contribution&amp;quot;</span> <span class=\&quot;hljs-keyword\&quot;>shall </span>mean any work of authorship, including the <span class=\&quot;hljs-keyword\&quot;>original </span>version of the Work <span class=\&quot;hljs-keyword\&quot;>and </span>any modifications <span class=\&quot;hljs-keyword\&quot;>or </span><span class=\&quot;hljs-keyword\&quot;>additions </span>to that Work <span class=\&quot;hljs-keyword\&quot;>or </span>Derivative Works thereof, that is intentionally <span class=\&quot;hljs-keyword\&quot;>submitted </span>to Licensor for inclusion in the Work <span class=\&quot;hljs-keyword\&quot;>by </span>the copyright owner <span class=\&quot;hljs-keyword\&quot;>or </span><span class=\&quot;hljs-keyword\&quot;>by </span>an individual <span class=\&quot;hljs-keyword\&quot;>or </span>Legal Entity authorized to <span class=\&quot;hljs-keyword\&quot;>submit </span>on <span class=\&quot;hljs-keyword\&quot;>behalf </span>of the copyright owner. For the purposes of this definition, <span class=\&quot;hljs-string\&quot;>&amp;quot;submitted&amp;quot;</span> means any form of electronic, verbal, <span class=\&quot;hljs-keyword\&quot;>or </span>written communication sent to the Licensor <span class=\&quot;hljs-keyword\&quot;>or </span>its representatives, including <span class=\&quot;hljs-keyword\&quot;>but </span>not limited to communication on electronic mailing lists, source code control systems, <span class=\&quot;hljs-keyword\&quot;>and </span>issue tracking systems that are managed <span class=\&quot;hljs-keyword\&quot;>by, </span><span class=\&quot;hljs-keyword\&quot;>or </span>on <span class=\&quot;hljs-keyword\&quot;>behalf </span>of, the Licensor for the purpose of <span class=\&quot;hljs-keyword\&quot;>discussing </span><span class=\&quot;hljs-keyword\&quot;>and </span>improving the Work, <span class=\&quot;hljs-keyword\&quot;>but </span>excluding communication that is conspicuously marked <span class=\&quot;hljs-keyword\&quot;>or </span>otherwise designated in writing <span class=\&quot;hljs-keyword\&quot;>by </span>the copyright owner as <span class=\&quot;hljs-string\&quot;>&amp;quot;Not a Contribution.&amp;quot;</span>\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-string\&quot;>&amp;quot;Contributor&amp;quot;</span> <span class=\&quot;hljs-keyword\&quot;>shall </span>mean Licensor <span class=\&quot;hljs-keyword\&quot;>and </span>any individual <span class=\&quot;hljs-keyword\&quot;>or </span>Legal Entity on <span class=\&quot;hljs-keyword\&quot;>behalf </span>of whom a Contribution has <span class=\&quot;hljs-keyword\&quot;>been </span>received <span class=\&quot;hljs-keyword\&quot;>by </span>Licensor <span class=\&quot;hljs-keyword\&quot;>and </span><span class=\&quot;hljs-keyword\&quot;>subsequently </span>incorporated within the Work.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-string\&quot;>&amp;quot;Commercial Use&amp;quot;</span> <span class=\&quot;hljs-keyword\&quot;>shall </span>mean any use of the Work for <span class=\&quot;hljs-keyword\&quot;>direct </span><span class=\&quot;hljs-keyword\&quot;>or </span>indirect commercial advantage <span class=\&quot;hljs-keyword\&quot;>or </span>monetary compensation.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-string\&quot;>&amp;quot;Qualified Non-Profit Organization&amp;quot;</span> <span class=\&quot;hljs-keyword\&quot;>shall </span>mean a Legal Entity that is <span class=\&quot;hljs-keyword\&quot;>organized </span><span class=\&quot;hljs-keyword\&quot;>and </span>operated exclusively for religious, charitable, <span class=\&quot;hljs-keyword\&quot;>scientific, </span>testing for public safety, literary, <span class=\&quot;hljs-keyword\&quot;>or </span>educational purposes, <span class=\&quot;hljs-keyword\&quot;>and </span>which is exempt from federal income tax under Section <span class=\&quot;hljs-number\&quot;>501</span>(c)(<span class=\&quot;hljs-number\&quot;>3</span>) of the United States Internal Revenue Code of <span class=\&quot;hljs-number\&quot;>1986</span>, as amended, <span class=\&quot;hljs-keyword\&quot;>or </span>any equivalent non-profit <span class=\&quot;hljs-keyword\&quot;>or </span>charitable <span class=\&quot;hljs-keyword\&quot;>organization </span>in a foreign <span class=\&quot;hljs-keyword\&quot;>jurisdiction.\r</span>&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-string\&quot;>&amp;quot;Non-Commercial or Research Purposes&amp;quot;</span> <span class=\&quot;hljs-keyword\&quot;>shall </span>mean purposes that do not involve any use of the Work <span class=\&quot;hljs-keyword\&quot;>or </span>a Derivative Work for Commercial Use.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-string\&quot;>&amp;quot;Threshold&amp;quot;</span> <span class=\&quot;hljs-keyword\&quot;>shall </span>mean annual revenue of <span class=\&quot;hljs-number\&quot;>10</span> million United States dollars ($<span class=\&quot;hljs-number\&quot;>10</span>,<span class=\&quot;hljs-number\&quot;>000</span>,<span class=\&quot;hljs-number\&quot;>000</span>) <span class=\&quot;hljs-keyword\&quot;>or </span>more.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-number\&quot;>2</span>. Grant of Copyright License. <span class=\&quot;hljs-keyword\&quot;>Subject </span>to the terms <span class=\&quot;hljs-keyword\&quot;>and </span>conditions of this License, including the Commercial Use limitation set forth in Section <span class=\&quot;hljs-number\&quot;>5</span>, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable copyright license to reproduce, prepare Derivative Works of, publicly <span class=\&quot;hljs-keyword\&quot;>display, </span>publicly perform, <span class=\&quot;hljs-keyword\&quot;>sublicense, </span><span class=\&quot;hljs-keyword\&quot;>and </span><span class=\&quot;hljs-keyword\&quot;>distribute </span>the Work <span class=\&quot;hljs-keyword\&quot;>and </span>such Derivative Works in Source <span class=\&quot;hljs-keyword\&quot;>or </span>Object form.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-number\&quot;>3</span>. Grant of Patent License. <span class=\&quot;hljs-keyword\&quot;>Subject </span>to the terms <span class=\&quot;hljs-keyword\&quot;>and </span>conditions of this License, including the Commercial Use limitation set forth in Section <span class=\&quot;hljs-number\&quot;>5</span>, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable (except as stated in this section) patent license to make, have made, use, offer to sell, sell, import, <span class=\&quot;hljs-keyword\&quot;>and </span>otherwise transfer the Work, where such license applies only to those patent claims licensable <span class=\&quot;hljs-keyword\&quot;>by </span>such Contributor that are necessarily infringed <span class=\&quot;hljs-keyword\&quot;>by </span>their Contribution(s) alone <span class=\&quot;hljs-keyword\&quot;>or </span><span class=\&quot;hljs-keyword\&quot;>by </span>combination of their Contribution(s) with the Work to which such Contribution(s) was <span class=\&quot;hljs-keyword\&quot;>submitted. </span>If You <span class=\&quot;hljs-keyword\&quot;>institute </span>patent litigation against any entity (including a cross-claim <span class=\&quot;hljs-keyword\&quot;>or </span>counterclaim in a lawsuit) alleging that the Work <span class=\&quot;hljs-keyword\&quot;>or </span>a Contribution incorporated within the Work constitutes <span class=\&quot;hljs-keyword\&quot;>direct </span><span class=\&quot;hljs-keyword\&quot;>or </span>contributory patent infringement, then any patent licenses granted to You under this License for that Work <span class=\&quot;hljs-keyword\&quot;>shall </span>terminate as of the date such litigation is filed.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-number\&quot;>4</span>. Redistribution. You may reproduce <span class=\&quot;hljs-keyword\&quot;>and </span><span class=\&quot;hljs-keyword\&quot;>distribute </span>copies of the Work <span class=\&quot;hljs-keyword\&quot;>or </span>Derivative Works thereof in any medium, with <span class=\&quot;hljs-keyword\&quot;>or </span>without modifications, <span class=\&quot;hljs-keyword\&quot;>and </span>in Source <span class=\&quot;hljs-keyword\&quot;>or </span>Object form, provided that You meet the following conditions:\r&quot;,&quot;\r&quot;,&quot;(a) You must give any other recipients of the Work <span class=\&quot;hljs-keyword\&quot;>or </span>Derivative Works a copy of this License<span class=\&quot;hljs-comment\&quot;>; and</span>\r&quot;,&quot;\r&quot;,&quot;(<span class=\&quot;hljs-keyword\&quot;>b) </span>You must <span class=\&quot;hljs-built_in\&quot;>cause</span> any modified files to carry prominent notices stating that You changed the files<span class=\&quot;hljs-comment\&quot;>; and</span>\r&quot;,&quot;\r&quot;,&quot;(c) You must retain, in the Source form of any Derivative Works that You <span class=\&quot;hljs-keyword\&quot;>distribute, </span>all copyright, patent, trademark, <span class=\&quot;hljs-keyword\&quot;>and </span>attribution notices from the Source form of the Work, excluding those notices that do not pertain to any part of the Derivative Works<span class=\&quot;hljs-comment\&quot;>; and</span>\r&quot;,&quot;\r&quot;,&quot;(d) If the Work includes a <span class=\&quot;hljs-string\&quot;>&amp;quot;NOTICE&amp;quot;</span> text file as part of its <span class=\&quot;hljs-keyword\&quot;>distribution, </span>then any Derivative Works that You <span class=\&quot;hljs-keyword\&quot;>distribute </span>must include a readable copy of the attribution notices contained within such NOTICE file, excluding those notices that do not pertain to any part of the Derivative Works, in <span class=\&quot;hljs-built_in\&quot;>at</span> least one of the following places: within a NOTICE text file <span class=\&quot;hljs-keyword\&quot;>distributed </span>as part of the Derivative Works<span class=\&quot;hljs-comment\&quot;>; within the Source form or documentation, if provided along with the Derivative Works; or, within a display generated by the Derivative Works, if and wherever such third-party notices normally appear. The contents of the NOTICE file are for informational purposes only and do not modify the License. You may add Your own attribution notices within Derivative Works that You distribute, alongside or as an addendum to the NOTICE text from the Work, provided that such additional attribution notices cannot be construed as modifying the License.</span>\r&quot;,&quot;\r&quot;,&quot;You may <span class=\&quot;hljs-keyword\&quot;>add </span>Your own copyright statement to Your modifications <span class=\&quot;hljs-keyword\&quot;>and </span>may provide <span class=\&quot;hljs-keyword\&quot;>additional </span><span class=\&quot;hljs-keyword\&quot;>or </span><span class=\&quot;hljs-keyword\&quot;>different </span>license terms <span class=\&quot;hljs-keyword\&quot;>and </span>conditions for use, reproduction, <span class=\&quot;hljs-keyword\&quot;>or </span><span class=\&quot;hljs-keyword\&quot;>distribution </span>of Your modifications, <span class=\&quot;hljs-keyword\&quot;>or </span>for any such Derivative Works as a whole, provided Your use, reproduction, <span class=\&quot;hljs-keyword\&quot;>and </span><span class=\&quot;hljs-keyword\&quot;>distribution </span>of the Work otherwise complies with the conditions stated in this License.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-number\&quot;>5</span>. Commercial Use Limitation.\r&quot;,&quot;\r&quot;,&quot;(a) The rights granted under this License for Commercial Use are conditioned upon You <span class=\&quot;hljs-keyword\&quot;>or </span>Your Legal Entity not exceeding the Threshold.\r&quot;,&quot;\r&quot;,&quot;(<span class=\&quot;hljs-keyword\&quot;>b) </span>Any Commercial Use of the Work <span class=\&quot;hljs-keyword\&quot;>or </span>a Derivative Work <span class=\&quot;hljs-keyword\&quot;>by </span>a Legal Entity that exceeds the Threshold is not licensed under this Agreement.\r&quot;,&quot;\r&quot;,&quot;(c) The Threshold <span class=\&quot;hljs-keyword\&quot;>shall </span>not apply to a Qualified Non-Profit <span class=\&quot;hljs-keyword\&quot;>Organization&amp;#x27;s </span>use of the Work <span class=\&quot;hljs-keyword\&quot;>or </span>a Derivative Work for Non-Commercial <span class=\&quot;hljs-keyword\&quot;>or </span>Research Purposes.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-number\&quot;>6</span>. <span class=\&quot;hljs-keyword\&quot;>Submission </span>of Contributions. Unless You explicitly state otherwise, any Contribution intentionally <span class=\&quot;hljs-keyword\&quot;>submitted </span>for inclusion in the Work <span class=\&quot;hljs-keyword\&quot;>by </span>You to the Licensor <span class=\&quot;hljs-keyword\&quot;>shall </span><span class=\&quot;hljs-keyword\&quot;>be </span>under the terms <span class=\&quot;hljs-keyword\&quot;>and </span>conditions of this License, without any <span class=\&quot;hljs-keyword\&quot;>additional </span>terms <span class=\&quot;hljs-keyword\&quot;>or </span>conditions. Notwithstanding the above, nothing herein <span class=\&quot;hljs-keyword\&quot;>shall </span>supersede <span class=\&quot;hljs-keyword\&quot;>or </span>modify the terms of any separate license agreement you may have executed with Licensor regarding such Contributions.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-number\&quot;>7</span>. Trademarks. This License does not grant permission to use the trade names, trademarks, service marks, <span class=\&quot;hljs-keyword\&quot;>or </span>product names of the Licensor, except for the reasonable <span class=\&quot;hljs-keyword\&quot;>and </span>customary use in describing the <span class=\&quot;hljs-keyword\&quot;>origin </span>of the Work <span class=\&quot;hljs-keyword\&quot;>and </span>reproducing the content of the NOTICE file.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-number\&quot;>8</span>. <span class=\&quot;hljs-keyword\&quot;>Disclaimer </span>of Warranty. Unless required <span class=\&quot;hljs-keyword\&quot;>by </span>applicable law <span class=\&quot;hljs-keyword\&quot;>or </span>agreed to in writing, Licensor provides the Work (<span class=\&quot;hljs-keyword\&quot;>and </span>each Contributor provides its Contributions) on an <span class=\&quot;hljs-string\&quot;>&amp;quot;AS IS&amp;quot;</span> <span class=\&quot;hljs-keyword\&quot;>BASIS, </span>WITHOUT WARRANTIES <span class=\&quot;hljs-keyword\&quot;>OR </span>CONDITIONS OF ANY KIND, <span class=\&quot;hljs-keyword\&quot;>either </span>express <span class=\&quot;hljs-keyword\&quot;>or </span>implied, including, without limitation, any warranties <span class=\&quot;hljs-keyword\&quot;>or </span>conditions of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, <span class=\&quot;hljs-keyword\&quot;>or </span>FITNESS FOR A PARTICULAR PURPOSE. You are solely responsible for determining the appropriateness of using <span class=\&quot;hljs-keyword\&quot;>or </span>redistributing the Work <span class=\&quot;hljs-keyword\&quot;>and </span>assume any risks associated with Your exercise of permissions under this License.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-number\&quot;>9</span>. Limitation of Liability. In no event <span class=\&quot;hljs-keyword\&quot;>and </span>under no legal theory, whether in tort (including negligence), contract, <span class=\&quot;hljs-keyword\&quot;>or </span>otherwise, unless required <span class=\&quot;hljs-keyword\&quot;>by </span>applicable law (such as deliberate <span class=\&quot;hljs-keyword\&quot;>and </span>grossly negligent acts) <span class=\&quot;hljs-keyword\&quot;>or </span>agreed to in writing, <span class=\&quot;hljs-keyword\&quot;>shall </span>any Contributor <span class=\&quot;hljs-keyword\&quot;>be </span>liable to You for damages, including any <span class=\&quot;hljs-keyword\&quot;>direct, </span>indirect, special, incidental, <span class=\&quot;hljs-keyword\&quot;>or </span>consequential damages of any character arising as a result of this License <span class=\&quot;hljs-keyword\&quot;>or </span>out of the use <span class=\&quot;hljs-keyword\&quot;>or </span>inability to use the Work (including <span class=\&quot;hljs-keyword\&quot;>but </span>not limited to damages for loss of goodwill, work stoppage, computer failure <span class=\&quot;hljs-keyword\&quot;>or </span>malfunction, <span class=\&quot;hljs-keyword\&quot;>or </span>any <span class=\&quot;hljs-keyword\&quot;>and </span>all other commercial damages <span class=\&quot;hljs-keyword\&quot;>or </span>losses), even if such Contributor has <span class=\&quot;hljs-keyword\&quot;>been </span>advised of the possibility of such damages.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-number\&quot;>10</span>. Accepting Warranty <span class=\&quot;hljs-keyword\&quot;>or </span><span class=\&quot;hljs-keyword\&quot;>Additional </span>Liability. While redistributing the Work <span class=\&quot;hljs-keyword\&quot;>or </span>Derivative Works thereof, You may choose to offer, <span class=\&quot;hljs-keyword\&quot;>and </span>charge a fee for, acceptance of support, warranty, indemnity, <span class=\&quot;hljs-keyword\&quot;>or </span>other liability obligations <span class=\&quot;hljs-keyword\&quot;>and/or </span>rights consistent with this License. However, in accepting such obligations, You may act only on Your own <span class=\&quot;hljs-keyword\&quot;>behalf </span><span class=\&quot;hljs-keyword\&quot;>and </span>on Your sole responsibility, not on <span class=\&quot;hljs-keyword\&quot;>behalf </span>of any other Contributor, <span class=\&quot;hljs-keyword\&quot;>and </span>only if You agree to indemnify, defend, <span class=\&quot;hljs-keyword\&quot;>and </span>hold each Contributor harmless for any liability incurred <span class=\&quot;hljs-keyword\&quot;>by, </span><span class=\&quot;hljs-keyword\&quot;>or </span>claims asserted against, such Contributor <span class=\&quot;hljs-keyword\&quot;>by </span>reason of your accepting any such warranty <span class=\&quot;hljs-keyword\&quot;>or </span><span class=\&quot;hljs-keyword\&quot;>additional </span>liability.\r&quot;,&quot;\r&quot;,&quot;<span class=\&quot;hljs-number\&quot;>11</span>. Termination. This License will terminate automatically <span class=\&quot;hljs-keyword\&quot;>and </span>immediately if You fail to comply with any of its terms <span class=\&quot;hljs-keyword\&quot;>and </span>conditions. Upon termination, You must cease all use of the Work <span class=\&quot;hljs-keyword\&quot;>and </span>any Derivative Works <span class=\&quot;hljs-keyword\&quot;>and </span>delete all copies in Your possession.\r&quot;,&quot;\r&quot;,&quot;END OF TERMS <span class=\&quot;hljs-keyword\&quot;>AND </span>CONDITIONS&quot;],&quot;lineSelectorClass&quot;:&quot;blob-line&quot;,&quot;context&quot;:{&quot;repo&quot;:{&quot;name&quot;:&quot;LiquidAI/LFM2-1.2B&quot;,&quot;type&quot;:&quot;model&quot;},&quot;rev&quot;:&quot;main&quot;,&quot;path&quot;:&quot;LICENSE&quot;,&quot;subpaths&quot;:[{&quot;dir&quot;:&quot;LICENSE&quot;}]}}">
-
-
-<div class="@container relative"><div class="@max-3xl:text-xs overflow-x-auto text-sm"><table class="min-w-full border-collapse font-mono"><tbody>
-					<tr class="" id="L1">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="1">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START -->LFM Open License <span class="hljs-built_in">v1</span>.<span class="hljs-number">0</span> <!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L2">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="2">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L3">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="3">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START -->TERMS <span class="hljs-keyword">AND </span>CONDITIONS FOR USE, REPRODUCTION, <span class="hljs-keyword">AND </span><span class="hljs-keyword">DISTRIBUTION</span><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L4">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="4">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L5">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="5">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-number">1</span>. Definitions.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L6">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="6">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L7">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="7">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-string">&quot;License&quot;</span> <span class="hljs-keyword">shall </span>mean the terms <span class="hljs-keyword">and </span>conditions for use, reproduction, <span class="hljs-keyword">and </span><span class="hljs-keyword">distribution </span>as defined <span class="hljs-keyword">by </span>this document.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L8">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="8">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L9">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="9">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-string">&quot;Licensor&quot;</span> <span class="hljs-keyword">shall </span>mean Liquid AI, Inc.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L10">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="10">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L11">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="11">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-string">&quot;Legal Entity&quot;</span> <span class="hljs-keyword">shall </span>mean the union of the acting entity <span class="hljs-keyword">and </span>all other entities that control, are controlled <span class="hljs-keyword">by, </span><span class="hljs-keyword">or </span>are under common control with that entity. For the purposes of this definition, <span class="hljs-string">&quot;control&quot;</span> means (i) the power, <span class="hljs-keyword">direct </span><span class="hljs-keyword">or </span>indirect, to <span class="hljs-built_in">cause</span> the <span class="hljs-keyword">direction </span><span class="hljs-keyword">or </span>management of such entity, whether <span class="hljs-keyword">by </span>contract <span class="hljs-keyword">or </span>otherwise, <span class="hljs-keyword">or </span>(ii) ownership of fifty percent (<span class="hljs-number">50</span>%) <span class="hljs-keyword">or </span>more of the outstanding <span class="hljs-keyword">shares, </span><span class="hljs-keyword">or </span>(iii) <span class="hljs-keyword">beneficial </span>ownership of such entity.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L12">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="12">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L13">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="13">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-string">&quot;You&quot;</span> (<span class="hljs-keyword">or </span><span class="hljs-string">&quot;Your&quot;</span>) <span class="hljs-keyword">shall </span>mean an individual <span class="hljs-keyword">or </span>Legal Entity exercising permissions granted <span class="hljs-keyword">by </span>this License.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L14">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="14">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L15">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="15">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-string">&quot;Source&quot;</span> form <span class="hljs-keyword">shall </span>mean the <span class="hljs-keyword">preferred </span>form for making modifications, including <span class="hljs-keyword">but </span>not limited to software source code, documentation source, <span class="hljs-keyword">and </span>configuration files.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L16">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="16">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L17">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="17">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-string">&quot;Object&quot;</span> form <span class="hljs-keyword">shall </span>mean any form resulting from mechanical transformation <span class="hljs-keyword">or </span>translation of a Source form, including <span class="hljs-keyword">but </span>not limited to compiled object code, generated documentation, <span class="hljs-keyword">and </span>conversions to other media types.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L18">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="18">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L19">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="19">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-string">&quot;Work&quot;</span> <span class="hljs-keyword">shall </span>mean the work of authorship, whether in Source <span class="hljs-keyword">or </span>Object form, made available under the License, as indicated <span class="hljs-keyword">by </span>a copyright notice that is included in <span class="hljs-keyword">or </span>attached to the work.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L20">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="20">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L21">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="21">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-string">&quot;Derivative Works&quot;</span> <span class="hljs-keyword">shall </span>mean any work, whether in Source <span class="hljs-keyword">or </span>Object form, that is <span class="hljs-keyword">based </span>on (<span class="hljs-keyword">or </span>derived from) the Work <span class="hljs-keyword">and </span>for which the editorial revisions, annotations, elaborations, <span class="hljs-keyword">or </span>other modifications represent, as a whole, an <span class="hljs-keyword">original </span>work of authorship. For the purposes of this License, Derivative Works <span class="hljs-keyword">shall </span>not include works that remain separable from, <span class="hljs-keyword">or </span>merely link (<span class="hljs-keyword">or </span><span class="hljs-keyword">bind </span><span class="hljs-keyword">by </span>name) to the interfaces of, the Work <span class="hljs-keyword">and </span>Derivative Works thereof.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L22">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="22">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L23">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="23">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-string">&quot;Contribution&quot;</span> <span class="hljs-keyword">shall </span>mean any work of authorship, including the <span class="hljs-keyword">original </span>version of the Work <span class="hljs-keyword">and </span>any modifications <span class="hljs-keyword">or </span><span class="hljs-keyword">additions </span>to that Work <span class="hljs-keyword">or </span>Derivative Works thereof, that is intentionally <span class="hljs-keyword">submitted </span>to Licensor for inclusion in the Work <span class="hljs-keyword">by </span>the copyright owner <span class="hljs-keyword">or </span><span class="hljs-keyword">by </span>an individual <span class="hljs-keyword">or </span>Legal Entity authorized to <span class="hljs-keyword">submit </span>on <span class="hljs-keyword">behalf </span>of the copyright owner. For the purposes of this definition, <span class="hljs-string">&quot;submitted&quot;</span> means any form of electronic, verbal, <span class="hljs-keyword">or </span>written communication sent to the Licensor <span class="hljs-keyword">or </span>its representatives, including <span class="hljs-keyword">but </span>not limited to communication on electronic mailing lists, source code control systems, <span class="hljs-keyword">and </span>issue tracking systems that are managed <span class="hljs-keyword">by, </span><span class="hljs-keyword">or </span>on <span class="hljs-keyword">behalf </span>of, the Licensor for the purpose of <span class="hljs-keyword">discussing </span><span class="hljs-keyword">and </span>improving the Work, <span class="hljs-keyword">but </span>excluding communication that is conspicuously marked <span class="hljs-keyword">or </span>otherwise designated in writing <span class="hljs-keyword">by </span>the copyright owner as <span class="hljs-string">&quot;Not a Contribution.&quot;</span><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L24">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="24">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L25">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="25">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-string">&quot;Contributor&quot;</span> <span class="hljs-keyword">shall </span>mean Licensor <span class="hljs-keyword">and </span>any individual <span class="hljs-keyword">or </span>Legal Entity on <span class="hljs-keyword">behalf </span>of whom a Contribution has <span class="hljs-keyword">been </span>received <span class="hljs-keyword">by </span>Licensor <span class="hljs-keyword">and </span><span class="hljs-keyword">subsequently </span>incorporated within the Work.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L26">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="26">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L27">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="27">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-string">&quot;Commercial Use&quot;</span> <span class="hljs-keyword">shall </span>mean any use of the Work for <span class="hljs-keyword">direct </span><span class="hljs-keyword">or </span>indirect commercial advantage <span class="hljs-keyword">or </span>monetary compensation.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L28">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="28">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L29">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="29">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-string">&quot;Qualified Non-Profit Organization&quot;</span> <span class="hljs-keyword">shall </span>mean a Legal Entity that is <span class="hljs-keyword">organized </span><span class="hljs-keyword">and </span>operated exclusively for religious, charitable, <span class="hljs-keyword">scientific, </span>testing for public safety, literary, <span class="hljs-keyword">or </span>educational purposes, <span class="hljs-keyword">and </span>which is exempt from federal income tax under Section <span class="hljs-number">501</span>(c)(<span class="hljs-number">3</span>) of the United States Internal Revenue Code of <span class="hljs-number">1986</span>, as amended, <span class="hljs-keyword">or </span>any equivalent non-profit <span class="hljs-keyword">or </span>charitable <span class="hljs-keyword">organization </span>in a foreign <span class="hljs-keyword">jurisdiction.</span><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L30">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="30">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L31">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="31">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-string">&quot;Non-Commercial or Research Purposes&quot;</span> <span class="hljs-keyword">shall </span>mean purposes that do not involve any use of the Work <span class="hljs-keyword">or </span>a Derivative Work for Commercial Use.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L32">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="32">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L33">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="33">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-string">&quot;Threshold&quot;</span> <span class="hljs-keyword">shall </span>mean annual revenue of <span class="hljs-number">10</span> million United States dollars ($<span class="hljs-number">10</span>,<span class="hljs-number">000</span>,<span class="hljs-number">000</span>) <span class="hljs-keyword">or </span>more.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L34">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="34">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L35">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="35">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-number">2</span>. Grant of Copyright License. <span class="hljs-keyword">Subject </span>to the terms <span class="hljs-keyword">and </span>conditions of this License, including the Commercial Use limitation set forth in Section <span class="hljs-number">5</span>, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable copyright license to reproduce, prepare Derivative Works of, publicly <span class="hljs-keyword">display, </span>publicly perform, <span class="hljs-keyword">sublicense, </span><span class="hljs-keyword">and </span><span class="hljs-keyword">distribute </span>the Work <span class="hljs-keyword">and </span>such Derivative Works in Source <span class="hljs-keyword">or </span>Object form.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L36">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="36">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L37">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="37">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-number">3</span>. Grant of Patent License. <span class="hljs-keyword">Subject </span>to the terms <span class="hljs-keyword">and </span>conditions of this License, including the Commercial Use limitation set forth in Section <span class="hljs-number">5</span>, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable (except as stated in this section) patent license to make, have made, use, offer to sell, sell, import, <span class="hljs-keyword">and </span>otherwise transfer the Work, where such license applies only to those patent claims licensable <span class="hljs-keyword">by </span>such Contributor that are necessarily infringed <span class="hljs-keyword">by </span>their Contribution(s) alone <span class="hljs-keyword">or </span><span class="hljs-keyword">by </span>combination of their Contribution(s) with the Work to which such Contribution(s) was <span class="hljs-keyword">submitted. </span>If You <span class="hljs-keyword">institute </span>patent litigation against any entity (including a cross-claim <span class="hljs-keyword">or </span>counterclaim in a lawsuit) alleging that the Work <span class="hljs-keyword">or </span>a Contribution incorporated within the Work constitutes <span class="hljs-keyword">direct </span><span class="hljs-keyword">or </span>contributory patent infringement, then any patent licenses granted to You under this License for that Work <span class="hljs-keyword">shall </span>terminate as of the date such litigation is filed.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L38">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="38">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L39">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="39">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-number">4</span>. Redistribution. You may reproduce <span class="hljs-keyword">and </span><span class="hljs-keyword">distribute </span>copies of the Work <span class="hljs-keyword">or </span>Derivative Works thereof in any medium, with <span class="hljs-keyword">or </span>without modifications, <span class="hljs-keyword">and </span>in Source <span class="hljs-keyword">or </span>Object form, provided that You meet the following conditions:<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L40">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="40">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L41">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="41">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START -->(a) You must give any other recipients of the Work <span class="hljs-keyword">or </span>Derivative Works a copy of this License<span class="hljs-comment">; and</span><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L42">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="42">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L43">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="43">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START -->(<span class="hljs-keyword">b) </span>You must <span class="hljs-built_in">cause</span> any modified files to carry prominent notices stating that You changed the files<span class="hljs-comment">; and</span><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L44">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="44">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L45">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="45">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START -->(c) You must retain, in the Source form of any Derivative Works that You <span class="hljs-keyword">distribute, </span>all copyright, patent, trademark, <span class="hljs-keyword">and </span>attribution notices from the Source form of the Work, excluding those notices that do not pertain to any part of the Derivative Works<span class="hljs-comment">; and</span><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L46">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="46">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L47">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="47">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START -->(d) If the Work includes a <span class="hljs-string">&quot;NOTICE&quot;</span> text file as part of its <span class="hljs-keyword">distribution, </span>then any Derivative Works that You <span class="hljs-keyword">distribute </span>must include a readable copy of the attribution notices contained within such NOTICE file, excluding those notices that do not pertain to any part of the Derivative Works, in <span class="hljs-built_in">at</span> least one of the following places: within a NOTICE text file <span class="hljs-keyword">distributed </span>as part of the Derivative Works<span class="hljs-comment">; within the Source form or documentation, if provided along with the Derivative Works; or, within a display generated by the Derivative Works, if and wherever such third-party notices normally appear. The contents of the NOTICE file are for informational purposes only and do not modify the License. You may add Your own attribution notices within Derivative Works that You distribute, alongside or as an addendum to the NOTICE text from the Work, provided that such additional attribution notices cannot be construed as modifying the License.</span><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L48">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="48">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L49">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="49">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START -->You may <span class="hljs-keyword">add </span>Your own copyright statement to Your modifications <span class="hljs-keyword">and </span>may provide <span class="hljs-keyword">additional </span><span class="hljs-keyword">or </span><span class="hljs-keyword">different </span>license terms <span class="hljs-keyword">and </span>conditions for use, reproduction, <span class="hljs-keyword">or </span><span class="hljs-keyword">distribution </span>of Your modifications, <span class="hljs-keyword">or </span>for any such Derivative Works as a whole, provided Your use, reproduction, <span class="hljs-keyword">and </span><span class="hljs-keyword">distribution </span>of the Work otherwise complies with the conditions stated in this License.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L50">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="50">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L51">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="51">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-number">5</span>. Commercial Use Limitation.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L52">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="52">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L53">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="53">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START -->(a) The rights granted under this License for Commercial Use are conditioned upon You <span class="hljs-keyword">or </span>Your Legal Entity not exceeding the Threshold.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L54">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="54">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L55">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="55">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START -->(<span class="hljs-keyword">b) </span>Any Commercial Use of the Work <span class="hljs-keyword">or </span>a Derivative Work <span class="hljs-keyword">by </span>a Legal Entity that exceeds the Threshold is not licensed under this Agreement.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L56">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="56">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L57">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="57">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START -->(c) The Threshold <span class="hljs-keyword">shall </span>not apply to a Qualified Non-Profit <span class="hljs-keyword">Organization&#x27;s </span>use of the Work <span class="hljs-keyword">or </span>a Derivative Work for Non-Commercial <span class="hljs-keyword">or </span>Research Purposes.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L58">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="58">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L59">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="59">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-number">6</span>. <span class="hljs-keyword">Submission </span>of Contributions. Unless You explicitly state otherwise, any Contribution intentionally <span class="hljs-keyword">submitted </span>for inclusion in the Work <span class="hljs-keyword">by </span>You to the Licensor <span class="hljs-keyword">shall </span><span class="hljs-keyword">be </span>under the terms <span class="hljs-keyword">and </span>conditions of this License, without any <span class="hljs-keyword">additional </span>terms <span class="hljs-keyword">or </span>conditions. Notwithstanding the above, nothing herein <span class="hljs-keyword">shall </span>supersede <span class="hljs-keyword">or </span>modify the terms of any separate license agreement you may have executed with Licensor regarding such Contributions.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L60">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="60">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L61">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="61">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-number">7</span>. Trademarks. This License does not grant permission to use the trade names, trademarks, service marks, <span class="hljs-keyword">or </span>product names of the Licensor, except for the reasonable <span class="hljs-keyword">and </span>customary use in describing the <span class="hljs-keyword">origin </span>of the Work <span class="hljs-keyword">and </span>reproducing the content of the NOTICE file.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L62">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="62">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L63">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="63">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-number">8</span>. <span class="hljs-keyword">Disclaimer </span>of Warranty. Unless required <span class="hljs-keyword">by </span>applicable law <span class="hljs-keyword">or </span>agreed to in writing, Licensor provides the Work (<span class="hljs-keyword">and </span>each Contributor provides its Contributions) on an <span class="hljs-string">&quot;AS IS&quot;</span> <span class="hljs-keyword">BASIS, </span>WITHOUT WARRANTIES <span class="hljs-keyword">OR </span>CONDITIONS OF ANY KIND, <span class="hljs-keyword">either </span>express <span class="hljs-keyword">or </span>implied, including, without limitation, any warranties <span class="hljs-keyword">or </span>conditions of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, <span class="hljs-keyword">or </span>FITNESS FOR A PARTICULAR PURPOSE. You are solely responsible for determining the appropriateness of using <span class="hljs-keyword">or </span>redistributing the Work <span class="hljs-keyword">and </span>assume any risks associated with Your exercise of permissions under this License.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L64">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="64">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L65">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="65">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-number">9</span>. Limitation of Liability. In no event <span class="hljs-keyword">and </span>under no legal theory, whether in tort (including negligence), contract, <span class="hljs-keyword">or </span>otherwise, unless required <span class="hljs-keyword">by </span>applicable law (such as deliberate <span class="hljs-keyword">and </span>grossly negligent acts) <span class="hljs-keyword">or </span>agreed to in writing, <span class="hljs-keyword">shall </span>any Contributor <span class="hljs-keyword">be </span>liable to You for damages, including any <span class="hljs-keyword">direct, </span>indirect, special, incidental, <span class="hljs-keyword">or </span>consequential damages of any character arising as a result of this License <span class="hljs-keyword">or </span>out of the use <span class="hljs-keyword">or </span>inability to use the Work (including <span class="hljs-keyword">but </span>not limited to damages for loss of goodwill, work stoppage, computer failure <span class="hljs-keyword">or </span>malfunction, <span class="hljs-keyword">or </span>any <span class="hljs-keyword">and </span>all other commercial damages <span class="hljs-keyword">or </span>losses), even if such Contributor has <span class="hljs-keyword">been </span>advised of the possibility of such damages.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L66">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="66">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L67">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="67">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-number">10</span>. Accepting Warranty <span class="hljs-keyword">or </span><span class="hljs-keyword">Additional </span>Liability. While redistributing the Work <span class="hljs-keyword">or </span>Derivative Works thereof, You may choose to offer, <span class="hljs-keyword">and </span>charge a fee for, acceptance of support, warranty, indemnity, <span class="hljs-keyword">or </span>other liability obligations <span class="hljs-keyword">and/or </span>rights consistent with this License. However, in accepting such obligations, You may act only on Your own <span class="hljs-keyword">behalf </span><span class="hljs-keyword">and </span>on Your sole responsibility, not on <span class="hljs-keyword">behalf </span>of any other Contributor, <span class="hljs-keyword">and </span>only if You agree to indemnify, defend, <span class="hljs-keyword">and </span>hold each Contributor harmless for any liability incurred <span class="hljs-keyword">by, </span><span class="hljs-keyword">or </span>claims asserted against, such Contributor <span class="hljs-keyword">by </span>reason of your accepting any such warranty <span class="hljs-keyword">or </span><span class="hljs-keyword">additional </span>liability.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L68">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="68">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L69">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="69">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><span class="hljs-number">11</span>. Termination. This License will terminate automatically <span class="hljs-keyword">and </span>immediately if You fail to comply with any of its terms <span class="hljs-keyword">and </span>conditions. Upon termination, You must cease all use of the Work <span class="hljs-keyword">and </span>any Derivative Works <span class="hljs-keyword">and </span>delete all copies in Your possession.<!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L70">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="70">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START --><!-- HTML_TAG_END --></td>
-					</tr>
-					<tr class="" id="L71">
-						
-						<td class="blob-line-num sticky left-0 w-1 cursor-pointer select-none pl-5 pr-3 text-right align-top text-gray-400/80 hover:text-black dark:text-gray-500 dark:hover:text-white bg-white dark:bg-gray-950" data-line-num="71">
-							<div class="absolute inset-y-0 right-0 border-r"></div></td>
-						<td class="blob-line overflow-visible px-3 whitespace-pre"><!-- HTML_TAG_START -->END OF TERMS <span class="hljs-keyword">AND </span>CONDITIONS<!-- HTML_TAG_END --></td>
-					</tr></tbody></table></div>
-	</div></div></div>
-				</div></section></div></main>
-
-	</div>
-		<script>
-			 import("\/front\/build\/kube-c77f16c\/index.js"); window.moonSha = "kube-c77f16c\/"; window.__hf_deferred =
-			{};
-		</script>
-		<!-- Stripe -->
-		<script>
-			if (["hf.co", "huggingface.co"].includes(window.location.hostname)) {
-				const script = document.createElement("script");
-				script.src = "https://js.stripe.com/v3/";
-				script.async = true;
-				document.head.appendChild(script);
-			}
-		</script>
-	</body>
-</html>
+(a) You must give any other recipients of the Work or Derivative Works a copy of this License; and
+
+(b) You must cause any modified files to carry prominent notices stating that You changed the files; and
+
+(c) You must retain, in the Source form of any Derivative Works that You distribute, all copyright, patent, trademark, and attribution notices from the Source form of the Work, excluding those notices that do not pertain to any part of the Derivative Works; and
+
+(d) If the Work includes a "NOTICE" text file as part of its distribution, then any Derivative Works that You distribute must include a readable copy of the attribution notices contained within such NOTICE file, excluding those notices that do not pertain to any part of the Derivative Works, in at least one of the following places: within a NOTICE text file distributed as part of the Derivative Works; within the Source form or documentation, if provided along with the Derivative Works; or, within a display generated by the Derivative Works, if and wherever such third-party notices normally appear. The contents of the NOTICE file are for informational purposes only and do not modify the License. You may add Your own attribution notices within Derivative Works that You distribute, alongside or as an addendum to the NOTICE text from the Work, provided that such additional attribution notices cannot be construed as modifying the License.
+
+You may add Your own copyright statement to Your modifications and may provide additional or different license terms and conditions for use, reproduction, or distribution of Your modifications, or for any such Derivative Works as a whole, provided Your use, reproduction, and distribution of the Work otherwise complies with the conditions stated in this License.
+
+5. Commercial Use Limitation.
+
+(a) The rights granted under this License for Commercial Use are conditioned upon You or Your Legal Entity not exceeding the Threshold.
+
+(b) Any Commercial Use of the Work or a Derivative Work by a Legal Entity that exceeds the Threshold is not licensed under this Agreement.
+
+(c) The Threshold shall not apply to a Qualified Non-Profit Organization's use of the Work or a Derivative Work for Non-Commercial or Research Purposes.
+
+6. Submission of Contributions. Unless You explicitly state otherwise, any Contribution intentionally submitted for inclusion in the Work by You to the Licensor shall be under the terms and conditions of this License, without any additional terms or conditions. Notwithstanding the above, nothing herein shall supersede or modify the terms of any separate license agreement you may have executed with Licensor regarding such Contributions.
+
+7. Trademarks. This License does not grant permission to use the trade names, trademarks, service marks, or product names of the Licensor, except for the reasonable and customary use in describing the origin of the Work and reproducing the content of the NOTICE file.
+
+8. Disclaimer of Warranty. Unless required by applicable law or agreed to in writing, Licensor provides the Work (and each Contributor provides its Contributions) on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied, including, without limitation, any warranties or conditions of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A PARTICULAR PURPOSE. You are solely responsible for determining the appropriateness of using or redistributing the Work and assume any risks associated with Your exercise of permissions under this License.
+
+9. Limitation of Liability. In no event and under no legal theory, whether in tort (including negligence), contract, or otherwise, unless required by applicable law (such as deliberate and grossly negligent acts) or agreed to in writing, shall any Contributor be liable to You for damages, including any direct, indirect, special, incidental, or consequential damages of any character arising as a result of this License or out of the use or inability to use the Work (including but not limited to damages for loss of goodwill, work stoppage, computer failure or malfunction, or any and all other commercial damages or losses), even if such Contributor has been advised of the possibility of such damages.
+
+10. Accepting Warranty or Additional Liability. While redistributing the Work or Derivative Works thereof, You may choose to offer, and charge a fee for, acceptance of support, warranty, indemnity, or other liability obligations and/or rights consistent with this License. However, in accepting such obligations, You may act only on Your own behalf and on Your sole responsibility, not on behalf of any other Contributor, and only if You agree to indemnify, defend, and hold each Contributor harmless for any liability incurred by, or claims asserted against, such Contributor by reason of your accepting any such warranty or additional liability.
+
+11. Termination. This License will terminate automatically and immediately if You fail to comply with any of its terms and conditions. Upon termination, You must cease all use of the Work and any Derivative Works and delete all copies in Your possession.
+
+END OF TERMS AND CONDITIONS
