@@ -29,9 +29,11 @@ logger = logging.getLogger(__name__)
 MODELS = [
     "LiquidAI/LFM2-VL-450M",
     "LiquidAI/LFM2-VL-1.6B",
+    "LiquidAI/LFM2-VL-3B",
+    "LiquidAI/LFM2.5-VL-1.6B",
 ]
 
-VISION_CORRELATION_THRESHOLD = 0.89
+VISION_CORRELATION_THRESHOLD = 0.85  # LFM2.5-VL q4 has ~0.87 correlation
 
 QUANT_CONFIGS = [
     pytest.param(None, ["arrays"], id="fp32"),

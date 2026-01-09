@@ -8,6 +8,7 @@ Run with:
     uv run pytest tests/test_lfm2_vl/test_community.py -v -k "fp32"
 """
 
+import gc
 import logging
 import pathlib
 
@@ -26,6 +27,8 @@ logger = logging.getLogger(__name__)
 MODELS = [
     "LiquidAI/LFM2-VL-450M",
     "LiquidAI/LFM2-VL-1.6B",
+    "LiquidAI/LFM2-VL-3B",
+    "LiquidAI/LFM2.5-VL-1.6B",
 ]
 
 QUANT_CONFIGS = [
@@ -406,35 +409,39 @@ def test_community_comparison(
     if not community_decoder_file:
         pytest.skip(f"Community decoder not available on HF for {model_id}")
 
-    # Load local models
-    local_embed_tokens = load_onnx_session(local_embed_tokens_file)
-    local_embed_images = load_onnx_session(local_vision_file)
-    local_decoder = load_onnx_session(local_decoder_file)
-
-    # Load community models
-    community_embed_tokens = load_onnx_session(community_embed_tokens_file)
-    community_vision = load_onnx_session(community_vision_file)
-    community_decoder = load_onnx_session(community_decoder_file)
-
     # Load and preprocess image
     image = Image.open(cardinal_image).convert("RGB")
     image = pad_to_square(image)
 
-    # Run PyTorch
+    # === 1. Run PyTorch ===
     pytorch_logits = run_pytorch_vl(model, processor, image, prompt)
     logger.info(f"  PyTorch logits: shape={pytorch_logits.shape}")
 
-    # Run local ONNX
+    # === 2. Load local ONNX, run, then release ===
+    local_embed_tokens = load_onnx_session(local_embed_tokens_file)
+    local_embed_images = load_onnx_session(local_vision_file)
+    local_decoder = load_onnx_session(local_decoder_file)
+
     local_logits = run_local_onnx_vl(
         local_embed_tokens, local_embed_images, local_decoder, processor, image, prompt
     )
     logger.info(f"  Local ONNX logits: shape={local_logits.shape}")
 
-    # Run community ONNX
+    del local_embed_tokens, local_embed_images, local_decoder
+    gc.collect()
+
+    # === 3. Load community ONNX, run, then release ===
+    community_embed_tokens = load_onnx_session(community_embed_tokens_file)
+    community_vision = load_onnx_session(community_vision_file)
+    community_decoder = load_onnx_session(community_decoder_file)
+
     community_logits = run_community_onnx_vl(
         community_embed_tokens, community_vision, community_decoder, processor, image, prompt
     )
     logger.info(f"  Community ONNX logits: shape={community_logits.shape}")
+
+    del community_embed_tokens, community_vision, community_decoder
+    gc.collect()
 
     # Compare both against PyTorch
     local_metrics = compute_metrics(pytorch_logits, local_logits)
@@ -523,37 +530,41 @@ def test_community_comparison_multi_image(
     if not community_decoder_file:
         pytest.skip(f"Community decoder not available on HF for {model_id}")
 
-    # Load local models
-    local_embed_tokens = load_onnx_session(local_embed_tokens_file)
-    local_embed_images = load_onnx_session(local_vision_file)
-    local_decoder = load_onnx_session(local_decoder_file)
-
-    # Load community models
-    community_embed_tokens = load_onnx_session(community_embed_tokens_file)
-    community_vision = load_onnx_session(community_vision_file)
-    community_decoder = load_onnx_session(community_decoder_file)
-
     # Load and preprocess images
     images = [
         pad_to_square(Image.open(cardinal_image).convert("RGB")),
         pad_to_square(Image.open(bluejay_image).convert("RGB")),
     ]
 
-    # Run PyTorch
+    # === 1. Run PyTorch ===
     pytorch_logits = run_pytorch_vl_multi(model, processor, images, prompt)
     logger.info(f"  PyTorch logits: shape={pytorch_logits.shape}")
 
-    # Run local ONNX
+    # === 2. Load local ONNX, run, then release ===
+    local_embed_tokens = load_onnx_session(local_embed_tokens_file)
+    local_embed_images = load_onnx_session(local_vision_file)
+    local_decoder = load_onnx_session(local_decoder_file)
+
     local_logits = run_local_onnx_vl_multi(
         local_embed_tokens, local_embed_images, local_decoder, processor, images, prompt
     )
     logger.info(f"  Local ONNX logits: shape={local_logits.shape}")
 
-    # Run community ONNX
+    del local_embed_tokens, local_embed_images, local_decoder
+    gc.collect()
+
+    # === 3. Load community ONNX, run, then release ===
+    community_embed_tokens = load_onnx_session(community_embed_tokens_file)
+    community_vision = load_onnx_session(community_vision_file)
+    community_decoder = load_onnx_session(community_decoder_file)
+
     community_logits = run_community_onnx_vl_multi(
         community_embed_tokens, community_vision, community_decoder, processor, images, prompt
     )
     logger.info(f"  Community ONNX logits: shape={community_logits.shape}")
+
+    del community_embed_tokens, community_vision, community_decoder
+    gc.collect()
 
     # Compare both against PyTorch
     local_metrics = compute_metrics(pytorch_logits, local_logits)
