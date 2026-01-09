@@ -4,11 +4,11 @@ ONNX export and inference tools for [LFM2](https://www.liquid.ai/liquid-foundati
 
 ## 1. Supported Models
 
-| Family | Source Models | Quant Formats |
-|--------|---------------|---------------|
-| **LFM2.5**, **LFM2** | All LFM2 and LFM2.5 text models. LFM2.5-1.2B-Instruct, LFM2-2.6B-Transcript, ... | fp32, fp16, q4, q8 |
-| **LFM2.5-VL**, **LFM2-VL** | All LFM2 and LFM2.5 VL models, LFM2.5-VL-1.6B, LFM2-VL-450M, ... | fp32, fp16, q4, q8 |
-| **LFM2-MoE** | LFM2-MoE-8B-A1B | fp32, fp16, q4, q4f16 |
+| Family | Quant Formats |
+|--------|---------------|
+| **LFM2.5**, **LFM2** | fp32, fp16, q4, q8 |
+| **LFM2.5-VL**, **LFM2-VL** | fp32, fp16, q4, q8 |
+| **LFM2-MoE** | fp32, fp16, q4, q4f16 |
 
 
 ## 2. Installation
@@ -129,9 +129,13 @@ uv run lfm2-bench --model LiquidAI/LFM2.5-1.2B-Instruct \
 
 ### 6.1 LiquidAI
 
+**Text models:**
 - [LiquidAI/LFM2.5-1.2B-Base-ONNX](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Base-ONNX)
 - [LiquidAI/LFM2.5-1.2B-Instruct-ONNX](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-ONNX)
 - [LiquidAI/LFM2.5-1.2B-JP-ONNX](https://huggingface.co/LiquidAI/LFM2.5-1.2B-JP-ONNX)
+- [LiquidAI/LFM2-2.6B-Transcript-ONNX](https://huggingface.co/LiquidAI/LFM2-2.6B-Transcript-ONNX)
+
+**Vision-Language:**
 - [LiquidAI/LFM2.5-VL-1.6B-ONNX](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-ONNX)
 
 ### 6.2 onnx-community
