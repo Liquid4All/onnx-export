@@ -34,12 +34,15 @@ logger = logging.getLogger(__name__)
 MODELS = [
     "LiquidAI/LFM2-VL-450M",
     "LiquidAI/LFM2-VL-1.6B",
+    "LiquidAI/LFM2-VL-3B",
+    "LiquidAI/LFM2.5-VL-1.6B",
 ]
 
 QUANT_CONFIGS = [
     pytest.param(None, None, id="fp32"),
     pytest.param("fp16", "fp16", id="fp16"),
     pytest.param("q4", "q4", id="q4"),
+    pytest.param("q4", "q8", id="q4d-q8v"),
     pytest.param("q8", "q8", id="q8"),
 ]
 
