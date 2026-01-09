@@ -1179,9 +1179,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         )
 
         # Community naming: Add_1 for attention residual
-        hidden_state = self.make_node(
-            "Add", [residual, out_proj], [f"{layer}/Add_1/output_0"]
-        )
+        hidden_state = self.make_node("Add", [residual, out_proj], [f"{layer}/Add_1/output_0"])
 
         residual2 = hidden_state
         normed2 = self.make_vision_layernorm(
@@ -1702,5 +1700,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         self.build_value_info()
 
         model = self.build_graph("embed_images")
-        logger.info(f"Vision + projector model built: {len(self.nodes)} nodes, {len(self.value_info)} value_info")
+        logger.info(
+            f"Vision + projector model built: {len(self.nodes)} nodes, {len(self.value_info)} value_info"
+        )
         return model

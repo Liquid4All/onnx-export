@@ -189,8 +189,12 @@ def test_benchmark_comparison(
         pytest.skip(f"Community ONNX not available on HF for {model_id} {precision or 'fp32'}")
 
     # Benchmark both
-    local_result = benchmark_model(local_onnx_file, tokenizer, f"local-{model_name}-{precision or 'fp32'}")
-    community_result = benchmark_model(community_onnx_file, tokenizer, f"community-{model_name}-{precision or 'fp32'}")
+    local_result = benchmark_model(
+        local_onnx_file, tokenizer, f"local-{model_name}-{precision or 'fp32'}"
+    )
+    community_result = benchmark_model(
+        community_onnx_file, tokenizer, f"community-{model_name}-{precision or 'fp32'}"
+    )
 
     # Log results
     logger.info(f"  Prefill: {PREFILL_TOKENS} tokens, Decode: {DECODE_TOKENS} tokens")

@@ -1354,7 +1354,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         # Community naming: model.layers.{num_layers}.final_norm_layernorm.weight
         num_layers = self.config.num_hidden_layers
         final_norm_weight = f"model.layers.{num_layers}.final_norm_layernorm.weight"
-        final_norm_output = f"/model/layers.{num_layers}/final_norm_layernorm/SkipLayerNorm/output_0"
+        final_norm_output = (
+            f"/model/layers.{num_layers}/final_norm_layernorm/SkipLayerNorm/output_0"
+        )
 
         self.add_initializer(final_norm_weight, self.weights["model.embedding_norm.weight"])
         normed = self.make_skip_layernorm(
@@ -1505,7 +1507,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
 
         # === Embedding output ===
         self.add_value_info(
-            "/model/embed_tokens/Gather/output_0", TensorProto.FLOAT, ["batch_size", "sequence_length", H]
+            "/model/embed_tokens/Gather/output_0",
+            TensorProto.FLOAT,
+            ["batch_size", "sequence_length", H],
         )
 
         # === Per-layer outputs ===
@@ -1534,16 +1538,24 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                     ["batch_size", 3 * H, "sequence_length"],
                 )
                 self.add_value_info(
-                    f"{prefix}/conv/Split/output_0", TensorProto.FLOAT, ["batch_size", H, "sequence_length"]
+                    f"{prefix}/conv/Split/output_0",
+                    TensorProto.FLOAT,
+                    ["batch_size", H, "sequence_length"],
                 )
                 self.add_value_info(
-                    f"{prefix}/conv/Split/output_1", TensorProto.FLOAT, ["batch_size", H, "sequence_length"]
+                    f"{prefix}/conv/Split/output_1",
+                    TensorProto.FLOAT,
+                    ["batch_size", H, "sequence_length"],
                 )
                 self.add_value_info(
-                    f"{prefix}/conv/Split/output_2", TensorProto.FLOAT, ["batch_size", H, "sequence_length"]
+                    f"{prefix}/conv/Split/output_2",
+                    TensorProto.FLOAT,
+                    ["batch_size", H, "sequence_length"],
                 )
                 self.add_value_info(
-                    f"{prefix}/conv/Mul_1/output_0", TensorProto.FLOAT, ["batch_size", H, "sequence_length"]
+                    f"{prefix}/conv/Mul_1/output_0",
+                    TensorProto.FLOAT,
+                    ["batch_size", H, "sequence_length"],
                 )
                 self.add_value_info(
                     f"{prefix}/conv/Conv_Input/output_0",
@@ -1553,9 +1565,13 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                 self.add_value_info(f"{prefix}/conv/Shape/output_0", TensorProto.INT64, [3])
                 self.add_value_info(f"{prefix}/conv/Gather_1/output_0", TensorProto.INT64, [])
                 self.add_value_info(f"{prefix}/conv/Neg_Seq_Len/output_0", TensorProto.INT64, [])
-                self.add_value_info(f"{prefix}/conv/Unsqueeze_starts/output_0", TensorProto.INT64, [1])
                 self.add_value_info(
-                    f"{prefix}/conv/Mul_2/output_0", TensorProto.FLOAT, ["batch_size", H, "sequence_length"]
+                    f"{prefix}/conv/Unsqueeze_starts/output_0", TensorProto.INT64, [1]
+                )
+                self.add_value_info(
+                    f"{prefix}/conv/Mul_2/output_0",
+                    TensorProto.FLOAT,
+                    ["batch_size", H, "sequence_length"],
                 )
                 self.add_value_info(
                     f"{prefix}/conv/Transpose_2/output_0",

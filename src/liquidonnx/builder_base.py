@@ -94,9 +94,7 @@ class ONNXBuilderBase:
             tensor = tensor.astype(dtype)
         self.initializers.append(numpy_helper.from_array(tensor, name))
 
-    def add_value_info(
-        self, name: str, elem_type: int, shape: list[int | str]
-    ) -> None:
+    def add_value_info(self, name: str, elem_type: int, shape: list[int | str]) -> None:
         """Add shape annotation for an intermediate tensor.
 
         Args:
@@ -218,7 +216,9 @@ class ONNXBuilderBase:
         Returns:
             Output name "{path}/Gelu/output_0"
         """
-        return self.make_node("Gelu", [input_name], [self._output_name(path, "Gelu")], approximate=approximate)
+        return self.make_node(
+            "Gelu", [input_name], [self._output_name(path, "Gelu")], approximate=approximate
+        )
 
     def make_layernorm(
         self,
@@ -334,9 +334,7 @@ class ONNXBuilderBase:
 
         return matmul_out
 
-    def make_slice_last_n(
-        self, input_name: str, n_elements: str, path: str, axis: int = 2
-    ) -> str:
+    def make_slice_last_n(self, input_name: str, n_elements: str, path: str, axis: int = 2) -> str:
         """Slice last N elements along axis (dynamic N).
 
         Args:
@@ -349,7 +347,9 @@ class ONNXBuilderBase:
             Output name "{path}/Slice/output_0"
         """
         neg_n = self.make_mul(n_elements, self.get_constant(-1), self._output_name(path, "Mul"))
-        start = self.make_unsqueeze(neg_n, self.get_constant([0]), self._output_name(path, "Unsqueeze"))
+        start = self.make_unsqueeze(
+            neg_n, self.get_constant([0]), self._output_name(path, "Unsqueeze")
+        )
 
         return self.make_slice(
             input_name,
