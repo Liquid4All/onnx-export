@@ -843,12 +843,10 @@ class LFM2Builder(ONNXBuilderBase):
         the community model format.
         """
         H = self.config.hidden_size
-        nh = self.config.num_attention_heads
         nkv = self.config.num_key_value_heads
         hd = self.head_dim
         kv_hidden = nkv * hd
         intermediate = self.config.intermediate_size
-        L = self.config.conv_L_cache
         num_layers = self.config.num_hidden_layers
         mask_prefix = "/model/attn_mask_reformat/attn_mask_subgraph"
 

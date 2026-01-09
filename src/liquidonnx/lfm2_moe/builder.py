@@ -1480,15 +1480,11 @@ class LFM2MoEBuilder(ONNXBuilderBase):
     def build_value_info(self):
         """Build ValueInfo entries for weights and intermediate tensors."""
         H = self.config.hidden_size
-        nh = self.config.num_attention_heads
         nkv = self.config.num_key_value_heads
         hd = self.head_dim
         kv_hidden = nkv * hd
         intermediate = self.config.intermediate_size
-        moe_intermediate = self.config.moe_intermediate_size
-        L = self.config.conv_L_cache
         num_layers = self.config.num_hidden_layers
-        num_experts = self.config.num_experts
         mask_prefix = "/model/attn_mask_reformat/attn_mask_subgraph"
 
         # === Weight shapes (from initializers) ===

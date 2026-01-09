@@ -1535,8 +1535,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
     def build_value_info(self):
         """Build ValueInfo entries for weights and intermediate tensors."""
         H = self.vision_hidden
-        nh = self.vision_config.num_attention_heads
-        hd = self.head_dim
         intermediate = self.vision_config.intermediate_size
         num_layers = self.vision_config.num_hidden_layers
         text_hidden = self.text_hidden
