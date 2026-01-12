@@ -484,8 +484,8 @@ class DepthformerWrapper(nn.Module):
             # Get hidden state for this codebook position
             pos_hidden = depth_output[:, i, :]  # [B, 1024]
 
-            # Apply to_logits for this codebook
-            logits_i = self.depth_embeddings[i].to_logits(pos_hidden)  # [B, 2049]
+            # Apply get_logits for this codebook (includes RMSNorm before projection)
+            logits_i = self.depth_embeddings[i].get_logits(pos_hidden)  # [B, 2049]
             all_logits.append(logits_i.unsqueeze(1))  # [B, 1, 2049]
 
         # Stack all codebook logits
@@ -568,21 +568,31 @@ def export_depthformer(
 
     output_path = onnx_dir / "depthformer.onnx"
 
-    with torch.no_grad():
-        torch.onnx.export(
-            wrapper,
-            (hidden_states,),
-            str(output_path),
-            input_names=["hidden_states"],
-            output_names=["codebook_logits"],
-            dynamic_axes={
-                "hidden_states": {0: "batch"},
-                "codebook_logits": {0: "batch"},
-            },
-            opset_version=18,
-            do_constant_folding=True,
-            dynamo=False,
-        )
+    # Suppress verbose IR graph dump from PyTorch ONNX exporter
+    import sys
+    import io
+    old_stdout = sys.stdout
+    sys.stdout = io.StringIO()
+
+    try:
+        with torch.no_grad():
+            torch.onnx.export(
+                wrapper,
+                (hidden_states,),
+                str(output_path),
+                input_names=["hidden_states"],
+                output_names=["codebook_logits"],
+                dynamic_axes={
+                    "hidden_states": {0: "batch"},
+                    "codebook_logits": {0: "batch"},
+                },
+                opset_version=18,
+                do_constant_folding=True,
+                dynamo=False,
+                verbose=False,
+            )
+    finally:
+        sys.stdout = old_stdout
 
     logger.info(f"depthformer saved to {output_path}")
     return output_path
@@ -1109,22 +1119,44 @@ def export_audio_lm_head(
 
 
 def do_quantize(onnx_dir: pathlib.Path, bits: int, block_size: int, symmetric: bool):
-    """Quantize decoder model."""
-    decoder_fp32 = onnx_dir / "decoder.onnx"
-    decoder_output = onnx_dir / f"decoder_q{bits}.onnx"
+    """Quantize all exportable models to specified precision."""
+    # Models to quantize with their settings
+    # (model_name, exclude_lm_head)
+    models_to_quantize = [
+        ("decoder", True),
+        ("audio_encoder", False),
+        ("depthformer", False),
+        ("audio_detokenizer", False),
+        ("audio_detokenizer_lfm", False),  # PyTorch-exported version (preferred)
+        ("embed_tokens", False),
+        ("audio_embedding", False),
+        ("audio_lm_head", False),
+    ]
 
-    if decoder_fp32.exists() and not decoder_output.exists():
-        _, orig_mb = get_model_size(decoder_fp32)
-        quantize_model(
-            decoder_fp32,
-            decoder_output,
-            bits=bits,
-            block_size=block_size,
-            exclude_lm_head=True,
-            symmetric=symmetric,
-        )
-        _, quant_mb = get_model_size(decoder_output)
-        logger.info(f"  decoder: {orig_mb:.1f} -> {quant_mb:.1f} MB")
+    for model_name, exclude_lm_head in models_to_quantize:
+        fp32_path = onnx_dir / f"{model_name}.onnx"
+        quant_path = onnx_dir / f"{model_name}_q{bits}.onnx"
+
+        if not fp32_path.exists():
+            continue
+        if quant_path.exists():
+            logger.info(f"  {model_name}_q{bits}.onnx already exists, skipping")
+            continue
+
+        try:
+            _, orig_mb = get_model_size(fp32_path)
+            quantize_model(
+                fp32_path,
+                quant_path,
+                bits=bits,
+                block_size=block_size,
+                exclude_lm_head=exclude_lm_head,
+                symmetric=symmetric,
+            )
+            _, quant_mb = get_model_size(quant_path)
+            logger.info(f"  {model_name}: {orig_mb:.1f} -> {quant_mb:.1f} MB")
+        except Exception as e:
+            logger.warning(f"  Failed to quantize {model_name}: {e}")
 
 
 # === 7. Audio Detokenizer Export (hybrid) ===
@@ -1143,6 +1175,7 @@ class AudioDetokenizerLFMWrapper(nn.Module):
         self.emb = detokenizer.emb  # FusedEmbedding
         self.lfm = detokenizer.lfm  # Lfm2Model
         self.lin = detokenizer.lin  # Linear
+        self.sliding_window_size = getattr(detokenizer, "sliding_window_size", 30)
 
     def forward(self, audio_codes: torch.Tensor) -> torch.Tensor:
         """
@@ -1150,15 +1183,27 @@ class AudioDetokenizerLFMWrapper(nn.Module):
             audio_codes: [batch, 8, time] - audio codes from depthformer
 
         Returns:
-            istft_input: [batch, time', 1282] - input for ISTFT (real + imag frames)
+            stft_features: [batch, time', 1282] - STFT features (log_magnitude + angle)
+
+        Reference: liquid_audio/detokenizer.py LFM2AudioDetokenizer.forward()
         """
         # Embed audio codes
         x = self.emb(audio_codes)  # [B, T, 512]
 
-        # Run through LFM
-        x = self.lfm(x).last_hidden_state  # [B, T, 512]
+        # 6x upsample (critical for correct output)
+        upsample_size = 6 * x.shape[1]
+        x = torch.nn.functional.interpolate(x.mT, upsample_size, mode="nearest-exact").mT
 
-        # Project to ISTFT input space
+        # Create sliding window attention mask
+        # Reference: liquid_audio/detokenizer.py lines 125-128
+        idx = torch.arange(x.shape[1], device=x.device)
+        d_idx = idx - idx[:, None]
+        mask = torch.logical_and(d_idx <= 0, d_idx > -self.sliding_window_size)[None, None, ...]
+
+        # Run through LFM with attention mask
+        x = self.lfm(inputs_embeds=x, attention_mask=mask, use_cache=False).last_hidden_state
+
+        # Project to STFT feature space (log_magnitude + angle)
         x = self.lin(x)  # [B, T, 1282]
 
         return x
@@ -1191,10 +1236,10 @@ def export_audio_detokenizer_lfm(
                 (audio_codes,),
                 str(output_path),
                 input_names=["audio_codes"],
-                output_names=["istft_input"],
+                output_names=["stft_features"],
                 dynamic_axes={
                     "audio_codes": {0: "batch", 2: "time"},
-                    "istft_input": {0: "batch", 1: "time"},
+                    "stft_features": {0: "batch", 1: "time"},
                 },
                 opset_version=18,
                 do_constant_folding=True,
@@ -1225,6 +1270,134 @@ def save_istft_config(config: dict, onnx_dir: pathlib.Path):
         json.dump(istft_config, f, indent=2)
 
     logger.info(f"ISTFT config saved to {config_path}")
+
+
+def export_audio_detokenizer_pytorch(model_path: str, onnx_dir: pathlib.Path) -> pathlib.Path | None:
+    """Export audio detokenizer using PyTorch/transformers (more accurate than builder).
+
+    This creates audio_detokenizer_lfm.onnx which uses the transformers Lfm2Model.
+    The inference code will prefer this over the builder-based model.
+    """
+    import json
+    import os
+
+    from huggingface_hub import snapshot_download
+    from safetensors.torch import load_file
+    from transformers import Lfm2Config, Lfm2Model
+
+    logger.info("Exporting audio_detokenizer_lfm.onnx (PyTorch/transformers)...")
+
+    try:
+        # Download audio_detokenizer weights
+        cache_path = pathlib.Path(
+            snapshot_download(model_path, allow_patterns=["audio_detokenizer/*"])
+        )
+        detok_path = cache_path / "audio_detokenizer"
+
+        if not detok_path.exists():
+            logger.warning("Audio detokenizer not found in model, skipping PyTorch export")
+            return None
+
+        # Load config
+        with open(detok_path / "config.json") as f:
+            config_dict = json.load(f)
+
+        # Convert sliding_attention to full_attention for transformers compatibility
+        # The sliding window attention mask is manually applied in forward()
+        sliding_window = config_dict.get("sliding_window", 30)
+        layer_types = config_dict.get("layer_types", [])
+        config_dict["layer_types"] = [
+            "full_attention" if lt == "sliding_attention" else lt
+            for lt in layer_types
+        ]
+        lfm_config = Lfm2Config(**config_dict)
+
+        # Create FusedEmbedding
+        class FusedEmbedding(torch.nn.Module):
+            def __init__(self, dim: int, codebooks: int = 8, vocab_size: int = 2048):
+                super().__init__()
+                self.emb = torch.nn.Embedding(codebooks * vocab_size, dim)
+                self.codebooks = codebooks
+                self.vocab_size = vocab_size
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                offsets = torch.arange(self.codebooks, device=x.device) * self.vocab_size
+                offset_x = offsets[:, None] + x
+                return self.emb(offset_x).mean(1)
+
+        # Create detokenizer wrapper
+        class AudioDetokPyTorch(torch.nn.Module):
+            def __init__(self, config, sliding_window: int):
+                super().__init__()
+                self.emb = FusedEmbedding(config.hidden_size)
+                self.lfm = Lfm2Model(config)
+                self.lin = torch.nn.Linear(config.hidden_size, 1282)
+                self.sliding_window = sliding_window
+
+            def forward(self, audio_codes: torch.Tensor) -> torch.Tensor:
+                x = self.emb(audio_codes)
+                # 6x upsample (critical) - use transpose instead of .mT for ONNX compatibility
+                # Use "nearest" instead of "nearest-exact" for ONNX opset 14 compatibility
+                upsample_size = 6 * x.shape[1]
+                x = x.transpose(-1, -2)  # [B, T, H] -> [B, H, T]
+                x = torch.nn.functional.interpolate(x, upsample_size, mode="nearest")
+                x = x.transpose(-1, -2)  # [B, H, T*6] -> [B, T*6, H]
+
+                # Create sliding window attention mask (critical for audio quality)
+                # Each position attends to at most sliding_window previous positions
+                seq_len = x.shape[1]
+                idx = torch.arange(seq_len, device=x.device)
+                d_idx = idx - idx[:, None]
+                mask = torch.logical_and(d_idx <= 0, d_idx > -self.sliding_window)
+                mask = mask[None, None, ...]  # [1, 1, S, S]
+
+                x = self.lfm(inputs_embeds=x, attention_mask=mask, use_cache=False).last_hidden_state
+                x = self.lin(x)
+                return x
+
+        logger.info("Creating PyTorch model...")
+        model = AudioDetokPyTorch(lfm_config, sliding_window)
+
+        # Load weights
+        weights = load_file(str(detok_path / "model.safetensors"))
+        model.load_state_dict(weights, strict=False)
+        model.eval()
+
+        # Export to ONNX
+        logger.info("Exporting to ONNX...")
+        codes = torch.randint(0, 2048, (1, 8, 10), dtype=torch.long)
+        output_path = onnx_dir / "audio_detokenizer_lfm.onnx"
+
+        # Use legacy exporter (dynamo=False) because dynamo can't handle
+        # dynamic attention mask creation in the forward pass
+        with torch.no_grad():
+            torch.onnx.export(
+                model,
+                (codes,),
+                str(output_path),
+                input_names=["audio_codes"],
+                output_names=["stft_features"],
+                dynamic_axes={
+                    "audio_codes": {0: "batch", 2: "time"},
+                    "stft_features": {0: "batch", 1: "time"},
+                },
+                opset_version=17,
+                do_constant_folding=True,
+                dynamo=False,
+                verbose=False,
+            )
+        # Clean up model
+        del model
+        gc.collect()
+
+        logger.info(f"audio_detokenizer_lfm saved to {output_path}")
+        return output_path
+
+    except Exception as e:
+        logger.warning(f"Failed to export audio_detokenizer_lfm: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 # === 8. Audio Detokenizer Export (builder) ===
@@ -1373,16 +1546,61 @@ class AudioDetokenizerBuilder:
             ["/emb/reshaped/output_0"],
         )
 
-        # Sum across codebooks: [B, T, 8, 512] -> [B, T, 512]
-        self.add_initializer("sum_axis", np.array([2], dtype=np.int64))
+        # Mean across codebooks: [B, T, 8, 512] -> [B, T, 512]
+        # Reference: liquid_audio/detokenizer.py FusedEmbedding.forward() uses .mean(1)
+        self.add_initializer("mean_axis", np.array([2], dtype=np.int64))
         self.make_node(
-            "ReduceSum",
-            ["/emb/reshaped/output_0", "sum_axis"],
-            ["/emb/output/output_0"],
+            "ReduceMean",
+            ["/emb/reshaped/output_0", "mean_axis"],
+            ["/emb/summed/output_0"],
             keepdims=0,
         )
 
-        return "/emb/output/output_0"
+        # Apply embedding norm (critical for correct output scaling)
+        emb_output = "/emb/summed/output_0"
+        if "lfm.embedding_norm.weight" in self.weights:
+            self.add_initializer(
+                "lfm.embedding_norm.weight",
+                self.weights["lfm.embedding_norm.weight"].astype(np.float32),
+            )
+            emb_output = self.build_layernorm(
+                "/emb/summed/output_0", "lfm.embedding_norm.weight", "/emb/norm"
+            )
+
+        # === 6x Upsampling ===
+        # Reference: liquid_audio/detokenizer.py LFM2AudioDetokenizer.forward()
+        # upsample_size = 6 * x.shape[1]
+        # x = nn.functional.interpolate(x.mT, upsample_size, mode="nearest-exact").mT
+        #
+        # Flow: [B, T, H] → transpose → [B, H, T] → resize 6x → [B, H, 6T] → transpose → [B, 6T, H]
+
+        # Transpose [B, T, H] → [B, H, T]
+        self.make_node(
+            "Transpose", [emb_output], ["/emb/pre_upsample_t/output_0"], perm=[0, 2, 1]
+        )
+
+        # Resize: [B, H, T] → [B, H, 6*T]
+        # Using Resize with scales [1, 1, 6] for nearest-neighbor interpolation
+        self.add_initializer("upsample_scales", np.array([1.0, 1.0, 6.0], dtype=np.float32))
+        # Empty roi and sizes as per ONNX spec (use scales instead)
+        self.add_initializer("empty_roi", np.array([], dtype=np.float32))
+        self.add_initializer("empty_sizes", np.array([], dtype=np.int64))
+
+        node = helper.make_node(
+            "Resize",
+            ["/emb/pre_upsample_t/output_0", "empty_roi", "upsample_scales"],
+            ["/emb/upsampled/output_0"],
+            name="/emb/upsample",
+            mode="nearest",
+            coordinate_transformation_mode="asymmetric",
+            nearest_mode="floor",
+        )
+        self.nodes.append(node)
+
+        # Transpose back: [B, H, 6T] → [B, 6T, H]
+        return self.make_node(
+            "Transpose", ["/emb/upsampled/output_0"], ["/emb/post_upsample_t/output_0"], perm=[0, 2, 1]
+        )
 
     def build_layernorm(self, input_name: str, weight_name: str, path: str) -> str:
         """Build SimplifiedLayerNormalization (no bias)."""
@@ -1920,7 +2138,13 @@ def export_full_model(
             save_istft_config(config, onnx_dir)
 
     except ImportError:
-        logger.warning("liquid_audio not available, using builder fallback for depthformer")
+        logger.warning("=" * 60)
+        logger.warning("liquid_audio package not available")
+        logger.warning("  - audio_encoder.onnx will NOT be exported (ASR mode unavailable)")
+        logger.warning("  - Using builder fallback for depthformer and audio_detokenizer")
+        logger.warning("  - TTS and text modes will still work")
+        logger.warning("To enable ASR: pip install liquid-audio")
+        logger.warning("=" * 60)
         export_depthformer_from_weights(weights, config, onnx_dir)
     except Exception as e:
         logger.warning(f"Failed to load PyTorch model: {e}")
@@ -1940,6 +2164,13 @@ def export_full_model(
         save_istft_config(config, onnx_dir)
     except Exception as e:
         logger.warning(f"Failed to export audio_detokenizer: {e}")
+
+    # Export audio detokenizer using PyTorch/transformers (preferred, more accurate)
+    # This creates audio_detokenizer_lfm.onnx which inference prefers over the builder version
+    try:
+        export_audio_detokenizer_pytorch(model_path, onnx_dir)
+    except Exception as e:
+        logger.warning(f"Failed to export audio_detokenizer_lfm: {e}")
 
     # Clean up
     weights.clear()
