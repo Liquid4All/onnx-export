@@ -8,7 +8,7 @@ dependencies = [
     "onnx",
     "onnxruntime>=1.24.0.dev",  # Nightly for QMoE 14-input support
     "transformers>=5.0.0.dev0",
-    "numpy>=2.2.0",
+    "numpy>=2.2.0,<2.4",  # numba requires numpy < 2.4
     "torch>=2.0.0",
     "pillow",
     "torchvision>=0.24.1",

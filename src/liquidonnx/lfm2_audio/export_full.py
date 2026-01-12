@@ -225,14 +225,20 @@ def export_embed_tokens(
 def export_audio_embedding(
     weights: dict[str, np.ndarray], config: dict, onnx_dir: pathlib.Path
 ) -> pathlib.Path:
-    """Export audio_embedding.onnx (audio token embedding lookup)."""
+    """Export audio_embedding.onnx (audio token embedding lookup).
+
+    Note: The embedding lookup does NOT apply normalization.
+    The embedding_norm (RMSNorm) is only used in get_logits() for the inverse
+    projection (embedding -> logits), not for the forward embedding lookup.
+
+    Reference: liquid_audio/model/transformer.py SharedEmbedding.embed()
+    """
     logger.info("Exporting audio_embedding.onnx...")
 
     nodes = []
     hidden_size = config.get("lfm", {}).get("hidden_size", 2048)
 
     embed_weight = weights["audio_embedding.embedding.weight"].astype(np.float32)
-    norm_weight = weights["audio_embedding.embedding_norm.weight"].astype(np.float32)
 
     inputs = [
         helper.make_tensor_value_info(
@@ -249,24 +255,15 @@ def export_audio_embedding(
 
     initializers = [
         onnx.numpy_helper.from_array(embed_weight, "audio_embedding.weight"),
-        onnx.numpy_helper.from_array(norm_weight, "audio_embedding_norm.weight"),
     ]
 
+    # Just do embedding lookup - no normalization
     nodes.append(
         helper.make_node(
             "Gather",
             ["audio_embedding.weight", "audio_codes"],
-            ["/audio_embedding/Gather/output_0"],
-            axis=0,
-        )
-    )
-
-    nodes.append(
-        helper.make_node(
-            "SimplifiedLayerNormalization",
-            ["/audio_embedding/Gather/output_0", "audio_embedding_norm.weight"],
             ["audio_embeds"],
-            epsilon=1e-5,
+            axis=0,
         )
     )
 

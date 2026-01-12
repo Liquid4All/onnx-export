@@ -283,6 +283,9 @@ class LFM2AudioInferenceFull:
         )
         return outputs[0]  # [batch, 8, 2049]
 
+    # End-of-audio token (same across all codebooks)
+    END_OF_AUDIO_TOKEN = 2048
+
     def _sample_audio_codes_autoregressive(
         self, hidden_states: np.ndarray, temperature: float = 0.9
     ) -> np.ndarray:
@@ -291,6 +294,9 @@ class LFM2AudioInferenceFull:
         This is the correct autoregressive implementation that matches the
         reference liquid_audio code. Each codebook prediction depends on the
         sampled token from the previous codebook.
+
+        Token 2048 is the end-of-audio token. When the model predicts this,
+        it signals the end of audio generation.
         """
         import torch
         from einops import rearrange
@@ -299,8 +305,11 @@ class LFM2AudioInferenceFull:
         codebooks = df["codebooks"]
         depthformer_dim = df["depthformer_dim"]
 
-        # Convert to torch tensor
-        hidden_tensor = torch.from_numpy(hidden_states).float()  # [batch, hidden_size]
+        # Convert to torch tensor and handle different input shapes
+        hidden_tensor = torch.from_numpy(hidden_states).float()
+        # Squeeze to [batch, hidden_size] if needed
+        if hidden_tensor.ndim == 3:
+            hidden_tensor = hidden_tensor.squeeze(1)  # [batch, 1, hidden_size] -> [batch, hidden_size]
         batch_size = hidden_tensor.shape[0]
 
         codes_list = []
@@ -331,24 +340,32 @@ class LFM2AudioInferenceFull:
                         depthformer_out.squeeze()
                     )  # [2049]
 
-                # Sample (only from valid codes, exclude special token 2048)
-                valid_logits = logits[:2048].numpy()
+                # Sample from all logits including end-of-audio token (2048)
+                all_logits = logits.numpy()
                 if temperature is None or temperature <= 0:
-                    token = int(np.argmax(valid_logits))
+                    token = int(np.argmax(all_logits))
                 else:
-                    token = self._sample(valid_logits, temperature, top_p=0.95)
+                    token = self._sample(all_logits, temperature, top_p=0.95)
 
                 out_tokens.append(token)
 
-                # Get embedding for next iteration
+                # Get embedding for next iteration (use clamped token for embedding lookup)
+                embed_token = min(token, 2047)  # Clamp to valid embedding range
                 with torch.no_grad():
                     depthformer_token = df["depth_embeddings"][i](
-                        torch.tensor(token)
+                        torch.tensor(embed_token)
                     ).squeeze()
 
             codes_list.append(out_tokens)
 
         return np.array(codes_list, dtype=np.int64)  # [batch, 8]
+
+    def _is_end_of_audio(self, frame_codes: np.ndarray) -> bool:
+        """Check if audio frame indicates end of audio.
+
+        End of audio is signaled when any codebook outputs the end token (2048).
+        """
+        return np.any(frame_codes >= self.END_OF_AUDIO_TOKEN)
 
     def _sample_audio_codes(
         self, codebook_logits: np.ndarray, temperature: float = 0.9
@@ -427,45 +444,101 @@ class LFM2AudioInferenceFull:
 
     # === ASR (Audio → Text) ===
 
-    def transcribe(
-        self,
-        audio_path: str,
-        max_new_tokens: int = 100,
-        temperature: float = 0.7,
-    ) -> str:
-        """Transcribe audio to text."""
-        if self.audio_encoder_session is None:
-            raise RuntimeError("audio_encoder not loaded, ASR unavailable")
+    def _compute_mel_features(self, audio_path: str) -> tuple[np.ndarray, np.ndarray]:
+        """Compute mel spectrogram features from audio file.
 
-        # Load and preprocess audio
+        Uses liquid_audio processor when available for proper preprocessing,
+        falls back to torchaudio with approximate parameters otherwise.
+
+        Returns:
+            mel_features: [1, time, 128] mel spectrogram
+            mel_lengths: [1] length array
+        """
+        import torch
         import torchaudio
 
         waveform, sample_rate = torchaudio.load(audio_path)
 
         # Resample to 16kHz if needed
         if sample_rate != 16000:
-            resampler = torchaudio.transforms.Resample(sample_rate, 16000)
-            waveform = resampler(waveform)
+            waveform = torchaudio.functional.resample(waveform, sample_rate, 16000)
             sample_rate = 16000
 
         # Convert to mono
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
 
-        # Compute mel spectrogram
-        mel_transform = torchaudio.transforms.MelSpectrogram(
-            sample_rate=16000,
-            n_fft=512,
-            hop_length=160,
-            n_mels=128,
-            power=2.0,
-        )
-        mel_spec = mel_transform(waveform)
-        mel_spec = mel_spec.log2().clamp(min=-10)
+        # Try to use liquid_audio processor for proper preprocessing
+        try:
+            from liquid_audio import LFM2AudioProcessor
 
-        # [1, 128, time] → [1, time, 128]
-        mel_features = mel_spec.squeeze(0).transpose(0, 1).unsqueeze(0).numpy()
-        mel_lengths = np.array([mel_features.shape[1]], dtype=np.int64)
+            processor = LFM2AudioProcessor.from_pretrained(
+                "LiquidAI/LFM2.5-Audio-1.5B",
+                device="cpu",
+            )
+            length = torch.tensor([waveform.shape[1]], dtype=torch.long)
+            mel, mel_length = processor.audio(waveform, length)
+
+            # mel shape: [1, 128, time] -> [1, time, 128]
+            mel_features = mel[0].transpose(0, 1).unsqueeze(0).numpy()
+            mel_lengths = np.array([mel_features.shape[1]], dtype=np.int64)
+            logger.info("Using liquid_audio processor for mel spectrogram")
+
+        except ImportError as e:
+            logger.warning(f"liquid_audio not available ({e}), using torchaudio fallback")
+            # Fallback to torchaudio (less accurate)
+            mel_transform = torchaudio.transforms.MelSpectrogram(
+                sample_rate=16000,
+                n_fft=512,
+                hop_length=160,
+                n_mels=128,
+                power=2.0,
+            )
+            mel_spec = mel_transform(waveform)
+            mel_spec = mel_spec.log2().clamp(min=-10)
+
+            # [1, 128, time] → [1, time, 128]
+            mel_features = mel_spec.squeeze(0).transpose(0, 1).unsqueeze(0).numpy()
+            mel_lengths = np.array([mel_features.shape[1]], dtype=np.int64)
+
+        return mel_features.astype(np.float32), mel_lengths
+
+    def _format_asr_prompt(self) -> str:
+        """Format ASR system instruction using ChatML format.
+
+        The audio embeddings will be inserted at the user position.
+        """
+        return (
+            "<|startoftext|><|im_start|>system\n"
+            "Perform ASR.<|im_end|>\n"
+            "<|im_start|>user\n"
+        )
+
+    def _format_asr_suffix(self) -> str:
+        """Format the suffix after audio embeddings."""
+        return "<|im_end|>\n<|im_start|>assistant\n"
+
+    def transcribe(
+        self,
+        audio_path: str,
+        max_new_tokens: int = 100,
+        temperature: float = 0.7,
+    ) -> str:
+        """Transcribe audio to text using ChatML format.
+
+        The prompt structure is:
+        <|startoftext|><|im_start|>system
+        Perform ASR.<|im_end|>
+        <|im_start|>user
+        [AUDIO EMBEDDINGS]<|im_end|>
+        <|im_start|>assistant
+        [TRANSCRIPTION OUTPUT]
+        """
+        if self.audio_encoder_session is None:
+            raise RuntimeError("audio_encoder not loaded, ASR unavailable")
+
+        # Compute mel spectrogram using proper preprocessing
+        mel_features, mel_lengths = self._compute_mel_features(audio_path)
 
         # Encode audio
         audio_embeds, _ = self.audio_encoder_session.run(
@@ -473,13 +546,31 @@ class LFM2AudioInferenceFull:
             {"mel_features": mel_features.astype(np.float32), "mel_lengths": mel_lengths},
         )
 
-        # Run decoder
+        # Build the prompt: prefix + audio + suffix
+        # 1. Encode prefix text (system + user start)
+        # Note: add_special_tokens=False since we include <|startoftext|> in the prompt
+        prefix_text = self._format_asr_prompt()
+        prefix_ids = self.tokenizer.encode(prefix_text, return_tensors="np", add_special_tokens=False)
+        prefix_embeds = self._get_text_embeds(prefix_ids)
+
+        # 2. Encode suffix text (user end + assistant start)
+        suffix_text = self._format_asr_suffix()
+        suffix_ids = self.tokenizer.encode(suffix_text, return_tensors="np", add_special_tokens=False)
+        suffix_embeds = self._get_text_embeds(suffix_ids)
+
+        # 3. Concatenate: prefix + audio + suffix
+        all_embeds = np.concatenate(
+            [prefix_embeds, audio_embeds, suffix_embeds],
+            axis=1,
+        )
+
+        # Run decoder with full context
         batch_size = 1
-        seq_len = audio_embeds.shape[1]
+        seq_len = all_embeds.shape[1]
         cache = self._init_cache(batch_size)
 
         attention_mask = np.ones((batch_size, seq_len), dtype=np.int64)
-        logits, _, cache = self._run_decoder(audio_embeds, attention_mask, cache)
+        logits, _, cache = self._run_decoder(all_embeds, attention_mask, cache)
 
         # Generate text tokens
         next_logits = logits[0, -1, : self.vocab_size]
@@ -490,6 +581,9 @@ class LFM2AudioInferenceFull:
 
         for _ in range(max_new_tokens - 1):
             if next_token == self.tokenizer.eos_token_id:
+                break
+            # Also stop on <|im_end|> token (token 7)
+            if next_token == 7:
                 break
 
             next_ids = np.array([[next_token]], dtype=np.int64)
@@ -511,7 +605,7 @@ class LFM2AudioInferenceFull:
     def _format_tts_prompt(self, text: str) -> str:
         """Format text with TTS system instruction using ChatML format."""
         return (
-            "<|im_start|>system\n"
+            "<|startoftext|><|im_start|>system\n"
             "Perform TTS.<|im_end|>\n"
             f"<|im_start|>user\n{text}<|im_end|>\n"
             "<|im_start|>assistant\n"
@@ -537,8 +631,9 @@ class LFM2AudioInferenceFull:
             raise RuntimeError("depthformer not loaded, TTS unavailable")
 
         # Format prompt with TTS system instruction
+        # Note: add_special_tokens=False since we include <|startoftext|> in the prompt
         prompt = self._format_tts_prompt(text)
-        input_ids = self.tokenizer.encode(prompt, return_tensors="np")
+        input_ids = self.tokenizer.encode(prompt, return_tensors="np", add_special_tokens=False)
         batch_size, seq_len = input_ids.shape
 
         # Get text embeddings and run decoder
@@ -562,6 +657,12 @@ class LFM2AudioInferenceFull:
             if next_token == self.AUDIO_START_TOKEN:
                 logger.info("Model entered audio mode")
                 in_audio_mode = True
+                # Feed audio_start token to get hidden states for first audio frame
+                next_ids = np.array([[self.AUDIO_START_TOKEN]], dtype=np.int64)
+                next_embeds = self._get_text_embeds(next_ids)
+                attention_mask = np.ones((batch_size, total_len + 1), dtype=np.int64)
+                logits, hidden_states, cache = self._run_decoder(next_embeds, attention_mask, cache)
+                total_len += 1
                 break
 
             # Continue text generation
@@ -573,7 +674,7 @@ class LFM2AudioInferenceFull:
 
         if not in_audio_mode:
             logger.warning("Model did not enter audio mode, forcing audio generation")
-            # Force audio start token
+            # Force audio start token and feed it to decoder
             next_ids = np.array([[self.AUDIO_START_TOKEN]], dtype=np.int64)
             next_embeds = self._get_text_embeds(next_ids)
             attention_mask = np.ones((batch_size, total_len + 1), dtype=np.int64)
@@ -602,6 +703,11 @@ class LFM2AudioInferenceFull:
                 codebook_logits = self._run_depthformer(last_hidden)  # [1, 8, 2049]
                 frame_codes = self._sample_audio_codes(codebook_logits, audio_temperature)  # [1, 8]
 
+            # Check for end-of-audio (any codebook outputs 2048)
+            if self._is_end_of_audio(frame_codes[0]):
+                logger.info(f"End of audio detected at frame {frame_idx}")
+                break
+
             audio_codes.append(frame_codes[0])  # [8]
 
             # Feed back audio codes to continue generation
@@ -609,10 +715,12 @@ class LFM2AudioInferenceFull:
             # token = codebook_idx * 2049 + code_value
             # Reference: in_emb = self.audio_embedding(next_token + self.codebook_offsets).sum(0)
             # We get embeddings for all 8 codebooks and SUM them into a single embedding
+            # Clamp codes to valid range for embedding lookup (0-2047)
+            clamped_codes = np.minimum(frame_codes[0], 2047)
             audio_tokens = np.array(
                 [
                     [
-                        cb_idx * self.codebook_vocab + int(frame_codes[0, cb_idx])
+                        cb_idx * self.codebook_vocab + int(clamped_codes[cb_idx])
                         for cb_idx in range(self.num_codebooks)
                     ]
                 ],
@@ -625,10 +733,6 @@ class LFM2AudioInferenceFull:
             attention_mask = np.ones((batch_size, total_len + 1), dtype=np.int64)
             logits, hidden_states, cache = self._run_decoder(next_embeds, attention_mask, cache)
             total_len += 1
-
-            # Check for end condition (simple heuristic: all codes near zero)
-            if frame_idx > 10 and np.max(frame_codes) < 10:
-                break
 
         elapsed = time.time() - start_time
         frames_per_sec = len(audio_codes) / elapsed if elapsed > 0 else 0
@@ -652,7 +756,7 @@ class LFM2AudioInferenceFull:
     def _format_interleaved_prompt(self, text: str) -> str:
         """Format text with interleaved system instruction using ChatML format."""
         return (
-            "<|im_start|>system\n"
+            "<|startoftext|><|im_start|>system\n"
             "Respond with interleaved text and audio.<|im_end|>\n"
             f"<|im_start|>user\n{text}<|im_end|>\n"
             "<|im_start|>assistant\n"
@@ -666,8 +770,9 @@ class LFM2AudioInferenceFull:
         text_temperature: float = 0.7,
     ) -> tuple[str, list[np.ndarray]]:
         """Generate interleaved text and audio using depthformer for audio."""
+        # Note: add_special_tokens=False since we include <|startoftext|> in the prompt
         formatted_prompt = self._format_interleaved_prompt(prompt)
-        input_ids = self.tokenizer.encode(formatted_prompt, return_tensors="np")
+        input_ids = self.tokenizer.encode(formatted_prompt, return_tensors="np", add_special_tokens=False)
         batch_size, seq_len = input_ids.shape
 
         embeds = self._get_text_embeds(input_ids)
