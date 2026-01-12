@@ -811,18 +811,21 @@ class LFM2AudioInferenceFull:
                     codebook_logits = self._run_depthformer(last_hidden)
                     frame_codes = self._sample_audio_codes(codebook_logits, audio_temperature)
 
-                audio_codes.append(frame_codes[0])
-
-                # Check for end of audio (heuristic)
-                if len(audio_codes) > 5 and np.max(frame_codes) < 10:
+                # Check for end of audio (token 2048 in any codebook)
+                if self._is_end_of_audio(frame_codes[0]):
+                    logger.info(f"End of audio detected at frame {len(audio_codes)}")
                     in_audio_mode = False
                     continue
 
+                audio_codes.append(frame_codes[0])
+
                 # Feed all 8 codebook tokens as a summed embedding (like PyTorch reference)
+                # Clamp codes to valid range for embedding lookup (0-2047)
+                clamped_codes = np.minimum(frame_codes[0], 2047)
                 audio_tokens = np.array(
                     [
                         [
-                            cb_idx * self.codebook_vocab + int(frame_codes[0, cb_idx])
+                            cb_idx * self.codebook_vocab + int(clamped_codes[cb_idx])
                             for cb_idx in range(self.num_codebooks)
                         ]
                     ],
@@ -845,7 +848,16 @@ class LFM2AudioInferenceFull:
                     break
 
                 if token == self.AUDIO_START_TOKEN:
+                    logger.info("Model entered audio mode")
                     in_audio_mode = True
+                    # Feed audio_start token to get hidden states for first audio frame
+                    next_ids = np.array([[self.AUDIO_START_TOKEN]], dtype=np.int64)
+                    next_embeds = self._get_text_embeds(next_ids)
+                    attention_mask = np.ones((batch_size, total_len + 1), dtype=np.int64)
+                    logits, hidden_states, cache = self._run_decoder(next_embeds, attention_mask, cache)
+                    total_len += 1
+                    text_tokens.append(token)
+                    continue
 
                 text_tokens.append(token)
                 next_embeds = self._get_text_embeds(np.array([[token]], dtype=np.int64))
