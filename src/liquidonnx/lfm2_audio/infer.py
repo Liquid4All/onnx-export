@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """
-CPU inference for LFM2.5-Audio ONNX models supporting all 3 modes:
+ONNX inference for LFM2.5-Audio supporting all 3 modes:
 - ASR (Automatic Speech Recognition): Audio → Text
 - TTS (Text-to-Speech): Text → Audio
 - Interleaved: Mixed text and audio I/O
+
+Uses ONNX models:
+- decoder.onnx: LFM2 backbone (embeddings → logits/hidden_states)
+- audio_encoder.onnx: Conformer encoder for ASR
+- audio_embedding.onnx: Audio code embeddings for TTS
+- audio_detokenizer.onnx: Neural vocoder for TTS
+- depthformer/: Autoregressive audio codebook prediction
+  - depth_linear.onnx: [B, 2048] → [B, 8, 1024] (called 1× per frame)
+  - depthformer_unified.onnx: Transformer+embed+logits (called 8× per frame)
+
+All components including depthformer use ONNX-only inference.
 
 Usage:
     # Text generation
@@ -36,14 +47,10 @@ def get_onnx_files(model_dir: pathlib.Path, precision: str) -> dict[str, pathlib
     suffix = "" if precision == "fp32" else f"_{precision}"
 
     files = {
-        "embed_tokens": onnx_dir / f"embed_tokens{suffix}.onnx",
         "audio_embedding": onnx_dir / f"audio_embedding{suffix}.onnx",
         "decoder": onnx_dir / f"decoder{suffix}.onnx",
         "audio_encoder": onnx_dir / f"audio_encoder{suffix}.onnx",
-        "depthformer": onnx_dir / f"depthformer{suffix}.onnx",
-        "audio_lm_head": onnx_dir / f"audio_lm_head{suffix}.onnx",
-        # Prefer audio_detokenizer_lfm (has sliding window attention fix)
-        "audio_detokenizer": onnx_dir / f"audio_detokenizer_lfm{suffix}.onnx",
+        "audio_detokenizer": onnx_dir / f"audio_detokenizer{suffix}.onnx",
     }
 
     # Fall back to fp32 if requested precision not available
@@ -53,12 +60,6 @@ def get_onnx_files(model_dir: pathlib.Path, precision: str) -> dict[str, pathlib
             if fp32_path.exists():
                 logger.info(f"{path.name} not found, using {fp32_path.name}")
                 files[name] = fp32_path
-            # Special case: audio_detokenizer_lfm -> audio_detokenizer_lfm.onnx
-            if name == "audio_detokenizer":
-                lfm_path = onnx_dir / "audio_detokenizer_lfm.onnx"
-                if lfm_path.exists():
-                    logger.info(f"Using {lfm_path.name} (with sliding window attention)")
-                    files[name] = lfm_path
 
     return files
 
@@ -85,7 +86,6 @@ class LFM2AudioInference:
         self,
         model_dir: pathlib.Path,
         precision: str = "fp32",
-        use_pytorch_depthformer: bool = True,
     ):
         self.model_dir = model_dir
         self.precision = precision
@@ -98,14 +98,11 @@ class LFM2AudioInference:
         # Load ONNX sessions
         files = get_onnx_files(model_dir, precision)
 
-        logger.info(f"Loading embed_tokens from {files['embed_tokens'].name}...")
-        self.embed_session = load_session(files["embed_tokens"])
+        logger.info(f"Loading decoder from {files['decoder'].name}...")
+        self.decoder_session = load_session(files["decoder"])
 
         logger.info(f"Loading audio_embedding from {files['audio_embedding'].name}...")
         self.audio_embed_session = load_session(files["audio_embedding"])
-
-        logger.info(f"Loading decoder from {files['decoder'].name}...")
-        self.decoder_session = load_session(files["decoder"])
 
         if files["audio_encoder"].exists():
             logger.info(f"Loading audio_encoder from {files['audio_encoder'].name}...")
@@ -114,27 +111,19 @@ class LFM2AudioInference:
             logger.warning("audio_encoder not found, ASR mode unavailable")
             self.audio_encoder_session = None
 
-        if files["depthformer"].exists():
-            logger.info(f"Loading depthformer from {files['depthformer'].name}...")
-            self.depthformer_session = load_session(files["depthformer"])
+        if files["audio_detokenizer"].exists():
+            logger.info(f"Loading audio_detokenizer from {files['audio_detokenizer'].name}...")
+            self.audio_detokenizer_session = load_session(files["audio_detokenizer"])
         else:
-            logger.warning("depthformer not found, TTS mode may be limited")
-            self.depthformer_session = None
+            logger.warning("audio_detokenizer not found, TTS output unavailable")
+            self.audio_detokenizer_session = None
 
-        # Load PyTorch depthformer for autoregressive inference (more accurate)
-        self.pytorch_depthformer = None
-        self.use_pytorch_depthformer = use_pytorch_depthformer
-        if use_pytorch_depthformer:
-            self._load_pytorch_depthformer()
-
-        if files["audio_lm_head"].exists():
-            logger.info(f"Loading audio_lm_head from {files['audio_lm_head'].name}...")
-            self.audio_lm_head_session = load_session(files["audio_lm_head"])
-        else:
-            logger.warning("audio_lm_head not found, TTS mode may be limited")
-            self.audio_lm_head_session = None
+        # Load ONNX depthformer for autoregressive inference
+        self.onnx_depthformer = None
+        self._load_onnx_depthformer()
 
         self._load_config()
+        self._load_embed_tokens_weight()
 
     def _load_config(self):
         """Load model config from config.json."""
@@ -158,35 +147,71 @@ class LFM2AudioInference:
         self.num_codebooks = 8
         self.codebook_vocab = 2049
 
-    def _load_pytorch_depthformer(self):
-        """Load PyTorch depthformer components for autoregressive inference."""
+    def _load_embed_tokens_weight(self):
+        """Load embed_tokens weight from model weights for text embedding lookup."""
+        from huggingface_hub import hf_hub_download
+        from safetensors.torch import load_file
+
+        # Try to load from local safetensors first
+        local_weights = self.model_dir / "model.safetensors"
+        if local_weights.exists():
+            weights_path = str(local_weights)
+        else:
+            # Download from HuggingFace
+            try:
+                weights_path = hf_hub_download("LiquidAI/LFM2.5-Audio-1.5B", "model.safetensors")
+            except Exception as e:
+                logger.warning(f"Could not load model weights: {e}")
+                self.embed_tokens_weight = None
+                return
+
+        logger.info("Loading embed_tokens weight for text embedding...")
+        # Use torch to load (handles bfloat16) then convert to float32 numpy
+        weights = load_file(weights_path)
+        embed_tensor = weights["lfm.embed_tokens.weight"].float()
+        self.embed_tokens_weight = embed_tensor.numpy()
+
+        logger.info(f"embed_tokens weight loaded: {self.embed_tokens_weight.shape}")
+
+    def _load_onnx_depthformer(self):
+        """Load ONNX depthformer models for autoregressive inference.
+
+        Loads consolidated 2-model structure:
+        - depth_linear.onnx: [B, 2048] → [B, 8, 1024] (called 1× per frame)
+        - depthformer_unified.onnx: Transformer+embed+logits (called 8× per frame)
+        """
+        depthformer_dir = self.model_dir / "onnx" / "depthformer"
+
+        if not depthformer_dir.exists():
+            logger.warning(f"ONNX depthformer not found at {depthformer_dir}")
+            logger.warning("TTS will not be available")
+            return
+
         try:
-            import torch
-            from liquid_audio.model.lfm2_audio import LFM2AudioModel
+            logger.info(f"Loading ONNX depthformer from {depthformer_dir}...")
 
-            logger.info("Loading PyTorch model for autoregressive depthformer...")
-            model = LFM2AudioModel.from_pretrained(
-                "LiquidAI/LFM2.5-Audio-1.5B",
-                dtype=torch.float32,
-                device="cpu"
-            )
-            model.eval()
+            self.onnx_depthformer = {}
 
-            # Store only the depthformer components (not the full model)
-            self.pytorch_depthformer = {
-                "depth_linear": model.depth_linear,
-                "depthformer": model.depthformer,
-                "depth_embeddings": model.depth_embeddings,
-                "codebooks": model.codebooks,
-                "depthformer_dim": model.depthformer_dim,
-            }
-            logger.info("PyTorch depthformer loaded successfully")
-        except ImportError:
-            logger.warning("liquid_audio not available, using ONNX depthformer (parallel, less accurate)")
-            self.pytorch_depthformer = None
+            depth_linear_path = depthformer_dir / "depth_linear.onnx"
+            unified_path = depthformer_dir / "depthformer_unified.onnx"
+
+            if not depth_linear_path.exists():
+                logger.warning("depth_linear.onnx not found")
+                self.onnx_depthformer = None
+                return
+
+            if not unified_path.exists():
+                logger.warning("depthformer_unified.onnx not found")
+                self.onnx_depthformer = None
+                return
+
+            self.onnx_depthformer["depth_linear"] = load_session(depth_linear_path)
+            self.onnx_depthformer["depthformer_unified"] = load_session(unified_path)
+            logger.info("ONNX depthformer ready for TTS")
+
         except Exception as e:
-            logger.warning(f"Failed to load PyTorch depthformer: {e}")
-            self.pytorch_depthformer = None
+            logger.warning(f"Failed to load ONNX depthformer: {e}")
+            self.onnx_depthformer = None
 
     def _init_cache(self, batch_size: int = 1) -> dict[str, np.ndarray]:
         """Initialize KV cache for generation."""
@@ -241,8 +266,9 @@ class LFM2AudioInference:
         return int(np.random.choice(top_indices, p=top_probs))
 
     def _get_text_embeds(self, input_ids: np.ndarray) -> np.ndarray:
-        """Get text embeddings."""
-        return self.embed_session.run(["inputs_embeds"], {"input_ids": input_ids})[0]
+        """Get text embeddings via numpy lookup."""
+        # input_ids: [batch, seq_len] -> embeds: [batch, seq_len, hidden]
+        return self.embed_tokens_weight[input_ids]
 
     def _get_audio_embeds(self, audio_codes: np.ndarray) -> np.ndarray:
         """Get audio code embeddings."""
@@ -268,93 +294,91 @@ class LFM2AudioInference:
 
         return logits, hidden_states, cache
 
-    def _run_depthformer(self, hidden_states: np.ndarray) -> np.ndarray:
-        """Run depthformer to predict 8 codebook logits from hidden states.
-
-        This is the parallel (non-autoregressive) version using ONNX.
-        For autoregressive inference, use _sample_audio_codes_autoregressive.
-        """
-        if self.depthformer_session is None:
-            raise RuntimeError("depthformer not loaded")
-
-        # hidden_states: [batch, hidden_size]
-        outputs = self.depthformer_session.run(
-            ["codebook_logits"], {"hidden_states": hidden_states.astype(np.float32)}
-        )
-        return outputs[0]  # [batch, 8, 2049]
-
     # End-of-audio token (same across all codebooks)
     END_OF_AUDIO_TOKEN = 2048
 
-    def _sample_audio_codes_autoregressive(
+    def _sample_audio_codes(
         self, hidden_states: np.ndarray, temperature: float = 0.9
     ) -> np.ndarray:
-        """Sample audio codes using autoregressive PyTorch depthformer.
+        """Sample audio codes using ONNX autoregressive depthformer.
 
-        This is the correct autoregressive implementation that matches the
-        reference liquid_audio code. Each codebook prediction depends on the
-        sampled token from the previous codebook.
+        Uses the consolidated depthformer_unified model which combines:
+        - Transformer step with KV cache
+        - All 8 embedding tables
+        - All 8 logits projections
 
         Token 2048 is the end-of-audio token. When the model predicts this,
         it signals the end of audio generation.
+
+        Args:
+            hidden_states: [batch, hidden_size] or [batch, 1, hidden_size]
+            temperature: Sampling temperature
+
+        Returns:
+            codes: [batch, 8] audio codes for each codebook
         """
-        import torch
-        from einops import rearrange
+        df = self.onnx_depthformer
 
-        df = self.pytorch_depthformer
-        codebooks = df["codebooks"]
-        depthformer_dim = df["depthformer_dim"]
+        if df is None or "depthformer_unified" not in df:
+            raise RuntimeError(
+                "ONNX depthformer not available for TTS.\n"
+                "Ensure depthformer_unified.onnx is exported."
+            )
 
-        # Convert to torch tensor and handle different input shapes
-        hidden_tensor = torch.from_numpy(hidden_states).float()
+        num_codebooks = 8
+        num_layers = 6
+        num_kv_heads = 8
+        head_dim = 32
+
         # Squeeze to [batch, hidden_size] if needed
-        if hidden_tensor.ndim == 3:
-            hidden_tensor = hidden_tensor.squeeze(1)  # [batch, 1, hidden_size] -> [batch, hidden_size]
-        batch_size = hidden_tensor.shape[0]
+        if hidden_states.ndim == 3:
+            hidden_states = hidden_states.squeeze(1)
+        batch_size = hidden_states.shape[0]
 
         codes_list = []
         for b in range(batch_size):
-            embedding = hidden_tensor[b]  # [hidden_size]
+            embedding = hidden_states[b : b + 1]  # [1, hidden_size]
 
-            # Project to depthformer dimensions
-            with torch.no_grad():
-                depthformer_in = rearrange(
-                    df["depth_linear"](embedding),
-                    "(C D) -> C D",
-                    C=codebooks,
-                    D=depthformer_dim
+            # Project to depth dimension: [1, 2048] → [1, 8, 1024]
+            depth_hidden = df["depth_linear"].run(
+                ["depth_hidden"], {"hidden_states": embedding.astype(np.float32)}
+            )[0]  # [1, 8, 1024]
+
+            # Initialize KV cache for depthformer (6 layers)
+            past_keys = np.zeros(
+                (num_layers, 1, 0, num_kv_heads, head_dim), dtype=np.float32
+            )
+            past_values = np.zeros(
+                (num_layers, 1, 0, num_kv_heads, head_dim), dtype=np.float32
+            )
+
+            out_tokens = []
+            prev_token = 0
+
+            for i in range(num_codebooks):
+                logits, _, new_keys, new_values = df["depthformer_unified"].run(
+                    ["logits", "token_embed", "new_keys", "new_values"],
+                    {
+                        "depth_slices": depth_hidden.astype(np.float32),
+                        "step_idx": np.array(i, dtype=np.int64),
+                        "prev_token": np.array([prev_token], dtype=np.int64),
+                        "past_keys": past_keys,
+                        "past_values": past_values,
+                    },
                 )
 
-            depthformer_token = torch.zeros_like(depthformer_in[0])
-            cache = None
-            out_tokens = []
+                past_keys = new_keys
+                past_values = new_values
 
-            for i in range(codebooks):
-                cur_input = depthformer_in[i] + depthformer_token
-
-                with torch.no_grad():
-                    depthformer_out, cache = df["depthformer"].forward_cached(
-                        cur_input[None, None, :], cache
-                    )
-                    logits = df["depth_embeddings"][i].get_logits(
-                        depthformer_out.squeeze()
-                    )  # [2049]
-
-                # Sample from all logits including end-of-audio token (2048)
-                all_logits = logits.numpy()
+                # Sample from logits including end-of-audio token (2048)
+                all_logits = logits[0]
                 if temperature is None or temperature <= 0:
                     token = int(np.argmax(all_logits))
                 else:
                     token = self._sample(all_logits, temperature, top_p=0.95)
 
                 out_tokens.append(token)
-
-                # Get embedding for next iteration (use clamped token for embedding lookup)
-                embed_token = min(token, 2047)  # Clamp to valid embedding range
-                with torch.no_grad():
-                    depthformer_token = df["depth_embeddings"][i](
-                        torch.tensor(embed_token)
-                    ).squeeze()
+                prev_token = min(token, 2047)
 
             codes_list.append(out_tokens)
 
@@ -366,30 +390,6 @@ class LFM2AudioInference:
         End of audio is signaled when any codebook outputs the end token (2048).
         """
         return np.any(frame_codes >= self.END_OF_AUDIO_TOKEN)
-
-    def _sample_audio_codes(
-        self, codebook_logits: np.ndarray, temperature: float = 0.9
-    ) -> np.ndarray:
-        """Sample audio codes from depthformer logits (parallel version).
-
-        The depthformer outputs 2049 logits per codebook:
-        - Indices 0-2047: valid audio codes
-        - Index 2048: special/padding token (should be ignored for sampling)
-
-        Note: This is the parallel (non-autoregressive) version.
-        For more accurate results, use _sample_audio_codes_autoregressive.
-        """
-        # codebook_logits: [batch, 8, 2049]
-        batch_size, num_codebooks, vocab_size = codebook_logits.shape
-        codes = np.zeros((batch_size, num_codebooks), dtype=np.int64)
-
-        for cb_idx in range(num_codebooks):
-            # Only sample from valid codes (exclude last special token)
-            logits = codebook_logits[:, cb_idx, :2048]  # [batch, 2048]
-            for b in range(batch_size):
-                codes[b, cb_idx] = self._sample(logits[b], temperature, top_p=0.95)
-
-        return codes
 
     # === Text Generation ===
 
@@ -508,11 +508,7 @@ class LFM2AudioInference:
 
         The audio embeddings will be inserted at the user position.
         """
-        return (
-            "<|startoftext|><|im_start|>system\n"
-            "Perform ASR.<|im_end|>\n"
-            "<|im_start|>user\n"
-        )
+        return "<|startoftext|><|im_start|>system\nPerform ASR.<|im_end|>\n<|im_start|>user\n"
 
     def _format_asr_suffix(self) -> str:
         """Format the suffix after audio embeddings."""
@@ -550,12 +546,16 @@ class LFM2AudioInference:
         # 1. Encode prefix text (system + user start)
         # Note: add_special_tokens=False since we include <|startoftext|> in the prompt
         prefix_text = self._format_asr_prompt()
-        prefix_ids = self.tokenizer.encode(prefix_text, return_tensors="np", add_special_tokens=False)
+        prefix_ids = self.tokenizer.encode(
+            prefix_text, return_tensors="np", add_special_tokens=False
+        )
         prefix_embeds = self._get_text_embeds(prefix_ids)
 
         # 2. Encode suffix text (user end + assistant start)
         suffix_text = self._format_asr_suffix()
-        suffix_ids = self.tokenizer.encode(suffix_text, return_tensors="np", add_special_tokens=False)
+        suffix_ids = self.tokenizer.encode(
+            suffix_text, return_tensors="np", add_special_tokens=False
+        )
         suffix_embeds = self._get_text_embeds(suffix_ids)
 
         # 3. Concatenate: prefix + audio + suffix
@@ -614,21 +614,27 @@ class LFM2AudioInference:
     def synthesize(
         self,
         text: str,
-        max_audio_frames: int = 100,
+        max_new_tokens: int = 100,
         audio_temperature: float = 0.9,
         text_temperature: float = 0.7,
-        max_text_tokens: int = 50,
     ) -> list[np.ndarray]:
         """Synthesize audio from text using depthformer.
 
-        The model must first generate text tokens until it produces <|audio|>,
-        then we switch to depthformer-based audio code generation.
+        The model first generates text tokens until it produces <|audio|>,
+        then switches to depthformer-based audio code generation.
+
+        Args:
+            text: Text to synthesize.
+            max_new_tokens: Maximum number of new tokens (text + audio frames combined),
+                matching PyTorch reference behavior.
+            audio_temperature: Temperature for audio sampling (0 = greedy).
+            text_temperature: Temperature for text sampling (0 = greedy).
 
         Returns list of audio code frames (8 codes each).
         Each frame is [8] array of codebook indices.
         """
-        if self.depthformer_session is None:
-            raise RuntimeError("depthformer not loaded, TTS unavailable")
+        if self.onnx_depthformer is None or "depthformer_unified" not in self.onnx_depthformer:
+            raise RuntimeError("ONNX depthformer not loaded, TTS unavailable")
 
         # Format prompt with TTS system instruction
         # Note: add_special_tokens=False since we include <|startoftext|> in the prompt
@@ -644,15 +650,20 @@ class LFM2AudioInference:
         logits, hidden_states, cache = self._run_decoder(embeds, attention_mask, cache)
         total_len = seq_len
 
+        # Track tokens generated (text + audio) to match PyTorch behavior
+        tokens_generated = 0
+
         # === Phase 1: Generate text until <|audio|> token ===
         in_audio_mode = False
-        for _ in range(max_text_tokens):
+        while tokens_generated < max_new_tokens:
             last_logits = logits[0, -1, : self.vocab_size]
             next_token = self._sample(last_logits, text_temperature, top_p=0.9)
 
             if next_token == self.tokenizer.eos_token_id:
                 logger.warning("Model produced EOS before audio, TTS may not work")
                 break
+
+            tokens_generated += 1
 
             if next_token == self.AUDIO_START_TOKEN:
                 logger.info("Model entered audio mode")
@@ -680,35 +691,28 @@ class LFM2AudioInference:
             attention_mask = np.ones((batch_size, total_len + 1), dtype=np.int64)
             logits, hidden_states, cache = self._run_decoder(next_embeds, attention_mask, cache)
             total_len += 1
+            tokens_generated += 1
 
         # === Phase 2: Generate audio frames using depthformer ===
         audio_codes = []
         start_time = time.time()
 
-        # Use autoregressive PyTorch depthformer if available (more accurate)
-        use_autoregressive = self.pytorch_depthformer is not None
-
-        for frame_idx in range(max_audio_frames):
+        while tokens_generated < max_new_tokens:
             # Get hidden states for the last position: [1, hidden_size]
             last_hidden = hidden_states[0, -1:, :]  # [1, hidden_size]
 
-            # Sample audio codes
-            if use_autoregressive:
-                # Autoregressive sampling (correct, matches reference)
-                frame_codes = self._sample_audio_codes_autoregressive(
-                    last_hidden, audio_temperature
-                )  # [1, 8]
-            else:
-                # Parallel sampling via ONNX (faster but less accurate)
-                codebook_logits = self._run_depthformer(last_hidden)  # [1, 8, 2049]
-                frame_codes = self._sample_audio_codes(codebook_logits, audio_temperature)  # [1, 8]
+            # Sample audio codes (autoregressive sampling, matches reference)
+            frame_codes = self._sample_audio_codes(
+                last_hidden, audio_temperature
+            )  # [1, 8]
 
             # Check for end-of-audio (any codebook outputs 2048)
             if self._is_end_of_audio(frame_codes[0]):
-                logger.info(f"End of audio detected at frame {frame_idx}")
+                logger.info(f"End of audio detected at frame {len(audio_codes)}")
                 break
 
             audio_codes.append(frame_codes[0])  # [8]
+            tokens_generated += 1
 
             # Feed back audio codes to continue generation
             # Audio embedding expects tokens in range [0, 16392) where:
@@ -772,7 +776,9 @@ class LFM2AudioInference:
         """Generate interleaved text and audio using depthformer for audio."""
         # Note: add_special_tokens=False since we include <|startoftext|> in the prompt
         formatted_prompt = self._format_interleaved_prompt(prompt)
-        input_ids = self.tokenizer.encode(formatted_prompt, return_tensors="np", add_special_tokens=False)
+        input_ids = self.tokenizer.encode(
+            formatted_prompt, return_tensors="np", add_special_tokens=False
+        )
         batch_size, seq_len = input_ids.shape
 
         embeds = self._get_text_embeds(input_ids)
@@ -790,26 +796,22 @@ class LFM2AudioInference:
             last_logits = logits[0, -1, :]
 
             if in_audio_mode:
-                # Use depthformer to generate audio frame
-                depthformer_available = (
-                    self.pytorch_depthformer is not None or
-                    self.depthformer_session is not None
-                )
-                if not depthformer_available or hidden_states is None:
-                    logger.warning("Depthformer unavailable, exiting audio mode")
+                # Use ONNX depthformer to generate audio frame
+                if (
+                    self.onnx_depthformer is None
+                    or "depthformer_unified" not in self.onnx_depthformer
+                    or hidden_states is None
+                ):
+                    logger.warning("ONNX depthformer unavailable, exiting audio mode")
                     in_audio_mode = False
                     continue
 
                 last_hidden = hidden_states[0, -1:, :]
 
-                # Use autoregressive PyTorch depthformer if available
-                if self.pytorch_depthformer is not None:
-                    frame_codes = self._sample_audio_codes_autoregressive(
-                        last_hidden, audio_temperature
-                    )
-                else:
-                    codebook_logits = self._run_depthformer(last_hidden)
-                    frame_codes = self._sample_audio_codes(codebook_logits, audio_temperature)
+                # Autoregressive sampling (matches reference)
+                frame_codes = self._sample_audio_codes(
+                    last_hidden, audio_temperature
+                )
 
                 # Check for end of audio (token 2048 in any codebook)
                 if self._is_end_of_audio(frame_codes[0]):
@@ -854,7 +856,9 @@ class LFM2AudioInference:
                     next_ids = np.array([[self.AUDIO_START_TOKEN]], dtype=np.int64)
                     next_embeds = self._get_text_embeds(next_ids)
                     attention_mask = np.ones((batch_size, total_len + 1), dtype=np.int64)
-                    logits, hidden_states, cache = self._run_decoder(next_embeds, attention_mask, cache)
+                    logits, hidden_states, cache = self._run_decoder(
+                        next_embeds, attention_mask, cache
+                    )
                     total_len += 1
                     text_tokens.append(token)
                     continue
@@ -1318,7 +1322,9 @@ def main():
         print(f"Generated {len(audio_codes)} audio frames")
 
         if args.output and audio_codes:
-            if audio_codes_to_wav(audio_codes, args.output, model_dir=args.model_dir, precision=args.precision):
+            if audio_codes_to_wav(
+                audio_codes, args.output, model_dir=args.model_dir, precision=args.precision
+            ):
                 print(f"Output: {args.output}")
         print("=" * 60)
 
@@ -1337,7 +1343,9 @@ def main():
         print(f"Audio:  {len(audio_codes)} frames")
 
         if args.output and audio_codes:
-            if audio_codes_to_wav(audio_codes, args.output, model_dir=args.model_dir, precision=args.precision):
+            if audio_codes_to_wav(
+                audio_codes, args.output, model_dir=args.model_dir, precision=args.precision
+            ):
                 print(f"Output: {args.output}")
         print("=" * 60)
 

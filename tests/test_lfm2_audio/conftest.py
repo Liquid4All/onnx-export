@@ -63,7 +63,7 @@ def onnx_model(exports_dir: pathlib.Path):
         )
 
     logger.info(f"Loading ONNX model from {model_dir}...")
-    model = LFM2AudioInference(model_dir, use_pytorch_depthformer=True)
+    model = LFM2AudioInference(model_dir)
 
     yield model
 

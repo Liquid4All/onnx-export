@@ -14,6 +14,7 @@ dependencies = [
     "torchvision>=0.24.1",
     "onnx-ir>=0.1.13",
     "scipy>=1.12.0",  # For ISTFT in audio decoding
+    "onnxscript>=0.5.7",
 ]
 
 [project.optional-dependencies]

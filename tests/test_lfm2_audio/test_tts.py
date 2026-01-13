@@ -23,7 +23,7 @@ TTS_PROMPTS = [
 ]
 
 
-def generate_reference_tts(model, processor, text: str, max_frames: int = 50):
+def generate_reference_tts(model, processor, text: str, max_new_tokens: int = 60):
     """Generate TTS audio codes using reference model."""
     from liquid_audio import ChatState
 
@@ -39,7 +39,7 @@ def generate_reference_tts(model, processor, text: str, max_frames: int = 50):
     audio_codes = []
     for token in model.generate_sequential(
         **state,
-        max_new_tokens=max_frames + 10,
+        max_new_tokens=max_new_tokens,
         text_temperature=None,
         audio_temperature=None,
     ):
@@ -48,17 +48,15 @@ def generate_reference_tts(model, processor, text: str, max_frames: int = 50):
             if np.any(codes >= 2048):
                 break
             audio_codes.append(codes)
-            if len(audio_codes) >= max_frames:
-                break
 
     return audio_codes
 
 
-def generate_onnx_tts(model, text: str, max_frames: int = 50):
+def generate_onnx_tts(model, text: str, max_new_tokens: int = 60):
     """Generate TTS audio codes using ONNX model."""
     audio_codes = model.synthesize(
         text=text,
-        max_audio_frames=max_frames,
+        max_new_tokens=max_new_tokens,
         audio_temperature=0,
         text_temperature=0,
     )
@@ -218,7 +216,7 @@ def test_tts_multi_turn(reference_model, onnx_model):
         audio_codes = []
         for _ in range(50):
             last_hidden = hidden_states[0, -1:, :]
-            frame_codes = onnx_model._sample_audio_codes_autoregressive(
+            frame_codes = onnx_model._sample_audio_codes(
                 last_hidden, temperature=0
             )
 
