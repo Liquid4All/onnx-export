@@ -24,6 +24,7 @@ gpu = [
 dev = [
     "pytest",
     "ruff",
+    "liquid-audio>=1.1.0",  # Reference model for audio export/tests
 ]
 
 [project.scripts]
@@ -95,4 +96,5 @@ onnxruntime-gpu = { index = "ort-nightly" }
 dev = [
     "pytest>=9.0.2",
     "ruff>=0.14.10",
+    "liquid-audio>=1.1.0",
 ]

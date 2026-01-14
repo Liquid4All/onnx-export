@@ -1313,7 +1313,7 @@ def main():
         logger.info(f"Text: {args.prompt}")
         audio_codes = model.synthesize(
             args.prompt,
-            max_audio_frames=args.max_tokens,
+            max_new_tokens=args.max_tokens,
             audio_temperature=args.audio_temperature,
             text_temperature=args.temperature,
         )
