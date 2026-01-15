@@ -731,7 +731,11 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         return output, new_k, new_v
 
     def build_step_logits(self, x: str) -> str:
-        """Build step-indexed RMSNorm and logits projection.
+        """Build step-indexed logits projection (no norm - to_logits is just linear).
+
+        The PyTorch model's depth_embeddings[i].to_logits is a plain Linear layer
+        without any preceding normalization. The embedding_norm is only used
+        when embedding tokens, not before computing logits.
 
         Args:
             x: Transformer output [B, 1024]
@@ -740,35 +744,6 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
             logits tensor name [B, 2049]
         """
         prefix = "/logits"
-
-        # Get step-specific norm weight: stacked_norm_weights[step_idx] → [1024]
-        norm_weight = self.make_gather(
-            "stacked_norm_weights", "step_idx", f"{prefix}/norm_w/output_0", axis=0
-        )
-
-        # RMSNorm: x / sqrt(mean(x^2) + eps) * weight
-        x_sq = self.make_mul(x, x, f"{prefix}/x_sq/output_0")
-        # axes as input tensor (opset 13+)
-        variance = self.make_node(
-            "ReduceMean",
-            [x_sq, self.get_constant([-1], dtype=np.int64)],
-            [f"{prefix}/var/output_0"],
-            keepdims=1,
-        )
-        var_eps = self.make_add(
-            variance,
-            self.get_constant(self.norm_eps, dtype=np.float32),
-            f"{prefix}/var_eps/output_0",
-        )
-        # Rsqrt is not a standard ONNX op, use Sqrt + Div instead
-        sqrt_var = self.make_node("Sqrt", [var_eps], [f"{prefix}/sqrt/output_0"])
-        rsqrt = self.make_node(
-            "Div",
-            [self.get_constant(1.0, dtype=np.float32), sqrt_var],
-            [f"{prefix}/rsqrt/output_0"],
-        )
-        normed = self.make_mul(x, rsqrt, f"{prefix}/normed/output_0")
-        scaled = self.make_mul(normed, norm_weight, f"{prefix}/scaled/output_0")
 
         # Get step-specific logits weight: stacked_logits_weights[step_idx] → [2049, 1024]
         logits_weight = self.make_gather(
@@ -779,7 +754,7 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         logits_w_t = self.make_transpose(
             logits_weight, f"{prefix}/logits_w_t/output_0", perm=[1, 0]
         )
-        return self.make_matmul(scaled, logits_w_t, "logits")
+        return self.make_matmul(x, logits_w_t, "logits")
 
     def load_weights(self, model_path: str):
         """Load all depthformer weights from HuggingFace model."""
@@ -802,15 +777,12 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         """Register all weights as initializers."""
         # === Stacked embeddings: [8, 2049, 1024] ===
         embed_list = []
-        norm_list = []
         logits_list = []
         for i in range(self.num_codebooks):
             embed_list.append(self.weights[f"depth_embeddings.{i}.embedding.weight"])
-            norm_list.append(self.weights[f"depth_embeddings.{i}.embedding_norm.weight"])
             logits_list.append(self.weights[f"depth_embeddings.{i}.to_logits.weight"])
 
         self.add_initializer("stacked_embed_weights", np.stack(embed_list, axis=0))
-        self.add_initializer("stacked_norm_weights", np.stack(norm_list, axis=0))
         self.add_initializer("stacked_logits_weights", np.stack(logits_list, axis=0))
 
         # === RoPE frequencies ===
