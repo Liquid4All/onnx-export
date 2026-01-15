@@ -71,53 +71,90 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         Subsampling reduces temporal resolution by factor of 8:
             [B, T, 128] → [B, T//8, 512]
 
-        Architecture:
-            Conv2d(1, 256, k=3, s=2) → ReLU → Conv2d(256, 256, k=3, s=2) →
-            ReLU → Conv2d(256, 512, k=3, s=2) → ReLU → Linear(*, 512)
+        Architecture (pre_encode with depthwise separable convs):
+            [B, T, 128] → reshape [B, 1, T, 128]
+            → DepthwiseConv(256, k=3, s=2) → ReLU
+            → DepthwiseConv(256, k=3, s=2) → PointwiseConv(256) → ReLU
+            → DepthwiseConv(256, k=3, s=2) → PointwiseConv(256) → ReLU
+            → reshape [B, T//8, 256*F'] → Linear(d_model)
+
+        Weight mapping:
+            conformer.pre_encode.conv.0 → depthwise conv (stride 2)
+            conformer.pre_encode.conv.2 → depthwise conv (stride 2)
+            conformer.pre_encode.conv.3 → pointwise conv
+            conformer.pre_encode.conv.5 → depthwise conv (stride 2)
+            conformer.pre_encode.conv.6 → pointwise conv
+            conformer.pre_encode.out → linear projection
         """
-        prefix = "/encoder/subsampling"
+        prefix = "/encoder/pre_encode"
+        C = self.config.subsampling_conv_channels  # 256
 
         # Reshape for Conv2d: [B, T, F] → [B, 1, T, F]
         reshaped = self.make_unsqueeze(
             input_name, self.get_constant([1]), f"{prefix}/Unsqueeze/output_0"
         )
 
-        # Conv1: stride 2
-        conv1 = self.make_node(
+        # Expand to C channels: [B, 1, T, F] → [B, C, T, F]
+        # We need to tile the input to match the depthwise conv groups
+        # The depthwise conv weight is [C, 1, 3, 3] meaning C groups, 1 channel each
+        expanded = self.make_node(
+            "Expand",
+            [reshaped, self.get_constant([1, C, 1, 1])],
+            [f"{prefix}/Expand/output_0"],
+        )
+
+        # === Block 1: Depthwise conv (stride 2) + ReLU ===
+        conv0 = self.make_node(
             "Conv",
-            [reshaped, "encoder.subsampling.conv1.weight", "encoder.subsampling.conv1.bias"],
-            [f"{prefix}/conv1/Conv/output_0"],
+            [expanded, "encoder.pre_encode.conv.0.weight", "encoder.pre_encode.conv.0.bias"],
+            [f"{prefix}/conv0/Conv/output_0"],
             kernel_shape=[3, 3],
             strides=[2, 2],
             pads=[1, 1, 1, 1],
+            group=C,
         )
-        relu1 = self.make_node("Relu", [conv1], [f"{prefix}/conv1/Relu/output_0"])
+        relu0 = self.make_node("Relu", [conv0], [f"{prefix}/conv0/Relu/output_0"])
 
-        # Conv2: stride 2
+        # === Block 2: Depthwise conv (stride 2) + Pointwise conv + ReLU ===
         conv2 = self.make_node(
             "Conv",
-            [relu1, "encoder.subsampling.conv2.weight", "encoder.subsampling.conv2.bias"],
+            [relu0, "encoder.pre_encode.conv.2.weight", "encoder.pre_encode.conv.2.bias"],
             [f"{prefix}/conv2/Conv/output_0"],
             kernel_shape=[3, 3],
             strides=[2, 2],
             pads=[1, 1, 1, 1],
+            group=C,
         )
-        relu2 = self.make_node("Relu", [conv2], [f"{prefix}/conv2/Relu/output_0"])
-
-        # Conv3: stride 2
         conv3 = self.make_node(
             "Conv",
-            [relu2, "encoder.subsampling.conv3.weight", "encoder.subsampling.conv3.bias"],
+            [conv2, "encoder.pre_encode.conv.3.weight", "encoder.pre_encode.conv.3.bias"],
             [f"{prefix}/conv3/Conv/output_0"],
-            kernel_shape=[3, 3],
-            strides=[2, 2],
-            pads=[1, 1, 1, 1],
+            kernel_shape=[1, 1],
+            strides=[1, 1],
         )
         relu3 = self.make_node("Relu", [conv3], [f"{prefix}/conv3/Relu/output_0"])
 
+        # === Block 3: Depthwise conv (stride 2) + Pointwise conv + ReLU ===
+        conv5 = self.make_node(
+            "Conv",
+            [relu3, "encoder.pre_encode.conv.5.weight", "encoder.pre_encode.conv.5.bias"],
+            [f"{prefix}/conv5/Conv/output_0"],
+            kernel_shape=[3, 3],
+            strides=[2, 2],
+            pads=[1, 1, 1, 1],
+            group=C,
+        )
+        conv6 = self.make_node(
+            "Conv",
+            [conv5, "encoder.pre_encode.conv.6.weight", "encoder.pre_encode.conv.6.bias"],
+            [f"{prefix}/conv6/Conv/output_0"],
+            kernel_shape=[1, 1],
+            strides=[1, 1],
+        )
+        relu6 = self.make_node("Relu", [conv6], [f"{prefix}/conv6/Relu/output_0"])
+
         # Reshape: [B, C, T', F'] → [B, T', C*F']
-        # Get shape dynamically
-        self.make_node("Shape", [relu3], [f"{prefix}/Shape/output_0"])
+        self.make_node("Shape", [relu6], [f"{prefix}/Shape/output_0"])
         batch = self.make_node(
             "Gather",
             [f"{prefix}/Shape/output_0", self.get_constant(0)],
@@ -132,7 +169,7 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         )
 
         # Transpose: [B, C, T, F] → [B, T, C, F]
-        transposed = self.make_transpose(relu3, f"{prefix}/Transpose/output_0", perm=[0, 2, 1, 3])
+        transposed = self.make_transpose(relu6, f"{prefix}/Transpose/output_0", perm=[0, 2, 1, 3])
 
         # Flatten last two dims: [B, T, C*F]
         new_shape = self.make_concat(
@@ -149,11 +186,11 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         # Linear projection to d_model
         return self.make_linear(
             flattened,
-            self.weights["conformer.subsampling.linear.weight"],
-            "encoder.subsampling.linear.weight",
-            f"{prefix}/linear",
-            bias=self.weights["conformer.subsampling.linear.bias"],
-            bias_name="encoder.subsampling.linear.bias",
+            self.weights["conformer.pre_encode.out.weight"],
+            "encoder.pre_encode.out.weight",
+            f"{prefix}/out",
+            bias=self.weights["conformer.pre_encode.out.bias"],
+            bias_name="encoder.pre_encode.out.bias",
         )
 
     def build_conformer_block(self, layer_idx: int, hidden_state: str) -> str:
@@ -443,22 +480,25 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
 
     def prepare_weights(self):
         """Register all weights as initializers."""
-        # Subsampling weights
-        for name in ["conv1", "conv2", "conv3"]:
-            w_name = f"conformer.subsampling.{name}.weight"
-            b_name = f"conformer.subsampling.{name}.bias"
+        # Pre-encode (subsampling) weights - depthwise separable convolutions
+        # conv.0, conv.2, conv.5 are depthwise convs
+        # conv.3, conv.6 are pointwise convs
+        for idx in [0, 2, 3, 5, 6]:
+            w_name = f"conformer.pre_encode.conv.{idx}.weight"
+            b_name = f"conformer.pre_encode.conv.{idx}.bias"
             if w_name in self.weights:
-                self.add_initializer(f"encoder.subsampling.{name}.weight", self.weights[w_name])
-                self.add_initializer(f"encoder.subsampling.{name}.bias", self.weights[b_name])
+                self.add_initializer(f"encoder.pre_encode.conv.{idx}.weight", self.weights[w_name])
+                self.add_initializer(f"encoder.pre_encode.conv.{idx}.bias", self.weights[b_name])
 
-        if "conformer.subsampling.linear.weight" in self.weights:
+        # Linear projection
+        if "conformer.pre_encode.out.weight" in self.weights:
             self.add_initializer(
-                "encoder.subsampling.linear.weight",
-                self.weights["conformer.subsampling.linear.weight"].T,
+                "encoder.pre_encode.out.weight",
+                self.weights["conformer.pre_encode.out.weight"].T,
             )
             self.add_initializer(
-                "encoder.subsampling.linear.bias",
-                self.weights["conformer.subsampling.linear.bias"],
+                "encoder.pre_encode.out.bias",
+                self.weights["conformer.pre_encode.out.bias"],
             )
 
         # Conformer layer weights

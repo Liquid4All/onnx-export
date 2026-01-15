@@ -34,6 +34,12 @@ from onnx import TensorProto, helper
 
 from liquidonnx.external_data import split_external_data
 from liquidonnx.lfm2.builder import LFM2Builder, LFM2Config
+from liquidonnx.lfm2_audio.builder.config import ConformerConfig
+from liquidonnx.lfm2_audio.builder.conformer_builder import ConformerEncoderBuilder
+from liquidonnx.lfm2_audio.builder.depthformer_builder import (
+    export_depth_linear_builder,
+    export_depthformer_unified_builder,
+)
 from liquidonnx.quantize import get_model_size, quantize_model
 
 logger = logging.getLogger(__name__)
@@ -71,78 +77,37 @@ def load_audio_config(model_path: str) -> dict:
         return json.load(f)
 
 
-# === 1. Audio Encoder Export (torch.onnx) ===
+# === 1. Audio Encoder Export (builder) ===
 
 
-class AudioEncoderWrapper(nn.Module):
-    """Wrapper for Conformer encoder + adapter for ONNX export."""
-
-    def __init__(self, conformer, adapter):
-        super().__init__()
-        self.conformer = conformer
-        self.adapter = adapter
-
-    def forward(self, mel_features: torch.Tensor, mel_lengths: torch.Tensor):
-        """
-        Args:
-            mel_features: [batch, time, features] mel-spectrogram
-            mel_lengths: [batch] length of each sequence
-
-        Returns:
-            audio_embeddings: [batch, time', hidden] encoded audio
-            output_lengths: [batch] output lengths
-        """
-        # Conformer expects [batch, features, time]
-        mel_features = mel_features.transpose(1, 2)
-
-        # Encode with conformer
-        encoded, encoded_lens = self.conformer(audio_signal=mel_features, length=mel_lengths)
-
-        # Transpose back to [batch, time, features]
-        encoded = encoded.transpose(1, 2)
-
-        # Apply adapter
-        audio_embeddings = self.adapter(encoded)
-
-        return audio_embeddings, encoded_lens
-
-
-def export_audio_encoder(
-    model, config: dict, onnx_dir: pathlib.Path, device: str = "cuda"
+def export_audio_encoder_builder(
+    model_path: str, config: dict, onnx_dir: pathlib.Path
 ) -> pathlib.Path:
-    """Export Conformer audio encoder to ONNX using torch.onnx."""
-    logger.info("Exporting audio_encoder.onnx...")
+    """Export Conformer audio encoder to ONNX using ONNX builder (no torch.onnx.export).
 
-    wrapper = AudioEncoderWrapper(model.conformer, model.audio_adapter).to(device)
-    wrapper.eval()
+    Args:
+        model_path: HuggingFace model ID or local path
+        config: Model configuration dict
+        onnx_dir: Output directory for ONNX models
 
-    # Create dummy inputs
-    batch_size = 1
-    time_steps = 100
-    features = config.get("preprocessor", {}).get("features", 128)
+    Returns:
+        Path to exported audio_encoder.onnx
+    """
+    logger.info("Exporting audio_encoder.onnx (builder)...")
 
-    mel_features = torch.randn(batch_size, time_steps, features, device=device)
-    mel_lengths = torch.tensor([time_steps], dtype=torch.int64, device=device)
+    # Create conformer config from model config
+    encoder_config = config.get("encoder", {})
+    conformer_config = ConformerConfig.from_hf_config(encoder_config)
+
+    # Get adapter output dimension from LFM config
+    adapter_output_dim = config.get("lfm", {}).get("hidden_size", 2048)
+
+    # Build the model
+    builder = ConformerEncoderBuilder(conformer_config, adapter_output_dim)
+    model = builder.build(model_path)
 
     output_path = onnx_dir / "audio_encoder.onnx"
-
-    with torch.no_grad():
-        torch.onnx.export(
-            wrapper,
-            (mel_features, mel_lengths),
-            str(output_path),
-            input_names=["mel_features", "mel_lengths"],
-            output_names=["audio_embeddings", "output_lengths"],
-            dynamic_axes={
-                "mel_features": {0: "batch", 1: "time"},
-                "mel_lengths": {0: "batch"},
-                "audio_embeddings": {0: "batch", 1: "time"},
-                "output_lengths": {0: "batch"},
-            },
-            opset_version=18,
-            do_constant_folding=True,
-            dynamo=False,
-        )
+    onnx.save(model, str(output_path))
 
     logger.info(f"audio_encoder saved to {output_path}")
     return output_path
@@ -544,466 +509,8 @@ class DepthformerAutoregressiveWrapper(nn.Module):
         return logits
 
 
-# === Autoregressive Depthformer ONNX Export ===
-
-
-class DepthLinearWrapper(nn.Module):
-    """Wrapper for depth_linear projection: [B, 2048] → [B, 8, 1024]."""
-
-    def __init__(self, depth_linear, num_codebooks: int = 8):
-        super().__init__()
-        self.depth_linear = depth_linear
-        self.num_codebooks = num_codebooks
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            hidden_states: [batch, hidden_size] - last hidden state from decoder
-
-        Returns:
-            depth_hidden: [batch, 8, 1024] - projected depth inputs
-        """
-        batch_size = hidden_states.shape[0]
-        depth_hidden = self.depth_linear(hidden_states)  # [B, 8*1024]
-        depth_dim = depth_hidden.shape[-1] // self.num_codebooks
-        return depth_hidden.view(batch_size, self.num_codebooks, depth_dim)
-
-
-def apply_rotary_emb_real(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cos: torch.Tensor,
-    freqs_sin: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """ONNX-compatible rotary embeddings using real operations only.
-
-    Replaces complex multiplication (a + bi) * (cos + i*sin) with:
-        real_out = a*cos - b*sin
-        imag_out = a*sin + b*cos
-
-    Args:
-        xq: Query tensor [B, S, H, D] where D = head_dim
-        xk: Key tensor [B, S, H, D]
-        freqs_cos: Cosine frequencies [S, D//2]
-        freqs_sin: Sine frequencies [S, D//2]
-
-    Returns:
-        Rotary-embedded query and key tensors
-    """
-    # Reshape to separate real/imag pairs: [B, S, H, D] -> [B, S, H, D//2, 2]
-    xq_r = xq.float().reshape(*xq.shape[:-1], -1, 2)
-    xk_r = xk.float().reshape(*xk.shape[:-1], -1, 2)
-
-    # Extract real and imaginary parts
-    xq_real, xq_imag = xq_r[..., 0], xq_r[..., 1]  # [B, S, H, D//2]
-    xk_real, xk_imag = xk_r[..., 0], xk_r[..., 1]
-
-    # Broadcast freqs to match: [S, D//2] -> [1, S, 1, D//2]
-    cos = freqs_cos.unsqueeze(0).unsqueeze(2)  # [1, S, 1, D//2]
-    sin = freqs_sin.unsqueeze(0).unsqueeze(2)
-
-    # Apply rotation: (a + bi) * (cos + i*sin) = (a*cos - b*sin) + i*(a*sin + b*cos)
-    xq_out_real = xq_real * cos - xq_imag * sin
-    xq_out_imag = xq_real * sin + xq_imag * cos
-    xk_out_real = xk_real * cos - xk_imag * sin
-    xk_out_imag = xk_real * sin + xk_imag * cos
-
-    # Stack and flatten back: [B, S, H, D//2, 2] -> [B, S, H, D]
-    xq_out = torch.stack([xq_out_real, xq_out_imag], dim=-1).flatten(-2)
-    xk_out = torch.stack([xk_out_real, xk_out_imag], dim=-1).flatten(-2)
-
-    return xq_out.type_as(xq), xk_out.type_as(xk)
-
-
-class OnnxDepthformerUnifiedWrapper(nn.Module):
-    """Unified ONNX depthformer that combines transformer, embeddings, and logits.
-
-    Consolidates 17 separate models (depthformer_step + 8 embeds + 8 logits)
-    into a single model that accepts step_idx to select the right weights.
-
-    Inputs:
-        depth_slices: [B, 8, 1024] - All 8 slices from depth_linear (passed unchanged)
-        step_idx: int64 scalar - Which codebook step (0-7)
-        prev_token: int64 [B] - Previous codebook's sampled token (0-2047, or ignored for step 0)
-        past_keys: [num_layers, B, seq_len, num_kv_heads, head_dim]
-        past_values: [num_layers, B, seq_len, num_kv_heads, head_dim]
-
-    Outputs:
-        logits: [B, 2049] - Codebook logits for current step
-        token_embed: [B, 1024] - Embedding of sampled token (caller passes this back as prev input)
-        new_keys, new_values: Updated KV cache
-    """
-
-    def __init__(self, model):
-        """Initialize from LFM2AudioModel.
-
-        Args:
-            model: LFM2AudioModel with depthformer, depth_embeddings
-        """
-        super().__init__()
-        depthformer = model.depthformer
-        depth_embeddings = model.depth_embeddings
-
-        # === Transformer components (from OnnxDepthformerStepWrapper) ===
-        self.num_layers = len(depthformer.layers)
-
-        self.operator_norms = nn.ModuleList()
-        self.qkv_projs = nn.ModuleList()
-        self.out_projs = nn.ModuleList()
-        self.ffn_norms = nn.ModuleList()
-        self.feed_forwards = nn.ModuleList()
-        self.q_layernorms = nn.ModuleList()
-        self.k_layernorms = nn.ModuleList()
-        self.freqs_cos_list = nn.ParameterList()
-        self.freqs_sin_list = nn.ParameterList()
-
-        # Store attention config
-        self.dim = depthformer.layers[0].operator.dim
-        self.num_heads = depthformer.layers[0].operator.num_heads
-        self.head_dim = depthformer.layers[0].operator.head_dim
-        self.head_style = depthformer.layers[0].operator.head_style
-        self.gqa_dim = getattr(depthformer.layers[0].operator, "gqa_dim", None)
-
-        # Check if QK layernorm is used
-        bounded = depthformer.layers[0].operator.bounded_attention
-        self.qk_layernorm = getattr(bounded, "qk_layernorm", False)
-
-        for layer in depthformer.layers:
-            self.operator_norms.append(layer.operator_norm)
-            self.qkv_projs.append(layer.operator.qkv_proj)
-            self.out_projs.append(layer.operator.out_proj)
-            self.ffn_norms.append(layer.ffn_norm)
-            self.feed_forwards.append(layer.feed_forward)
-
-            bounded = layer.operator.bounded_attention
-            if self.qk_layernorm:
-                self.q_layernorms.append(bounded.q_layernorm)
-                self.k_layernorms.append(bounded.k_layernorm)
-
-            freqs_cis = layer.operator.freqs_cis
-            freqs_cos = nn.Parameter(freqs_cis.real.clone(), requires_grad=False)
-            freqs_sin = nn.Parameter(freqs_cis.imag.clone(), requires_grad=False)
-            self.freqs_cos_list.append(freqs_cos)
-            self.freqs_sin_list.append(freqs_sin)
-
-        # === Stacked embeddings for all 8 codebooks ===
-        # Stack into [8, vocab_size, dim] for indexed lookup
-        self.num_codebooks = len(depth_embeddings)
-        self.vocab_size = depth_embeddings[0].embedding.num_embeddings  # 2049
-        self.embed_dim = depth_embeddings[0].embedding.embedding_dim  # 1024
-
-        # Stack embedding weights: [8, 2049, 1024]
-        embed_weights = torch.stack(
-            [de.embedding.weight for de in depth_embeddings], dim=0
-        )
-        self.embed_weights = nn.Parameter(embed_weights, requires_grad=False)
-
-        # Stack logits weights and norms
-        # to_logits weight: [2049, 1024] per codebook → [8, 2049, 1024]
-        logits_weights = torch.stack(
-            [de.to_logits.weight for de in depth_embeddings], dim=0
-        )
-        self.logits_weights = nn.Parameter(logits_weights, requires_grad=False)
-
-        # embedding_norm weight: [1024] per codebook → [8, 1024]
-        norm_weights = torch.stack(
-            [de.embedding_norm.weight for de in depth_embeddings], dim=0
-        )
-        self.norm_weights = nn.Parameter(norm_weights, requires_grad=False)
-        self.norm_eps = depth_embeddings[0].embedding_norm.eps
-
-    def forward(
-        self,
-        depth_slices: torch.Tensor,
-        step_idx: torch.Tensor,
-        prev_token: torch.Tensor,
-        past_keys: torch.Tensor,
-        past_values: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            depth_slices: [B, 8, 1024] - All 8 depth slices
-            step_idx: scalar int64 - Which step (0-7)
-            prev_token: [B] int64 - Previous token (use 0 for step 0)
-            past_keys: [num_layers, B, past_len, num_kv_heads, head_dim]
-            past_values: [num_layers, B, past_len, num_kv_heads, head_dim]
-
-        Returns:
-            logits: [B, 2049]
-            token_embed: [B, 1024] - Unused placeholder for API consistency
-            new_keys: [num_layers, B, new_len, num_kv_heads, head_dim]
-            new_values: [num_layers, B, new_len, num_kv_heads, head_dim]
-
-        Note:
-            For step 0, prev_token should be 0 and past_keys/values should be empty.
-            For steps 1-7, prev_token is the sampled token from the previous step.
-            The embedding lookup uses embed_weights[step_idx-1] clamped to valid range.
-        """
-        batch_size = depth_slices.shape[0]
-
-        # === 1. Get current depth slice using gather ===
-        # depth_slices: [B, 8, 1024], step_idx: scalar → [B, 1024]
-        # Expand step_idx for gather: [B, 1, 1024]
-        step_idx_expanded = step_idx.view(1, 1, 1).expand(batch_size, 1, self.embed_dim)
-        current_slice = torch.gather(depth_slices, 1, step_idx_expanded).squeeze(1)
-
-        # === 2. Get previous token embedding ===
-        # For step 0: use zeros (step_idx-1 would be -1, which we handle by clamping)
-        # For steps 1-7: look up prev_token in embed_weights[step_idx-1]
-        #
-        # We compute embedding for all cases, then zero out for step 0
-        # This avoids ONNX-incompatible Python if/else on runtime values
-
-        # Clamp step_idx-1 to [0, 7] (for step 0, uses embed_weights[0] then zeros it)
-        prev_step_idx = torch.clamp(step_idx - 1, min=0, max=self.num_codebooks - 1)
-
-        # Get embedding table for previous step: embed_weights[prev_step_idx]
-        # embed_weights: [8, 2049, 1024]
-        prev_codebook_embeds = self.embed_weights[prev_step_idx]  # [2049, 1024]
-
-        # Look up prev_token in that table
-        prev_embed_raw = prev_codebook_embeds[prev_token]  # [B, 1024]
-
-        # Zero out for step 0 using a mask
-        is_step_zero = (step_idx == 0).float().unsqueeze(-1)  # [1, 1]
-        prev_embed = prev_embed_raw * (1.0 - is_step_zero)  # Zero for step 0
-
-        # === 3. Combine for transformer input ===
-        x = (current_slice + prev_embed).unsqueeze(1)  # [B, 1, 1024]
-
-        # === 4. Run transformer layers ===
-        seq_len = x.shape[1]
-        past_len = past_keys.shape[2]
-
-        new_keys_list = []
-        new_values_list = []
-
-        for i in range(self.num_layers):
-            normed = self.operator_norms[i](x)
-            qkv = self.qkv_projs[i](normed)
-
-            if self.head_style == "mha":
-                xq, xk, xv = qkv.split(self.dim, dim=-1)
-            elif self.head_style == "mqa":
-                xq, xk, xv = qkv.split([self.dim, self.head_dim, self.head_dim], dim=-1)
-            elif self.head_style == "gqa":
-                xq, xk, xv = qkv.split(
-                    [self.dim, self.head_dim * self.gqa_dim, self.head_dim * self.gqa_dim],
-                    dim=-1,
-                )
-            else:
-                raise ValueError(f"Unknown head_style: {self.head_style}")
-
-            xq = xq.view(batch_size, seq_len, self.num_heads, self.head_dim)
-            if self.head_style == "mha":
-                num_kv_heads = self.num_heads
-            elif self.head_style == "mqa":
-                num_kv_heads = 1
-            else:
-                num_kv_heads = self.gqa_dim
-            xk = xk.view(batch_size, seq_len, num_kv_heads, self.head_dim)
-            xv = xv.view(batch_size, seq_len, num_kv_heads, self.head_dim)
-
-            if self.qk_layernorm:
-                xq = self.q_layernorms[i](xq)
-                xk = self.k_layernorms[i](xk)
-
-            freqs_cos = self.freqs_cos_list[i][past_len : past_len + seq_len]
-            freqs_sin = self.freqs_sin_list[i][past_len : past_len + seq_len]
-            xq, xk = apply_rotary_emb_real(xq, xk, freqs_cos, freqs_sin)
-
-            k = torch.cat([past_keys[i], xk], dim=1)
-            v = torch.cat([past_values[i], xv], dim=1)
-            new_keys_list.append(k)
-            new_values_list.append(v)
-
-            query = xq.transpose(1, 2)
-            key = k.transpose(1, 2)
-            value = v.transpose(1, 2)
-
-            if self.head_style in ("mqa", "gqa"):
-                num_groups = self.num_heads // num_kv_heads
-                key = key.unsqueeze(2).expand(-1, -1, num_groups, -1, -1)
-                key = key.reshape(batch_size, self.num_heads, -1, self.head_dim)
-                value = value.unsqueeze(2).expand(-1, -1, num_groups, -1, -1)
-                value = value.reshape(batch_size, self.num_heads, -1, self.head_dim)
-
-            scale = 1.0 / (self.head_dim**0.5)
-            attn_weights = torch.matmul(query, key.transpose(-2, -1)) * scale
-            attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
-            attn_out = torch.matmul(attn_weights, value)
-            attn_out = attn_out.transpose(1, 2).reshape(batch_size, seq_len, self.dim)
-
-            h = self.out_projs[i](attn_out) + x
-            ffn_out = self.feed_forwards[i](self.ffn_norms[i](h))
-            x = h + ffn_out
-
-        new_keys = torch.stack(new_keys_list, dim=0)
-        new_values = torch.stack(new_values_list, dim=0)
-
-        # === 5. Get logits using current step's projection ===
-        output = x.squeeze(1)  # [B, 1024]
-
-        # Get step-specific norm and logits weights using indexing
-        norm_weight = self.norm_weights[step_idx]  # [1024]
-        logits_weight = self.logits_weights[step_idx]  # [2049, 1024]
-
-        # RMSNorm
-        variance = output.pow(2).mean(-1, keepdim=True)
-        normed = output * torch.rsqrt(variance + self.norm_eps)
-        normed = normed * norm_weight
-
-        # Linear projection
-        logits = torch.nn.functional.linear(normed, logits_weight)  # [B, 2049]
-
-        # Return placeholder for prev_embed (caller manages token passing)
-        placeholder_embed = torch.zeros(batch_size, self.embed_dim, device=depth_slices.device)
-
-        return logits, placeholder_embed, new_keys, new_values
-
-
-def export_depth_linear(model, onnx_dir: pathlib.Path, device: str = "cuda") -> pathlib.Path:
-    """Export depth_linear.onnx: [B, 2048] → [B, 8, 1024]."""
-    logger.info("Exporting depthformer/depth_linear.onnx...")
-
-    depthformer_dir = onnx_dir / "depthformer"
-    depthformer_dir.mkdir(exist_ok=True)
-
-    wrapper = DepthLinearWrapper(model.depth_linear).to(device)
-    wrapper.eval()
-
-    hidden_states = torch.randn(1, 2048, device=device, dtype=torch.float32)
-    output_path = depthformer_dir / "depth_linear.onnx"
-
-    with torch.no_grad():
-        torch.onnx.export(
-            wrapper,
-            (hidden_states,),
-            str(output_path),
-            input_names=["hidden_states"],
-            output_names=["depth_hidden"],
-            dynamic_axes={
-                "hidden_states": {0: "batch"},
-                "depth_hidden": {0: "batch"},
-            },
-            opset_version=18,
-            do_constant_folding=True,
-            dynamo=False,  # Use legacy exporter for compatibility
-        )
-
-    logger.info(f"depth_linear saved to {output_path}")
-    return output_path
-
-
-def export_depthformer_unified(
-    model, onnx_dir: pathlib.Path, device: str = "cuda"
-) -> pathlib.Path:
-    """Export depthformer_unified.onnx - consolidated model with all components.
-
-    Combines transformer step, all 8 embedding tables, and all 8 logits projections
-    into a single ONNX model. Uses step_idx input to select the appropriate weights.
-
-    Inputs:
-        depth_slices: [B, 8, 1024] - Output from depth_linear
-        step_idx: int64 scalar - Which codebook step (0-7)
-        prev_token: [B] int64 - Previous step's sampled token
-        past_keys: [6, B, seq_len, 8, 32] - KV cache keys
-        past_values: [6, B, seq_len, 8, 32] - KV cache values
-
-    Outputs:
-        logits: [B, 2049] - Codebook logits
-        token_embed: [B, 1024] - Placeholder (unused)
-        new_keys, new_values: Updated KV cache
-    """
-    logger.info("Exporting depthformer/depthformer_unified.onnx...")
-
-    depthformer_dir = onnx_dir / "depthformer"
-    depthformer_dir.mkdir(exist_ok=True)
-
-    wrapper = OnnxDepthformerUnifiedWrapper(model).to(device)
-    wrapper.eval()
-
-    # Input shapes
-    num_layers = 6
-    num_kv_heads = 8
-    head_dim = 32
-    batch_size = 1
-    past_len = 0
-
-    depth_slices = torch.randn(batch_size, 8, 1024, device=device, dtype=torch.float32)
-    step_idx = torch.tensor(0, device=device, dtype=torch.int64)
-    prev_token = torch.zeros(batch_size, device=device, dtype=torch.int64)
-    past_keys = torch.zeros(
-        num_layers, batch_size, past_len, num_kv_heads, head_dim, device=device
-    )
-    past_values = torch.zeros(
-        num_layers, batch_size, past_len, num_kv_heads, head_dim, device=device
-    )
-
-    output_path = depthformer_dir / "depthformer_unified.onnx"
-
-    with torch.no_grad():
-        torch.onnx.export(
-            wrapper,
-            (depth_slices, step_idx, prev_token, past_keys, past_values),
-            str(output_path),
-            input_names=[
-                "depth_slices",
-                "step_idx",
-                "prev_token",
-                "past_keys",
-                "past_values",
-            ],
-            output_names=["logits", "token_embed", "new_keys", "new_values"],
-            dynamic_axes={
-                "depth_slices": {0: "batch"},
-                "prev_token": {0: "batch"},
-                "past_keys": {1: "batch", 2: "past_len"},
-                "past_values": {1: "batch", 2: "past_len"},
-                "logits": {0: "batch"},
-                "token_embed": {0: "batch"},
-                "new_keys": {1: "batch", 2: "new_len"},
-                "new_values": {1: "batch", 2: "new_len"},
-            },
-            opset_version=18,
-            do_constant_folding=True,
-            dynamo=False,
-        )
-
-    logger.info(f"depthformer_unified saved to {output_path}")
-    return output_path
-
-
-def export_depthformer_autoregressive(
-    model, config: dict, onnx_dir: pathlib.Path, device: str = "cuda"
-) -> pathlib.Path:
-    """Export ONNX models for autoregressive depthformer inference.
-
-    Exports to depthformer/ subdirectory (consolidated 2-model structure):
-    - depth_linear.onnx: [B, 2048] → [B, 8, 1024] (called 1× per frame)
-    - depthformer_unified.onnx: Unified transformer+embed+logits (called 8× per frame)
-
-    The unified model consolidates what was previously 17 separate models:
-    - depthformer_step.onnx (transformer)
-    - depth_embed_0..7.onnx (8 embedding tables)
-    - depth_logits_0..7.onnx (8 logits projections)
-    """
-    logger.info("=" * 60)
-    logger.info("Exporting depthformer ONNX models (consolidated)")
-    logger.info("=" * 60)
-
-    export_depth_linear(model, onnx_dir, device)
-    export_depthformer_unified(model, onnx_dir, device)
-
-    depthformer_dir = onnx_dir / "depthformer"
-    logger.info(f"Depthformer models saved to {depthformer_dir}")
-    logger.info("  - depth_linear.onnx (1× per frame)")
-    logger.info("  - depthformer_unified.onnx (8× per frame)")
-    return depthformer_dir
-
-
 def export_depthformer(
-    model, config: dict, onnx_dir: pathlib.Path, device: str = "cuda"
+    model, config: dict, onnx_dir: pathlib.Path, device: str = "cpu"
 ) -> pathlib.Path:
     """Export depthformer.onnx using torch.onnx.
 
@@ -1577,23 +1084,24 @@ def export_audio_lm_head(
 
 def do_quantize(onnx_dir: pathlib.Path, bits: int, block_size: int, symmetric: bool):
     """Quantize all exportable models to specified precision."""
-    # Models to quantize with their settings
-    # (model_name, exclude_lm_head)
+    # Models to quantize: (relative_path, exclude_lm_head)
     models_to_quantize = [
         ("decoder", True),
         ("audio_encoder", False),
         ("audio_embedding", False),
         ("audio_detokenizer", False),
+        ("vocoder_projection", False),
+        ("vocoder_depthformer", False),
     ]
 
-    for model_name, exclude_lm_head in models_to_quantize:
-        fp32_path = onnx_dir / f"{model_name}.onnx"
-        quant_path = onnx_dir / f"{model_name}_q{bits}.onnx"
+    for model_path, exclude_lm_head in models_to_quantize:
+        fp32_path = onnx_dir / f"{model_path}.onnx"
+        quant_path = onnx_dir / f"{model_path}_q{bits}.onnx"
 
         if not fp32_path.exists():
             continue
         if quant_path.exists():
-            logger.info(f"  {model_name}_q{bits}.onnx already exists, skipping")
+            logger.info(f"  {model_path}_q{bits}.onnx already exists, skipping")
             continue
 
         _, orig_mb = get_model_size(fp32_path)
@@ -1606,102 +1114,10 @@ def do_quantize(onnx_dir: pathlib.Path, bits: int, block_size: int, symmetric: b
             symmetric=symmetric,
         )
         _, quant_mb = get_model_size(quant_path)
-        logger.info(f"  {model_name}: {orig_mb:.1f} -> {quant_mb:.1f} MB")
+        logger.info(f"  {model_path}: {orig_mb:.1f} -> {quant_mb:.1f} MB")
 
 
-# === 7. Audio Detokenizer Export (hybrid) ===
-
-
-class AudioDetokenizerLFMWrapper(nn.Module):
-    """Wrapper for the LFM (neural network) part of audio detokenizer.
-
-    The full audio detokenizer has: FusedEmbedding -> LFM -> Linear -> ISTFT
-    ISTFT uses unsupported ops, so we export just the neural network part
-    and implement ISTFT in NumPy.
-    """
-
-    def __init__(self, detokenizer):
-        super().__init__()
-        self.emb = detokenizer.emb  # FusedEmbedding
-        self.lfm = detokenizer.lfm  # Lfm2Model
-        self.lin = detokenizer.lin  # Linear
-        self.sliding_window_size = getattr(detokenizer, "sliding_window_size", 30)
-
-    def forward(self, audio_codes: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            audio_codes: [batch, 8, time] - audio codes from depthformer
-
-        Returns:
-            stft_features: [batch, time', 1282] - STFT features (log_magnitude + angle)
-
-        Reference: liquid_audio/detokenizer.py LFM2AudioDetokenizer.forward()
-        """
-        # Embed audio codes
-        x = self.emb(audio_codes)  # [B, T, 512]
-
-        # 6x upsample (critical for correct output)
-        # Use transpose(-2, -1) instead of .mT for ONNX compatibility
-        # Use mode="nearest" for ONNX compatibility (instead of "nearest-exact")
-        upsample_size = 6 * x.shape[1]
-        x = torch.nn.functional.interpolate(
-            x.transpose(-2, -1), upsample_size, mode="nearest"
-        ).transpose(-2, -1)
-
-        # Create sliding window attention mask
-        # Reference: liquid_audio/detokenizer.py lines 125-128
-        idx = torch.arange(x.shape[1], device=x.device)
-        d_idx = idx - idx[:, None]
-        mask = torch.logical_and(d_idx <= 0, d_idx > -self.sliding_window_size)[None, None, ...]
-
-        # Run through LFM with attention mask
-        x = self.lfm(inputs_embeds=x, attention_mask=mask, use_cache=False).last_hidden_state
-
-        # Project to STFT feature space (log_magnitude + angle)
-        x = self.lin(x)  # [B, T, 1282]
-
-        return x
-
-
-def export_audio_detokenizer_lfm(
-    processor, config: dict, onnx_dir: pathlib.Path, device: str = "cuda"
-) -> pathlib.Path:
-    """Export the neural network part of audio detokenizer.
-
-    Args:
-        processor: LFM2AudioProcessor instance (has audio_detokenizer attribute)
-    """
-    logger.info("Exporting audio_detokenizer.onnx...")
-
-    wrapper = AudioDetokenizerLFMWrapper(processor.audio_detokenizer).to(device)
-    wrapper.eval()
-
-    # Dummy input: [batch, 8, time]
-    batch_size = 1
-    num_codebooks = 8
-    seq_len = 10
-    audio_codes = torch.randint(0, 2048, (batch_size, num_codebooks, seq_len), device=device)
-
-    output_path = onnx_dir / "audio_detokenizer.onnx"
-
-    with torch.no_grad():
-        torch.onnx.export(
-            wrapper,
-            (audio_codes,),
-            str(output_path),
-            input_names=["audio_codes"],
-            output_names=["stft_features"],
-            dynamic_axes={
-                "audio_codes": {0: "batch", 2: "time"},
-                "stft_features": {0: "batch", 1: "time"},
-            },
-            opset_version=18,
-            do_constant_folding=True,
-            dynamo=False,
-        )
-
-    logger.info(f"audio_detokenizer saved to {output_path}")
-    return output_path
+# === 7. Audio Detokenizer Export ===
 
 
 def save_istft_config(config: dict, onnx_dir: pathlib.Path):
@@ -1721,128 +1137,6 @@ def save_istft_config(config: dict, onnx_dir: pathlib.Path):
         json.dump(istft_config, f, indent=2)
 
     logger.info(f"ISTFT config saved to {config_path}")
-
-
-def export_audio_detokenizer_pytorch(
-    model_path: str, onnx_dir: pathlib.Path
-) -> pathlib.Path | None:
-    """Export audio detokenizer using PyTorch/transformers (more accurate than builder).
-
-    This creates audio_detokenizer_lfm.onnx which uses the transformers Lfm2Model.
-    The inference code will prefer this over the builder-based model.
-    """
-    import json
-
-    from huggingface_hub import snapshot_download
-    from safetensors.torch import load_file
-    from transformers import Lfm2Config, Lfm2Model
-
-    logger.info("Exporting audio_detokenizer_lfm.onnx (PyTorch/transformers)...")
-
-    # Download audio_detokenizer weights
-    cache_path = pathlib.Path(snapshot_download(model_path, allow_patterns=["audio_detokenizer/*"]))
-    detok_path = cache_path / "audio_detokenizer"
-
-    if not detok_path.exists():
-        logger.warning("Audio detokenizer not found in model, skipping PyTorch export")
-        return None
-
-    # Load config
-    with open(detok_path / "config.json") as f:
-        config_dict = json.load(f)
-
-    # Convert sliding_attention to full_attention for transformers compatibility
-    # The sliding window attention mask is manually applied in forward()
-    sliding_window = config_dict.get("sliding_window", 30)
-    layer_types = config_dict.get("layer_types", [])
-    config_dict["layer_types"] = [
-        "full_attention" if lt == "sliding_attention" else lt for lt in layer_types
-    ]
-    lfm_config = Lfm2Config(**config_dict)
-
-    # Create FusedEmbedding
-    class FusedEmbedding(torch.nn.Module):
-        def __init__(self, dim: int, codebooks: int = 8, vocab_size: int = 2048):
-            super().__init__()
-            self.emb = torch.nn.Embedding(codebooks * vocab_size, dim)
-            self.codebooks = codebooks
-            self.vocab_size = vocab_size
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            offsets = torch.arange(self.codebooks, device=x.device) * self.vocab_size
-            offset_x = offsets[:, None] + x
-            return self.emb(offset_x).mean(1)
-
-    # Create detokenizer wrapper
-    class AudioDetokPyTorch(torch.nn.Module):
-        def __init__(self, config, sliding_window: int):
-            super().__init__()
-            self.emb = FusedEmbedding(config.hidden_size)
-            self.lfm = Lfm2Model(config)
-            self.lin = torch.nn.Linear(config.hidden_size, 1282)
-            self.sliding_window = sliding_window
-
-        def forward(self, audio_codes: torch.Tensor) -> torch.Tensor:
-            x = self.emb(audio_codes)
-            # 6x upsample (critical) - use transpose instead of .mT for ONNX compatibility
-            # Use "nearest" instead of "nearest-exact" for ONNX opset 14 compatibility
-            upsample_size = 6 * x.shape[1]
-            x = x.transpose(-1, -2)  # [B, T, H] -> [B, H, T]
-            x = torch.nn.functional.interpolate(x, upsample_size, mode="nearest")
-            x = x.transpose(-1, -2)  # [B, H, T*6] -> [B, T*6, H]
-
-            # Create sliding window attention mask (critical for audio quality)
-            # Each position attends to at most sliding_window previous positions
-            seq_len = x.shape[1]
-            idx = torch.arange(seq_len, device=x.device)
-            d_idx = idx - idx[:, None]
-            mask = torch.logical_and(d_idx <= 0, d_idx > -self.sliding_window)
-            mask = mask[None, None, ...]  # [1, 1, S, S]
-
-            x = self.lfm(inputs_embeds=x, attention_mask=mask, use_cache=False).last_hidden_state
-            x = self.lin(x)
-            return x
-
-    logger.info("Creating PyTorch model...")
-    model = AudioDetokPyTorch(lfm_config, sliding_window)
-
-    # Load weights
-    weights = load_file(str(detok_path / "model.safetensors"))
-    model.load_state_dict(weights, strict=False)
-    model.eval()
-
-    # Export to ONNX
-    logger.info("Exporting to ONNX...")
-    codes = torch.randint(0, 2048, (1, 8, 10), dtype=torch.long)
-    output_path = onnx_dir / "audio_detokenizer_lfm.onnx"
-
-    # Use legacy exporter (dynamo=False) because dynamo can't handle
-    # dynamic attention mask creation in the forward pass
-    with torch.no_grad():
-        torch.onnx.export(
-            model,
-            (codes,),
-            str(output_path),
-            input_names=["audio_codes"],
-            output_names=["stft_features"],
-            dynamic_axes={
-                "audio_codes": {0: "batch", 2: "time"},
-                "stft_features": {0: "batch", 1: "time"},
-            },
-            opset_version=17,
-            do_constant_folding=True,
-            dynamo=False,
-            verbose=False,
-        )
-    # Clean up model
-    del model
-    gc.collect()
-
-    logger.info(f"audio_detokenizer_lfm saved to {output_path}")
-    return output_path
-
-
-# === 8. Audio Detokenizer Export (builder) ===
 
 
 class AudioDetokenizerBuilder:
@@ -2531,19 +1825,16 @@ def export_audio_detokenizer_builder(model_path: str, onnx_dir: pathlib.Path) ->
 # === Main Export ===
 
 
-def export_full_model(
-    model_path: str, output_dir: pathlib.Path, export_audio_encoder_flag: bool = True
-):
+def export_full_model(model_path: str, output_dir: pathlib.Path):
     """Export all components of LFM2.5-Audio to ONNX.
 
-    Exports 4 models:
+    Exports:
     - decoder.onnx: LFM2 backbone with text embeddings
-    - audio_encoder.onnx: Conformer encoder for ASR (requires liquid_audio)
+    - audio_encoder.onnx: Conformer encoder for ASR
     - audio_embedding.onnx: Audio code embeddings for TTS
-    - audio_detokenizer.onnx: Neural vocoder for TTS (requires liquid_audio)
-
-    Note: Depthformer is not exported to ONNX. PyTorch autoregressive inference
-    is used at runtime for better audio quality.
+    - audio_detokenizer.onnx: Neural vocoder for TTS
+    - vocoder_projection.onnx: Projects hidden states to depthformer space
+    - vocoder_depthformer.onnx: Autoregressive audio codebook prediction
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     onnx_dir = output_dir / "onnx"
@@ -2553,57 +1844,16 @@ def export_full_model(
     config = load_audio_config(model_path)
     weights = load_audio_model_weights(model_path)
 
-    # Export builder-based components (no torch model needed)
+    # === Builder-based exports (no PyTorch model needed) ===
     export_audio_embedding(weights, config, onnx_dir)
     export_decoder(weights, config, onnx_dir)
+    export_audio_encoder_builder(model_path, config, onnx_dir)
+    export_depth_linear_builder(model_path, onnx_dir)
+    export_depthformer_unified_builder(model_path, onnx_dir)
+    export_audio_detokenizer_builder(model_path, onnx_dir)
+    save_istft_config(config, onnx_dir)
 
-    # Export torch-based components (require liquid_audio)
-    pytorch_model = None
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    try:
-        from liquid_audio import LFM2AudioModel, LFM2AudioProcessor
-
-        logger.info(f"Loading PyTorch model for torch exports (device: {device})...")
-        pytorch_model = LFM2AudioModel.from_pretrained(
-            model_path, dtype=torch.float32, device=device
-        )
-        pytorch_model.eval()
-
-        # Export audio encoder (ASR mode)
-        if export_audio_encoder_flag:
-            with torch.no_grad():
-                export_audio_encoder(pytorch_model, config, onnx_dir, device)
-
-        # Export autoregressive depthformer ONNX models (TTS mode)
-        with torch.no_grad():
-            export_depthformer_autoregressive(pytorch_model, config, onnx_dir, device)
-
-        # Export audio detokenizer neural network part (TTS mode)
-        # The detokenizer is part of the processor, not the model
-        logger.info("Loading audio processor for detokenizer export...")
-        processor = LFM2AudioProcessor.from_pretrained(model_path, device=device)
-        with torch.no_grad():
-            export_audio_detokenizer_lfm(processor, config, onnx_dir, device)
-            save_istft_config(config, onnx_dir)
-        del processor
-
-    except ImportError:
-        logger.warning("=" * 60)
-        logger.warning("liquid_audio package not available")
-        logger.warning("  - audio_encoder.onnx will NOT be exported (ASR mode unavailable)")
-        logger.warning("  - audio_detokenizer.onnx will NOT be exported (TTS limited)")
-        logger.warning("To enable full functionality: pip install liquid-audio")
-        logger.warning("=" * 60)
-
-    # Cleanup PyTorch model
-    if pytorch_model is not None:
-        del pytorch_model
-        gc.collect()
-        if device == "cuda":
-            torch.cuda.empty_cache()
-
-    # Clean up
+    # Clean up weights after builder exports
     weights.clear()
     gc.collect()
 
@@ -2661,11 +1911,6 @@ def main():
         help="Output precisions: q4, q8 (default if no args)",
     )
     parser.add_argument(
-        "--skip-audio-encoder",
-        action="store_true",
-        help="Skip audio encoder export (requires liquid_audio)",
-    )
-    parser.add_argument(
         "--block-size",
         type=int,
         default=32,
@@ -2692,7 +1937,7 @@ def main():
     logger.info("ONNX Export for LFM2.5-Audio")
     logger.info("=" * 60)
 
-    export_full_model(args.model, output_dir, not args.skip_audio_encoder)
+    export_full_model(args.model, output_dir)
 
     # Quantize
     quant_bits = []

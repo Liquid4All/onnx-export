@@ -10,9 +10,8 @@ Uses ONNX models:
 - audio_encoder.onnx: Conformer encoder for ASR
 - audio_embedding.onnx: Audio code embeddings for TTS
 - audio_detokenizer.onnx: Neural vocoder for TTS
-- depthformer/: Autoregressive audio codebook prediction
-  - depth_linear.onnx: [B, 2048] → [B, 8, 1024] (called 1× per frame)
-  - depthformer_unified.onnx: Transformer+embed+logits (called 8× per frame)
+- vocoder_projection.onnx: [B, 2048] → [B, 8, 1024] (called 1× per frame)
+- vocoder_depthformer.onnx: Transformer+embed+logits (called 8× per frame)
 
 All components including depthformer use ONNX-only inference.
 
@@ -174,40 +173,44 @@ class LFM2AudioInference:
         logger.info(f"embed_tokens weight loaded: {self.embed_tokens_weight.shape}")
 
     def _load_onnx_depthformer(self):
-        """Load ONNX depthformer models for autoregressive inference.
+        """Load ONNX vocoder models for autoregressive inference.
 
-        Loads consolidated 2-model structure:
-        - depth_linear.onnx: [B, 2048] → [B, 8, 1024] (called 1× per frame)
-        - depthformer_unified.onnx: Transformer+embed+logits (called 8× per frame)
+        Loads 2-model structure:
+        - vocoder_projection.onnx: [B, 2048] → [B, 8, 1024] (called 1× per frame)
+        - vocoder_depthformer.onnx: Transformer+embed+logits (called 8× per frame)
         """
-        depthformer_dir = self.model_dir / "onnx" / "depthformer"
+        onnx_dir = self.model_dir / "onnx"
+        suffix = "" if self.precision == "fp32" else f"_{self.precision}"
 
-        if not depthformer_dir.exists():
-            logger.warning(f"ONNX depthformer not found at {depthformer_dir}")
+        projection_path = onnx_dir / f"vocoder_projection{suffix}.onnx"
+        depthformer_path = onnx_dir / f"vocoder_depthformer{suffix}.onnx"
+
+        # Fall back to fp32 if requested precision not available
+        if not projection_path.exists():
+            fp32_path = onnx_dir / "vocoder_projection.onnx"
+            if fp32_path.exists():
+                logger.info(f"{projection_path.name} not found, using {fp32_path.name}")
+                projection_path = fp32_path
+
+        if not depthformer_path.exists():
+            fp32_path = onnx_dir / "vocoder_depthformer.onnx"
+            if fp32_path.exists():
+                logger.info(f"{depthformer_path.name} not found, using {fp32_path.name}")
+                depthformer_path = fp32_path
+
+        if not projection_path.exists() or not depthformer_path.exists():
+            logger.warning("Vocoder ONNX models not found")
             logger.warning("TTS will not be available")
             return
 
         try:
-            logger.info(f"Loading ONNX depthformer from {depthformer_dir}...")
+            logger.info(f"Loading vocoder_projection from {projection_path.name}...")
+            logger.info(f"Loading vocoder_depthformer from {depthformer_path.name}...")
 
             self.onnx_depthformer = {}
-
-            depth_linear_path = depthformer_dir / "depth_linear.onnx"
-            unified_path = depthformer_dir / "depthformer_unified.onnx"
-
-            if not depth_linear_path.exists():
-                logger.warning("depth_linear.onnx not found")
-                self.onnx_depthformer = None
-                return
-
-            if not unified_path.exists():
-                logger.warning("depthformer_unified.onnx not found")
-                self.onnx_depthformer = None
-                return
-
-            self.onnx_depthformer["depth_linear"] = load_session(depth_linear_path)
-            self.onnx_depthformer["depthformer_unified"] = load_session(unified_path)
-            logger.info("ONNX depthformer ready for TTS")
+            self.onnx_depthformer["depth_linear"] = load_session(projection_path)
+            self.onnx_depthformer["depthformer_unified"] = load_session(depthformer_path)
+            logger.info("ONNX vocoder ready for TTS")
 
         except Exception as e:
             logger.warning(f"Failed to load ONNX depthformer: {e}")
