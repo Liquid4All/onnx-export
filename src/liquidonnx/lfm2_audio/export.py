@@ -1182,6 +1182,7 @@ class AudioDetokenizerBuilder:
             ],
         )
         self.num_layers = len(self.layer_types)
+        self.sliding_window = config.get("sliding_window", 30)
 
         # Graph components
         self.nodes: list = []
@@ -1292,16 +1293,9 @@ class AudioDetokenizerBuilder:
             keepdims=0,
         )
 
-        # Apply embedding norm (critical for correct output scaling)
+        # NOTE: embedding_norm is applied AFTER all layers in Lfm2Model, not here!
+        # See build_output_linear() for the final norm.
         emb_output = "/emb/summed/output_0"
-        if "lfm.embedding_norm.weight" in self.weights:
-            self.add_initializer(
-                "lfm.embedding_norm.weight",
-                self.weights["lfm.embedding_norm.weight"].astype(np.float32),
-            )
-            emb_output = self.build_layernorm(
-                "/emb/summed/output_0", "lfm.embedding_norm.weight", "/emb/norm"
-            )
 
         # === 6x Upsampling ===
         # Reference: liquid_audio/detokenizer.py LFM2AudioDetokenizer.forward()
@@ -1511,11 +1505,14 @@ class AudioDetokenizerBuilder:
         return self.build_mlp(layer_idx, hidden_state)
 
     def build_attention_layer(self, layer_idx: int, hidden_state: str) -> str:
-        """Build a sliding attention layer.
+        """Build a sliding attention layer with causal sliding window mask.
 
-        For the detokenizer, we use standard attention (no KV cache) with a causal mask.
-        sliding_attention typically uses a local window but here we just use full attention
-        since the sequences are short.
+        For the detokenizer, we use standard attention (no KV cache) with a causal
+        sliding window mask. Position i can attend to positions j where:
+        - j <= i (causal constraint)
+        - j > i - sliding_window (sliding window constraint)
+
+        This matches the PyTorch reference implementation in liquid_audio/detokenizer.py.
         """
         prefix = f"/lfm/layers.{layer_idx}"
         weight_prefix = f"lfm.layers.{layer_idx}"
@@ -1657,11 +1654,92 @@ class AudioDetokenizerBuilder:
             "Mul", [scores, "attn_scale"], [f"{prefix}/attn/scores_scaled/output_0"]
         )
 
-        # Causal mask: lower triangular (for audio this is typically bidirectional,
-        # but we'll use non-causal for now since audio tokens are all given)
-        # For now, just apply softmax without mask
+        # === Causal Sliding Window Mask ===
+        # PyTorch reference (liquid_audio/detokenizer.py):
+        #   idx = torch.arange(x.shape[1])
+        #   d_idx = idx - idx[:, None]
+        #   mask = (d_idx <= 0) & (d_idx > -sliding_window_size)
+        # Position i can attend to positions j where: j <= i AND j > i - sliding_window
+
+        # Get sequence length T from scores shape [B, nh, T, T]
+        self.make_node("Shape", [scores], [f"{prefix}/attn/scores_shape/output_0"])
+        seq_len = self.make_node(
+            "Gather",
+            [f"{prefix}/attn/scores_shape/output_0", self.get_constant(2)],
+            [f"{prefix}/attn/seq_len/output_0"],
+        )
+
+        # Create position indices: [0, 1, 2, ..., T-1]
+        self.add_initializer("range_start", np.array(0, dtype=np.int64))
+        self.add_initializer("range_step", np.array(1, dtype=np.int64))
+        indices = self.make_node(
+            "Range",
+            ["range_start", seq_len, "range_step"],
+            [f"{prefix}/attn/indices/output_0"],
+        )
+
+        # Create row indices [T, 1] and col indices [1, T]
+        row_idx = self.make_node(
+            "Unsqueeze",
+            [indices, self.get_constant([1])],
+            [f"{prefix}/attn/row_idx/output_0"],
+        )
+        col_idx = self.make_node(
+            "Unsqueeze",
+            [indices, self.get_constant([0])],
+            [f"{prefix}/attn/col_idx/output_0"],
+        )
+
+        # Distance matrix: d_idx = row_idx - col_idx [T, T]
+        d_idx = self.make_node("Sub", [row_idx, col_idx], [f"{prefix}/attn/d_idx/output_0"])
+
+        # Mask conditions:
+        # cond1: d_idx <= 0 (causal: can only attend to current and past)
+        # cond2: d_idx > -sliding_window (sliding window constraint)
+        cond1 = self.make_node(
+            "LessOrEqual",
+            [d_idx, self.get_constant(0)],
+            [f"{prefix}/attn/cond1/output_0"],
+        )
+
+        sw_neg = -self.sliding_window
+        cond2 = self.make_node(
+            "Greater",
+            [d_idx, self.get_constant(sw_neg)],
+            [f"{prefix}/attn/cond2/output_0"],
+        )
+
+        # Combined mask: cond1 AND cond2 -> valid positions
+        valid_mask = self.make_node("And", [cond1, cond2], [f"{prefix}/attn/valid_mask/output_0"])
+
+        # Convert bool mask to float: True -> 0.0, False -> -inf
+        # invalid_mask = NOT valid_mask
+        invalid_mask = self.make_node("Not", [valid_mask], [f"{prefix}/attn/invalid_mask/output_0"])
+        # Cast to float
+        invalid_mask_f = self.make_node(
+            "Cast",
+            [invalid_mask],
+            [f"{prefix}/attn/invalid_mask_f/output_0"],
+            to=TensorProto.FLOAT,
+        )
+        # Multiply by -inf (use large negative value for numerical stability)
+        self.add_initializer("neg_inf", np.array(-1e9, dtype=np.float32))
+        mask_bias = self.make_node(
+            "Mul",
+            [invalid_mask_f, "neg_inf"],
+            [f"{prefix}/attn/mask_bias/output_0"],
+        )
+
+        # Add mask bias to scores: [B, nh, T, T] + [T, T] (broadcast)
+        scores_masked = self.make_node(
+            "Add",
+            [scores_scaled, mask_bias],
+            [f"{prefix}/attn/scores_masked/output_0"],
+        )
+
+        # Softmax on masked scores
         attn_weights = self.make_node(
-            "Softmax", [scores_scaled], [f"{prefix}/attn/softmax/output_0"], axis=-1
+            "Softmax", [scores_masked], [f"{prefix}/attn/softmax/output_0"], axis=-1
         )
 
         # Attention output: [B, nh, T, hd]
@@ -1695,13 +1773,15 @@ class AudioDetokenizerBuilder:
 
     def build_output_linear(self, hidden_state: str) -> str:
         """Build final linear projection to STFT space."""
-        # Final layer norm (optional, some models have it)
-        if "lfm.norm.weight" in self.weights:
+        # Final embedding norm (applied after all layers in Lfm2Model)
+        if "lfm.embedding_norm.weight" in self.weights:
             self.add_initializer(
-                "lfm.norm.weight",
-                self.weights["lfm.norm.weight"].astype(np.float32),
+                "lfm.embedding_norm.weight",
+                self.weights["lfm.embedding_norm.weight"].astype(np.float32),
             )
-            hidden_state = self.build_layernorm(hidden_state, "lfm.norm.weight", "/lfm/final_norm")
+            hidden_state = self.build_layernorm(
+                hidden_state, "lfm.embedding_norm.weight", "/lfm/final_norm"
+            )
 
         # Linear projection: [B, T, H] -> [B, T, output_size]
         lin_w = self.weights["lin.weight"].astype(np.float32).T
@@ -1734,14 +1814,13 @@ class AudioDetokenizerBuilder:
         hidden_state = self.build_embedding()
 
         # Build LFM layers
+        # NOTE: The PyTorch Lfm2Model used by liquid_audio creates conv modules for ALL
+        # layers, ignoring layer_types. The self_attn weights in the checkpoint are NOT
+        # used. So we use conv for all layers to match PyTorch behavior.
         for layer_idx in range(self.num_layers):
             layer_type = self.layer_types[layer_idx]
-            logger.info(f"Building detokenizer layer {layer_idx} ({layer_type})...")
-
-            if layer_type == "conv":
-                hidden_state = self.build_conv_layer(layer_idx, hidden_state)
-            else:  # sliding_attention
-                hidden_state = self.build_attention_layer(layer_idx, hidden_state)
+            logger.info(f"Building detokenizer layer {layer_idx} ({layer_type} -> conv)...")
+            hidden_state = self.build_conv_layer(layer_idx, hidden_state)
 
         # Build output linear
         self.build_output_linear(hidden_state)
@@ -1769,40 +1848,54 @@ def export_audio_detokenizer_builder(model_path: str, onnx_dir: pathlib.Path) ->
     4. ISTFT: [B, T, 1282] -> waveform (done in numpy/scipy)
 
     This exports steps 1-3 to ONNX. Step 4 is done in numpy.
+
+    NOTE: The checkpoint has self_attn.* weights for layers 2, 4, 6 but PyTorch Lfm2Model
+    creates conv modules for ALL layers (since layer_types has "sliding_attention" not
+    "full_attention"). The self_attn.* weights are NOT used - those layers have random
+    weights. We load the PyTorch model to get the actual weights (including random ones).
     """
     logger.info("Exporting audio_detokenizer.onnx (full LFM builder version)...")
 
-    from huggingface_hub import snapshot_download
-    from safetensors import safe_open
+    import json as json_module
 
-    # Download audio_detokenizer from HuggingFace
-    cache_path = pathlib.Path(
-        snapshot_download(
-            model_path,
-            allow_patterns=["audio_detokenizer/*"],
-        )
-    )
-    detok_path = cache_path / "audio_detokenizer"
+    from accelerate import load_checkpoint_in_model
+    from liquid_audio import LFM2AudioDetokenizer
+    from liquid_audio.utils import get_model_dir
+    from transformers import Lfm2Config
 
-    if not detok_path.exists():
+    # Load the PyTorch model to get actual weights (including random for layers 2,4,6)
+    cache_dir = get_model_dir(model_path)
+    config_path = cache_dir / "audio_detokenizer" / "config.json"
+
+    if not config_path.exists():
         logger.warning("Audio detokenizer not found in model, skipping export")
         return None
 
-    # Load config
-    import json as json_module
-
-    with open(detok_path / "config.json") as f:
+    with open(config_path) as f:
         detok_config = json_module.load(f)
 
     logger.info(f"Audio detokenizer config: {detok_config}")
 
-    # Load weights
-    detok_weights = {}
-    with safe_open(str(detok_path / "model.safetensors"), framework="np", device="cpu") as f:
-        for key in f.keys():
-            detok_weights[key] = f.get_tensor(key)
+    # Create PyTorch model and load checkpoint
+    # This will have random weights for layers 2, 4, 6's conv modules
+    # Use fixed seed for reproducibility - the random weights don't significantly
+    # affect output (they produce near-zero contribution) but we want deterministic exports
+    import torch
 
-    logger.info(f"Loaded {len(detok_weights)} audio detokenizer weights")
+    torch.manual_seed(42)
+    backbone_config = Lfm2Config(**detok_config)
+    pytorch_model = LFM2AudioDetokenizer(backbone_config)
+
+    weights_path = cache_dir / "audio_detokenizer" / "model.safetensors"
+    load_checkpoint_in_model(pytorch_model, str(weights_path))
+    pytorch_model.eval()
+
+    # Extract all weights from PyTorch model (including random ones)
+    detok_weights = {}
+    for name, param in pytorch_model.state_dict().items():
+        detok_weights[name] = param.detach().cpu().numpy()
+
+    logger.info(f"Loaded {len(detok_weights)} audio detokenizer weights from PyTorch model")
 
     # Build the model using AudioDetokenizerBuilder
     builder = AudioDetokenizerBuilder(detok_config, detok_weights)
