@@ -25,8 +25,11 @@ Usage:
     # TTS: Generate audio from text
     uv run lfm2-audio-infer /path/to/model --mode tts --prompt "Hello world" --output output.wav
 
-    # Interleaved: Mixed text and audio
+    # Interleaved with text prompt
     uv run lfm2-audio-infer /path/to/model --mode interleaved --prompt "Respond with audio"
+
+    # Interleaved with audio input (recommended)
+    uv run lfm2-audio-infer /path/to/model --mode interleaved --audio input.wav --output output.wav
 """
 
 import argparse
@@ -40,27 +43,37 @@ import onnxruntime as ort
 logger = logging.getLogger(__name__)
 
 
-def get_onnx_files(model_dir: pathlib.Path, precision: str) -> dict[str, pathlib.Path]:
-    """Get paths to ONNX model files for given precision."""
-    onnx_dir = model_dir / "onnx"
-    suffix = "" if precision == "fp32" else f"_{precision}"
+def resolve_precision_files(precision: str | None) -> dict[str, str | None]:
+    """Resolve file names from precision shorthand.
 
-    files = {
-        "audio_embedding": onnx_dir / f"audio_embedding{suffix}.onnx",
-        "decoder": onnx_dir / f"decoder{suffix}.onnx",
-        "audio_encoder": onnx_dir / f"audio_encoder{suffix}.onnx",
-        "audio_detokenizer": onnx_dir / f"audio_detokenizer{suffix}.onnx",
+    Args:
+        precision: One of "fp16", "q4", "q8", or None for default (fp32)
+
+    Returns:
+        Dict mapping component name to filename (or None for default)
+    """
+    if precision is None:
+        return {
+            "decoder": None,
+            "audio_embedding": None,
+            "audio_encoder": None,
+            "audio_detokenizer": None,
+            "vocoder_projection": None,
+            "vocoder_depthformer": None,
+        }
+
+    precision = precision.lower()
+    if precision not in ("fp16", "q4", "q8"):
+        raise ValueError(f"Invalid precision: {precision}. Use fp16, q4, or q8.")
+
+    return {
+        "decoder": f"decoder_{precision}.onnx",
+        "audio_embedding": f"audio_embedding_{precision}.onnx",
+        "audio_encoder": f"audio_encoder_{precision}.onnx",
+        "audio_detokenizer": f"audio_detokenizer_{precision}.onnx",
+        "vocoder_projection": f"vocoder_projection_{precision}.onnx",
+        "vocoder_depthformer": f"vocoder_depthformer_{precision}.onnx",
     }
-
-    # Fall back to fp32 if requested precision not available
-    for name, path in files.items():
-        if not path.exists():
-            fp32_path = onnx_dir / f"{name}.onnx"
-            if fp32_path.exists():
-                logger.info(f"{path.name} not found, using {fp32_path.name}")
-                files[name] = fp32_path
-
-    return files
 
 
 def load_session(model_path: pathlib.Path) -> ort.InferenceSession:
@@ -84,37 +97,49 @@ class LFM2AudioInference:
     def __init__(
         self,
         model_dir: pathlib.Path,
-        precision: str = "fp32",
+        decoder_file: str | None = None,
+        audio_embedding_file: str | None = None,
+        audio_encoder_file: str | None = None,
+        audio_detokenizer_file: str | None = None,
+        vocoder_projection_file: str | None = None,
+        vocoder_depthformer_file: str | None = None,
     ):
         self.model_dir = model_dir
-        self.precision = precision
+        self.onnx_dir = model_dir / "onnx"
+
+        # Store file names for vocoder loading
+        self._vocoder_projection_file = vocoder_projection_file
+        self._vocoder_depthformer_file = vocoder_depthformer_file
 
         # Load tokenizer
         from transformers import AutoTokenizer
 
         self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
 
-        # Load ONNX sessions
-        files = get_onnx_files(model_dir, precision)
+        # Resolve file paths (use provided or default)
+        decoder_path = self.onnx_dir / (decoder_file or "decoder.onnx")
+        audio_embedding_path = self.onnx_dir / (audio_embedding_file or "audio_embedding.onnx")
+        audio_encoder_path = self.onnx_dir / (audio_encoder_file or "audio_encoder.onnx")
+        audio_detokenizer_path = self.onnx_dir / (audio_detokenizer_file or "audio_detokenizer.onnx")
 
-        logger.info(f"Loading decoder from {files['decoder'].name}...")
-        self.decoder_session = load_session(files["decoder"])
+        logger.info(f"Loading decoder from {decoder_path.name}...")
+        self.decoder_session = load_session(decoder_path)
 
-        logger.info(f"Loading audio_embedding from {files['audio_embedding'].name}...")
-        self.audio_embed_session = load_session(files["audio_embedding"])
+        logger.info(f"Loading audio_embedding from {audio_embedding_path.name}...")
+        self.audio_embed_session = load_session(audio_embedding_path)
 
-        if files["audio_encoder"].exists():
-            logger.info(f"Loading audio_encoder from {files['audio_encoder'].name}...")
-            self.audio_encoder_session = load_session(files["audio_encoder"])
+        if audio_encoder_path.exists():
+            logger.info(f"Loading audio_encoder from {audio_encoder_path.name}...")
+            self.audio_encoder_session = load_session(audio_encoder_path)
         else:
-            logger.warning("audio_encoder not found, ASR mode unavailable")
+            logger.warning(f"{audio_encoder_path.name} not found, ASR mode unavailable")
             self.audio_encoder_session = None
 
-        if files["audio_detokenizer"].exists():
-            logger.info(f"Loading audio_detokenizer from {files['audio_detokenizer'].name}...")
-            self.audio_detokenizer_session = load_session(files["audio_detokenizer"])
+        if audio_detokenizer_path.exists():
+            logger.info(f"Loading audio_detokenizer from {audio_detokenizer_path.name}...")
+            self.audio_detokenizer_session = load_session(audio_detokenizer_path)
         else:
-            logger.warning("audio_detokenizer not found, TTS output unavailable")
+            logger.warning(f"{audio_detokenizer_path.name} not found, TTS output unavailable")
             self.audio_detokenizer_session = None
 
         # Load ONNX depthformer for autoregressive inference
@@ -193,28 +218,15 @@ class LFM2AudioInference:
         - vocoder_projection.onnx: [B, 2048] → [B, 8, 1024] (called 1× per frame)
         - vocoder_depthformer.onnx: Transformer+embed+logits (called 8× per frame)
         """
-        onnx_dir = self.model_dir / "onnx"
-        suffix = "" if self.precision == "fp32" else f"_{self.precision}"
-
-        projection_path = onnx_dir / f"vocoder_projection{suffix}.onnx"
-        depthformer_path = onnx_dir / f"vocoder_depthformer{suffix}.onnx"
-
-        # Fall back to fp32 if requested precision not available
-        if not projection_path.exists():
-            fp32_path = onnx_dir / "vocoder_projection.onnx"
-            if fp32_path.exists():
-                logger.info(f"{projection_path.name} not found, using {fp32_path.name}")
-                projection_path = fp32_path
-
-        if not depthformer_path.exists():
-            fp32_path = onnx_dir / "vocoder_depthformer.onnx"
-            if fp32_path.exists():
-                logger.info(f"{depthformer_path.name} not found, using {fp32_path.name}")
-                depthformer_path = fp32_path
+        projection_path = self.onnx_dir / (
+            self._vocoder_projection_file or "vocoder_projection.onnx"
+        )
+        depthformer_path = self.onnx_dir / (
+            self._vocoder_depthformer_file or "vocoder_depthformer.onnx"
+        )
 
         if not projection_path.exists() or not depthformer_path.exists():
-            logger.warning("Vocoder ONNX models not found")
-            logger.warning("TTS will not be available")
+            logger.warning("Vocoder ONNX models not found, TTS will not be available")
             return
 
         try:
@@ -262,19 +274,33 @@ class LFM2AudioInference:
                 cache[key] = outputs[f"present.{idx}.{kv_type}"]
         return cache
 
-    def _sample(self, logits: np.ndarray, temperature: float, top_p: float | None = None) -> int:
-        """Sample next token using temperature and optional top-p sampling.
+    def _sample(
+        self,
+        logits: np.ndarray,
+        temperature: float,
+        top_p: float | None = None,
+        top_k: int | None = None,
+    ) -> int:
+        """Sample next token using temperature and optional top-p/top-k sampling.
 
         Args:
             logits: Raw logits from model
             temperature: Sampling temperature (0 = greedy)
-            top_p: Optional nucleus sampling threshold. If None, uses pure
-                   temperature sampling (matching liquid-audio behavior).
+            top_p: Optional nucleus sampling threshold
+            top_k: Optional top-k sampling (matches liquid-audio audio_top_k=4)
         """
         if temperature == 0:
             return int(np.argmax(logits))
 
         logits = logits / temperature
+
+        # Apply top-k filtering before softmax (matches liquid-audio)
+        if top_k is not None and top_k > 0:
+            top_k_indices = np.argpartition(logits, -top_k)[-top_k:]
+            mask = np.full(logits.shape, -np.inf)
+            mask[top_k_indices] = logits[top_k_indices]
+            logits = mask
+
         exp_logits = np.exp(logits - np.max(logits))
         probs = exp_logits / exp_logits.sum()
 
@@ -327,7 +353,10 @@ class LFM2AudioInference:
     END_OF_AUDIO_TOKEN = 2048
 
     def _sample_audio_codes(
-        self, hidden_states: np.ndarray, temperature: float = 0.9
+        self,
+        hidden_states: np.ndarray,
+        temperature: float = 0.9,
+        top_k: int | None = None,
     ) -> np.ndarray:
         """Sample audio codes using ONNX autoregressive depthformer.
 
@@ -342,6 +371,7 @@ class LFM2AudioInference:
         Args:
             hidden_states: [batch, hidden_size] or [batch, 1, hidden_size]
             temperature: Sampling temperature
+            top_k: Optional top-k sampling (e.g., 4 for liquid-audio interleaved)
 
         Returns:
             codes: [batch, 8] audio codes for each codebook
@@ -396,12 +426,12 @@ class LFM2AudioInference:
                 past_values = new_values
 
                 # Sample from logits including end-of-audio token (2048)
-                # Use pure temperature sampling (no top-p) to match liquid-audio
+                # Use temperature + optional top_k sampling to match liquid-audio
                 all_logits = logits[0]
                 if temperature is None or temperature <= 0:
                     token = int(np.argmax(all_logits))
                 else:
-                    token = self._sample(all_logits, temperature, top_p=None)
+                    token = self._sample(all_logits, temperature, top_p=None, top_k=top_k)
 
                 out_tokens.append(token)
                 # Pass token directly to embedding lookup (table has 2049 entries: 0-2048)
@@ -574,8 +604,8 @@ class LFM2AudioInference:
 
         # Encode audio
         audio_embeds, _ = self.audio_encoder_session.run(
-            ["audio_embeddings", "output_lengths"],
-            {"mel_features": mel_features.astype(np.float32), "mel_lengths": mel_lengths},
+            ["audio_embeddings", "audio_lengths"],
+            {"mel_spectrogram": mel_features.astype(np.float32), "mel_lengths": mel_lengths},
         )
 
         # Build the prompt: prefix + audio + suffix
@@ -803,11 +833,14 @@ class LFM2AudioInference:
     def generate_interleaved(
         self,
         prompt: str,
-        max_new_tokens: int = 200,
-        audio_temperature: float = 0.9,
-        text_temperature: float = 0.7,
+        max_new_tokens: int = 20,
+        audio_temperature: float = 0,
+        text_temperature: float = 0,
     ) -> tuple[str, list[np.ndarray]]:
-        """Generate interleaved text and audio using depthformer for audio."""
+        """Generate interleaved text and audio from text prompt.
+
+        Defaults match liquid-audio library defaults (greedy decoding).
+        """
         # Note: add_special_tokens=False since we include <|startoftext|> in the prompt
         formatted_prompt = self._format_interleaved_prompt(prompt)
         input_ids = self.tokenizer.encode(
@@ -926,13 +959,170 @@ class LFM2AudioInference:
 
         return text_output, audio_codes
 
+    def generate_interleaved_from_audio(
+        self,
+        audio_path: str,
+        max_new_tokens: int = 300,
+        text_temperature: float = 1.0,
+        audio_temperature: float = 1.0,
+        audio_top_k: int = 4,
+    ) -> tuple[str, list[np.ndarray]]:
+        """Generate interleaved text+audio response from audio input.
+
+        Defaults match official liquid-audio demo (not library defaults).
+        Uses counter-based mode switching:
+        - interleaved_n_text = 6 (text tokens before switching to audio)
+        - interleaved_n_audio = 12 (audio frames before switching to text)
+
+        Args:
+            audio_path: Path to input audio file
+            max_new_tokens: Maximum tokens to generate
+            text_temperature: Sampling temperature for text (1.0 matches liquid-audio)
+            audio_temperature: Sampling temperature for audio (1.0 matches liquid-audio)
+            audio_top_k: Top-k sampling for audio (4 matches liquid-audio)
+
+        Returns:
+            Tuple of (text_response, audio_codes)
+        """
+        # Encode audio
+        mel_features, mel_lengths = self._compute_mel_features(audio_path)
+        audio_embeds, _ = self.audio_encoder_session.run(
+            ["audio_embeddings", "audio_lengths"],
+            {"mel_spectrogram": mel_features.astype(np.float32), "mel_lengths": mel_lengths},
+        )
+
+        # Build prompt: system + user audio + assistant
+        # System prompt matches official liquid-audio demo
+        prefix_text = (
+            "<|startoftext|><|im_start|>system\n"
+            "Respond with interleaved text and audio.<|im_end|>\n"
+            "<|im_start|>user\n"
+        )
+        suffix_text = "<|im_end|>\n<|im_start|>assistant\n"
+
+        prefix_ids = self.tokenizer.encode(
+            prefix_text, return_tensors="np", add_special_tokens=False
+        )
+        suffix_ids = self.tokenizer.encode(
+            suffix_text, return_tensors="np", add_special_tokens=False
+        )
+
+        prefix_embeds = self._get_text_embeds(prefix_ids)
+        suffix_embeds = self._get_text_embeds(suffix_ids)
+
+        # Concatenate: prefix + audio + suffix
+        all_embeds = np.concatenate([prefix_embeds, audio_embeds, suffix_embeds], axis=1)
+
+        batch_size = 1
+        seq_len = all_embeds.shape[1]
+        cache = self._init_cache(batch_size)
+
+        attention_mask = np.ones((batch_size, seq_len), dtype=np.int64)
+        logits, hidden_states, cache = self._run_decoder(all_embeds, attention_mask, cache)
+
+        # Generate with counter-based mode switching (matching liquid-audio)
+        INTERLEAVED_N_TEXT = 6
+        INTERLEAVED_N_AUDIO = 12
+
+        text_tokens = []
+        audio_codes = []
+        total_len = seq_len
+        in_audio_mode = False
+        modality_left = INTERLEAVED_N_TEXT
+        text_done = False
+
+        for step in range(max_new_tokens):
+            modality_left -= 1
+
+            if in_audio_mode:
+                if self.onnx_depthformer is None or hidden_states is None:
+                    logger.warning("Depthformer unavailable, exiting audio mode")
+                    in_audio_mode = False
+                    modality_left = INTERLEAVED_N_TEXT
+                    continue
+
+                last_hidden = hidden_states[0, -1:, :]
+                frame_codes = self._sample_audio_codes(
+                    last_hidden, temperature=audio_temperature, top_k=audio_top_k
+                )
+                frame = frame_codes[0]
+
+                # Switch back to text after N audio frames (if text not done)
+                if modality_left <= 0 and not text_done:
+                    in_audio_mode = False
+                    modality_left = INTERLEAVED_N_TEXT
+
+                # Check for end of audio - ANY codebook with 2048 (matching liquid-audio)
+                if (frame == 2048).any():
+                    logger.info(f"Skipping frame with 2048 at step {step}")
+                    # After text_done, 2048 means END of generation
+                    if text_done:
+                        logger.info(f"End of audio after text_done at step {step}")
+                        break
+                    in_audio_mode = False
+                    modality_left = INTERLEAVED_N_TEXT
+                    continue
+
+                # Clamp and save
+                clamped_frame = np.minimum(frame, 2047)
+                audio_codes.append(clamped_frame.copy())
+
+                # Get embeddings for next step
+                clamped_codes = np.minimum(frame, 2047)
+                audio_tokens = np.array(
+                    [
+                        [
+                            cb_idx * self.codebook_vocab + int(clamped_codes[cb_idx])
+                            for cb_idx in range(self.num_codebooks)
+                        ]
+                    ],
+                    dtype=np.int64,
+                )
+                audio_embed = self._get_audio_embeds(audio_tokens)
+                next_embeds = audio_embed.sum(axis=1, keepdims=True)
+
+                if len(audio_codes) % 20 == 0:
+                    logger.info(f"Generated {len(audio_codes)} audio frames...")
+            else:
+                # Generate text token
+                last_logits = logits[0, -1, :]
+                text_logits = last_logits[: self.vocab_size]
+                token = self._sample(text_logits, text_temperature, top_p=None)
+
+                if token == self.tokenizer.eos_token_id or token == 7:  # EOS or <|im_end|>
+                    logger.info(f"End of turn at step {step}")
+                    break
+
+                if token == 130:  # <|text_end|>
+                    logger.info(f"Text end at step {step}")
+                    text_done = True
+
+                # Switch to audio after N text tokens OR text_end
+                if modality_left <= 0 or text_done:
+                    in_audio_mode = True
+                    modality_left = INTERLEAVED_N_AUDIO
+
+                text_tokens.append(token)
+                next_ids = np.array([[token]], dtype=np.int64)
+                next_embeds = self._get_text_embeds(next_ids)
+
+            # Update decoder
+            attention_mask = np.ones((batch_size, total_len + 1), dtype=np.int64)
+            logits, hidden_states, cache = self._run_decoder(next_embeds, attention_mask, cache)
+            total_len += 1
+
+        text_output = self.tokenizer.decode(text_tokens, skip_special_tokens=True)
+        logger.info(f"Generated {len(text_tokens)} text tokens, {len(audio_codes)} audio frames")
+
+        return text_output, audio_codes
+
 
 def audio_codes_to_wav(
     audio_codes: list[np.ndarray],
     output_path: str,
     model_dir: pathlib.Path | None = None,
     sample_rate: int = 24000,
-    precision: str = "fp32",
+    audio_detokenizer_file: str | None = None,
 ):
     """Convert audio codes to WAV file using ONNX-only decoding.
 
@@ -952,15 +1142,10 @@ def audio_codes_to_wav(
         return False
 
     onnx_dir = model_dir / "onnx"
-    suffix = "" if precision == "fp32" else f"_{precision}"
-
-    # Find detokenizer model
-    detok_path = onnx_dir / f"audio_detokenizer{suffix}.onnx"
-    if not detok_path.exists():
-        detok_path = onnx_dir / "audio_detokenizer.onnx"
+    detok_path = onnx_dir / (audio_detokenizer_file or "audio_detokenizer.onnx")
 
     if not detok_path.exists():
-        logger.error(f"audio_detokenizer.onnx not found in {onnx_dir}")
+        logger.error(f"{detok_path.name} not found in {onnx_dir}")
         return False
 
     try:
@@ -1337,7 +1522,7 @@ def main():
     parser.add_argument(
         "--audio",
         type=str,
-        help="Input audio file for ASR mode",
+        help="Input audio file for ASR/interleaved modes",
     )
     parser.add_argument(
         "--output",
@@ -1346,15 +1531,44 @@ def main():
     )
     parser.add_argument(
         "--precision",
-        choices=["fp32", "fp16", "q4", "q8"],
-        default="fp32",
-        help="Model precision to use",
+        choices=["fp16", "q4", "q8"],
+        help="Model precision shorthand (default: fp32)",
+    )
+    parser.add_argument(
+        "--decoder",
+        metavar="FILE",
+        help="Decoder ONNX file (relative to onnx/ dir)",
+    )
+    parser.add_argument(
+        "--audio-embedding",
+        metavar="FILE",
+        help="Audio embedding ONNX file (relative to onnx/ dir)",
+    )
+    parser.add_argument(
+        "--audio-encoder",
+        metavar="FILE",
+        help="Audio encoder ONNX file (relative to onnx/ dir)",
+    )
+    parser.add_argument(
+        "--audio-detokenizer",
+        metavar="FILE",
+        help="Audio detokenizer ONNX file (relative to onnx/ dir)",
+    )
+    parser.add_argument(
+        "--vocoder-projection",
+        metavar="FILE",
+        help="Vocoder projection ONNX file (relative to onnx/ dir)",
+    )
+    parser.add_argument(
+        "--vocoder-depthformer",
+        metavar="FILE",
+        help="Vocoder depthformer ONNX file (relative to onnx/ dir)",
     )
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=100,
-        help="Maximum tokens/frames to generate",
+        default=None,
+        help="Maximum tokens/frames to generate (default: 100 for text/asr/tts, 300 for interleaved)",
     )
     parser.add_argument(
         "--temperature",
@@ -1376,17 +1590,55 @@ def main():
         # ASR uses greedy decoding by default
         if args.temperature is None:
             args.temperature = 0
+    elif args.mode == "interleaved":
+        # Interleaved uses 1.0 temperature (matching liquid-audio demo)
+        if args.temperature is None:
+            args.temperature = 1.0
+        if args.audio_temperature is None:
+            args.audio_temperature = 1.0
     else:
-        # TTS, text, interleaved use temperature sampling
+        # TTS, text use temperature sampling
         if args.temperature is None:
             args.temperature = 0.7
         if args.audio_temperature is None:
             args.audio_temperature = 0.7
 
+    # Apply mode-specific max_tokens defaults
+    if args.max_tokens is None:
+        if args.mode == "interleaved":
+            args.max_tokens = 300
+        else:
+            args.max_tokens = 100
+
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
+    # Resolve component files from --precision
+    files = resolve_precision_files(args.precision)
+
+    # Explicit file args override --precision
+    if args.decoder:
+        files["decoder"] = args.decoder
+    if args.audio_embedding:
+        files["audio_embedding"] = args.audio_embedding
+    if args.audio_encoder:
+        files["audio_encoder"] = args.audio_encoder
+    if args.audio_detokenizer:
+        files["audio_detokenizer"] = args.audio_detokenizer
+    if args.vocoder_projection:
+        files["vocoder_projection"] = args.vocoder_projection
+    if args.vocoder_depthformer:
+        files["vocoder_depthformer"] = args.vocoder_depthformer
+
     logger.info(f"Loading model from {args.model_dir}...")
-    model = LFM2AudioInference(args.model_dir, precision=args.precision)
+    model = LFM2AudioInference(
+        args.model_dir,
+        decoder_file=files["decoder"],
+        audio_embedding_file=files["audio_embedding"],
+        audio_encoder_file=files["audio_encoder"],
+        audio_detokenizer_file=files["audio_detokenizer"],
+        vocoder_projection_file=files["vocoder_projection"],
+        vocoder_depthformer_file=files["vocoder_depthformer"],
+    )
 
     if args.mode == "text":
         logger.info("Mode: Text Generation")
@@ -1431,28 +1683,42 @@ def main():
 
         if args.output and audio_codes:
             if audio_codes_to_wav(
-                audio_codes, args.output, model_dir=args.model_dir, precision=args.precision
+                audio_codes, args.output, model_dir=args.model_dir, audio_detokenizer_file=files["audio_detokenizer"]
             ):
                 print(f"Output: {args.output}")
         print("=" * 60)
 
     elif args.mode == "interleaved":
         logger.info("Mode: Interleaved")
-        logger.info(f"Prompt: {args.prompt}")
-        text_output, audio_codes = model.generate_interleaved(
-            args.prompt,
-            max_new_tokens=args.max_tokens,
-            audio_temperature=args.audio_temperature,
-            text_temperature=args.temperature,
-        )
-        print("\n" + "=" * 60)
-        print(f"Input:  {args.prompt}")
+        if args.audio:
+            # Audio input mode (matching liquid-audio demo)
+            logger.info(f"Audio: {args.audio}")
+            text_output, audio_codes = model.generate_interleaved_from_audio(
+                args.audio,
+                max_new_tokens=args.max_tokens,
+                text_temperature=args.temperature,
+                audio_temperature=args.audio_temperature,
+            )
+            print("\n" + "=" * 60)
+            print(f"Audio input: {args.audio}")
+        else:
+            # Text prompt mode
+            logger.info(f"Prompt: {args.prompt}")
+            text_output, audio_codes = model.generate_interleaved(
+                args.prompt,
+                max_new_tokens=args.max_tokens,
+                audio_temperature=args.audio_temperature,
+                text_temperature=args.temperature,
+            )
+            print("\n" + "=" * 60)
+            print(f"Input:  {args.prompt}")
+
         print(f"Text:   {text_output}")
         print(f"Audio:  {len(audio_codes)} frames")
 
         if args.output and audio_codes:
             if audio_codes_to_wav(
-                audio_codes, args.output, model_dir=args.model_dir, precision=args.precision
+                audio_codes, args.output, model_dir=args.model_dir, audio_detokenizer_file=files["audio_detokenizer"]
             ):
                 print(f"Output: {args.output}")
         print("=" * 60)
