@@ -606,7 +606,7 @@ class LFM2AudioInference:
 
         # Generate text tokens
         next_logits = logits[0, -1, : self.vocab_size]
-        next_token = self._sample(next_logits, temperature, top_p=0.9)
+        next_token = self._sample(next_logits, temperature, top_p=None)
 
         generated_tokens = [next_token]
         total_len = seq_len + 1
@@ -625,7 +625,7 @@ class LFM2AudioInference:
             logits, _, cache = self._run_decoder(next_embeds, attention_mask, cache)
 
             next_logits = logits[0, -1, : self.vocab_size]
-            next_token = self._sample(next_logits, temperature, top_p=0.9)
+            next_token = self._sample(next_logits, temperature, top_p=None)
 
             generated_tokens.append(next_token)
             total_len += 1
@@ -647,7 +647,7 @@ class LFM2AudioInference:
         self,
         text: str,
         max_new_tokens: int = 100,
-        audio_temperature: float = 0.9,
+        audio_temperature: float = 0.7,
         text_temperature: float = 0.7,
     ) -> list[np.ndarray]:
         """Synthesize audio from text using depthformer.
@@ -689,7 +689,7 @@ class LFM2AudioInference:
         in_audio_mode = False
         while tokens_generated < max_new_tokens:
             last_logits = logits[0, -1, : self.vocab_size]
-            next_token = self._sample(last_logits, text_temperature, top_p=0.9)
+            next_token = self._sample(last_logits, text_temperature, top_p=None)
 
             if next_token == self.tokenizer.eos_token_id:
                 logger.warning("Model produced EOS before audio, TTS may not work")
@@ -876,7 +876,7 @@ class LFM2AudioInference:
             else:
                 # Sample from text vocabulary
                 text_logits = last_logits[: self.vocab_size]
-                token = self._sample(text_logits, text_temperature, top_p=0.9)
+                token = self._sample(text_logits, text_temperature, top_p=None)
 
                 if token == self.tokenizer.eos_token_id:
                     break
@@ -1346,7 +1346,7 @@ def main():
     parser.add_argument(
         "--audio-temperature",
         type=float,
-        default=0.9,
+        default=0.7,
         help="Audio sampling temperature",
     )
 
