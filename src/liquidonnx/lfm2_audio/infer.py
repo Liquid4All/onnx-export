@@ -147,16 +147,31 @@ class LFM2AudioInference:
         self.codebook_vocab = 2049
 
     def _load_embed_tokens_weight(self):
-        """Load embed_tokens weight from model weights for text embedding lookup."""
+        """Load embed_tokens weight from model weights for text embedding lookup.
+
+        Tries to load from (in order):
+        1. Pre-exported numpy file (onnx/embed_tokens.npy) - no PyTorch needed
+        2. Local model.safetensors - requires PyTorch
+        3. HuggingFace download - requires PyTorch
+        """
+        # Option 1: Pre-exported numpy file (no PyTorch dependency)
+        numpy_path = self.model_dir / "onnx" / "embed_tokens.npy"
+        if numpy_path.exists():
+            logger.info(f"Loading embed_tokens from {numpy_path.name}...")
+            self.embed_tokens_weight = np.load(numpy_path)
+            logger.info(f"embed_tokens weight loaded: {self.embed_tokens_weight.shape}")
+            return
+
+        # Option 2/3: Load from safetensors (requires PyTorch for bfloat16)
+        logger.info("embed_tokens.npy not found, falling back to safetensors (requires PyTorch)...")
+
         from huggingface_hub import hf_hub_download
         from safetensors.torch import load_file
 
-        # Try to load from local safetensors first
         local_weights = self.model_dir / "model.safetensors"
         if local_weights.exists():
             weights_path = str(local_weights)
         else:
-            # Download from HuggingFace
             try:
                 weights_path = hf_hub_download("LiquidAI/LFM2.5-Audio-1.5B", "model.safetensors")
             except Exception as e:
@@ -165,7 +180,6 @@ class LFM2AudioInference:
                 return
 
         logger.info("Loading embed_tokens weight for text embedding...")
-        # Use torch to load (handles bfloat16) then convert to float32 numpy
         weights = load_file(weights_path)
         embed_tensor = weights["lfm.embed_tokens.weight"].float()
         self.embed_tokens_weight = embed_tensor.numpy()
@@ -900,13 +914,10 @@ def audio_codes_to_wav(
     model_dir: pathlib.Path | None = None,
     sample_rate: int = 24000,
     precision: str = "fp32",
-    use_onnx: bool = False,
 ):
-    """Convert audio codes to WAV file.
+    """Convert audio codes to WAV file using ONNX-only decoding.
 
-    By default uses PyTorch decoding which produces correct audio.
-    Set use_onnx=True to use ONNX (may have quality issues due to
-    sliding_attention vs full_attention architecture mismatch).
+    Uses ONNX audio_detokenizer + numpy ISTFT. No PyTorch required.
     """
     if len(audio_codes) < 2:
         logger.warning("Not enough audio codes to generate audio")
@@ -917,39 +928,29 @@ def audio_codes_to_wav(
     codes = np.clip(codes, 0, 2047)
     codes_transposed = codes.T  # [8, T]
 
-    # Try PyTorch first (preferred - produces correct audio)
-    if not use_onnx:
-        result = _decode_audio_pytorch(codes, output_path, sample_rate)
-        if result:
-            return True
-        logger.warning("PyTorch decode failed, trying ONNX fallback")
+    if model_dir is None:
+        logger.error("model_dir required for ONNX decoding")
+        return False
 
-    # Try ONNX-based decoding
-    if model_dir is not None:
-        onnx_dir = model_dir / "onnx"
-        suffix = "" if precision == "fp32" else f"_{precision}"
+    onnx_dir = model_dir / "onnx"
+    suffix = "" if precision == "fp32" else f"_{precision}"
 
-        # Prefer PyTorch-exported model (audio_detokenizer_lfm.onnx)
-        detok_path = onnx_dir / f"audio_detokenizer_lfm{suffix}.onnx"
-        if not detok_path.exists():
-            detok_path = onnx_dir / "audio_detokenizer_lfm.onnx"
-        # Fall back to builder-based model if PyTorch export not available
-        if not detok_path.exists():
-            detok_path = onnx_dir / f"audio_detokenizer{suffix}.onnx"
-        if not detok_path.exists():
-            detok_path = onnx_dir / "audio_detokenizer.onnx"
-        istft_config_path = onnx_dir / "istft_config.json"
+    # Find detokenizer model
+    detok_path = onnx_dir / f"audio_detokenizer{suffix}.onnx"
+    if not detok_path.exists():
+        detok_path = onnx_dir / "audio_detokenizer.onnx"
 
-        if detok_path.exists() and istft_config_path.exists():
-            try:
-                return _decode_audio_onnx(
-                    codes_transposed, detok_path, istft_config_path, output_path, sample_rate
-                )
-            except Exception as e:
-                logger.warning(f"ONNX decode failed: {e}")
+    if not detok_path.exists():
+        logger.error(f"audio_detokenizer.onnx not found in {onnx_dir}")
+        return False
 
-    logger.error("All audio decoding methods failed")
-    return False
+    try:
+        return _decode_audio_onnx_numpy(
+            codes_transposed, detok_path, onnx_dir, output_path, sample_rate
+        )
+    except Exception as e:
+        logger.error(f"ONNX decode failed: {e}")
+        return False
 
 
 class StreamingISTFT:
@@ -1103,6 +1104,64 @@ def _istft_same_padding(
     return audio_trimmed
 
 
+def _decode_audio_onnx_numpy(
+    codes: np.ndarray,
+    detok_path: pathlib.Path,
+    onnx_dir: pathlib.Path,
+    output_path: str,
+    sample_rate: int,
+) -> bool:
+    """Decode audio using ONNX detokenizer + numpy ISTFT.
+
+    Pure numpy implementation - no PyTorch required.
+    Uses ISTFT with 'same' padding to match liquid_audio behavior.
+    """
+    import scipy.io.wavfile
+
+    # ISTFT parameters (fixed for this model)
+    n_fft = 1280
+    hop_length = 320
+    win_length = 1280
+    n_fft_bins = n_fft // 2 + 1
+
+    # Load window (or use default hann)
+    window_path = onnx_dir / "istft_window.npy"
+    if window_path.exists():
+        window = np.load(window_path)
+    else:
+        window = np.hanning(n_fft).astype(np.float32)
+
+    # Load ONNX detokenizer
+    detok_session = load_session(detok_path)
+
+    # Run detokenizer: [1, 8, T] → [1, T, 1282]
+    codes_batch = codes[np.newaxis, :, :].astype(np.int64)  # [1, 8, T]
+    stft_features = detok_session.run(["stft_features"], {"audio_codes": codes_batch})[0]
+    stft_features = stft_features[0]  # [T, 1282]
+
+    # Convert to complex STFT: [log_magnitude | angle] → complex
+    log_magnitude = stft_features[:, :n_fft_bins]
+    angle = stft_features[:, n_fft_bins:]
+    magnitude = np.exp(log_magnitude)
+    complex_stft = magnitude * np.exp(1j * angle)
+
+    # ISTFT with 'same' padding
+    waveform = _istft_same_padding(complex_stft.T, n_fft, hop_length, win_length, window)
+
+    # Normalize to prevent clipping
+    max_val = np.abs(waveform).max()
+    if max_val > 0:
+        waveform = waveform / max_val * 0.9
+
+    # Save as WAV
+    waveform_int16 = (waveform * 32767).astype(np.int16)
+    scipy.io.wavfile.write(output_path, sample_rate, waveform_int16)
+
+    duration = len(waveform) / sample_rate
+    logger.info(f"Saved audio to {output_path} ({duration:.2f}s)")
+    return True
+
+
 def _decode_audio_onnx(
     codes: np.ndarray,
     detok_path: pathlib.Path,
@@ -1112,7 +1171,7 @@ def _decode_audio_onnx(
 ) -> bool:
     """Decode audio using ONNX detokenizer + custom ISTFT.
 
-    Uses custom ISTFT with 'same' padding to match liquid_audio behavior.
+    Legacy function - use _decode_audio_onnx_numpy instead.
     """
     import json
 
