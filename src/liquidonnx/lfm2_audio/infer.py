@@ -1340,17 +1340,29 @@ def main():
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.7,
-        help="Sampling temperature",
+        default=None,
+        help="Text sampling temperature (default: 0 for ASR, 0.7 for TTS/text)",
     )
     parser.add_argument(
         "--audio-temperature",
         type=float,
-        default=0.7,
-        help="Audio sampling temperature",
+        default=None,
+        help="Audio sampling temperature (default: 0.7 for TTS)",
     )
 
     args = parser.parse_args()
+
+    # Apply mode-specific temperature defaults
+    if args.mode == "asr":
+        # ASR uses greedy decoding by default
+        if args.temperature is None:
+            args.temperature = 0
+    else:
+        # TTS, text, interleaved use temperature sampling
+        if args.temperature is None:
+            args.temperature = 0.7
+        if args.audio_temperature is None:
+            args.audio_temperature = 0.7
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
