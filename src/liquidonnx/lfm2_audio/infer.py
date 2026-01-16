@@ -248,8 +248,17 @@ class LFM2AudioInference:
                 cache[key] = outputs[f"present.{idx}.{kv_type}"]
         return cache
 
-    def _sample(self, logits: np.ndarray, temperature: float, top_p: float) -> int:
-        """Sample next token using temperature and top-p sampling."""
+    def _sample(
+        self, logits: np.ndarray, temperature: float, top_p: float | None = None
+    ) -> int:
+        """Sample next token using temperature and optional top-p sampling.
+
+        Args:
+            logits: Raw logits from model
+            temperature: Sampling temperature (0 = greedy)
+            top_p: Optional nucleus sampling threshold. If None, uses pure
+                   temperature sampling (matching liquid-audio behavior).
+        """
         if temperature == 0:
             return int(np.argmax(logits))
 
@@ -257,16 +266,21 @@ class LFM2AudioInference:
         exp_logits = np.exp(logits - np.max(logits))
         probs = exp_logits / exp_logits.sum()
 
-        sorted_indices = np.argsort(probs)[::-1]
-        sorted_probs = probs[sorted_indices]
-        cumsum = np.cumsum(sorted_probs)
+        if top_p is not None:
+            # Nucleus (top-p) sampling
+            sorted_indices = np.argsort(probs)[::-1]
+            sorted_probs = probs[sorted_indices]
+            cumsum = np.cumsum(sorted_probs)
 
-        cutoff_idx = np.searchsorted(cumsum, top_p) + 1
-        top_indices = sorted_indices[:cutoff_idx]
-        top_probs = probs[top_indices]
-        top_probs = top_probs / top_probs.sum()
+            cutoff_idx = np.searchsorted(cumsum, top_p) + 1
+            top_indices = sorted_indices[:cutoff_idx]
+            top_probs = probs[top_indices]
+            top_probs = top_probs / top_probs.sum()
 
-        return int(np.random.choice(top_indices, p=top_probs))
+            return int(np.random.choice(top_indices, p=top_probs))
+        else:
+            # Pure temperature sampling (matches liquid-audio)
+            return int(np.random.choice(len(probs), p=probs))
 
     def _get_text_embeds(self, input_ids: np.ndarray) -> np.ndarray:
         """Get text embeddings via numpy lookup."""
@@ -374,11 +388,12 @@ class LFM2AudioInference:
                 past_values = new_values
 
                 # Sample from logits including end-of-audio token (2048)
+                # Use pure temperature sampling (no top-p) to match liquid-audio
                 all_logits = logits[0]
                 if temperature is None or temperature <= 0:
                     token = int(np.argmax(all_logits))
                 else:
-                    token = self._sample(all_logits, temperature, top_p=0.95)
+                    token = self._sample(all_logits, temperature, top_p=None)
 
                 out_tokens.append(token)
                 prev_token = min(token, 2047)
@@ -609,7 +624,7 @@ class LFM2AudioInference:
         """Format text with TTS system instruction using ChatML format."""
         return (
             "<|startoftext|><|im_start|>system\n"
-            "Perform TTS.<|im_end|>\n"
+            "Perform TTS. Use the UK female voice.<|im_end|>\n"
             f"<|im_start|>user\n{text}<|im_end|>\n"
             "<|im_start|>assistant\n"
         )

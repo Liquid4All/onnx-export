@@ -1504,8 +1504,129 @@ class AudioDetokenizerBuilder:
         # MLP
         return self.build_mlp(layer_idx, hidden_state)
 
+    def build_rope(self, q_4d: str, k_4d: str, prefix: str) -> tuple[str, str]:
+        """Apply Rotary Position Embedding (RoPE) to Q and K.
+
+        Input shapes: [B, T, nh, hd] or [B, T, nkv, hd]
+        Output shapes: same as input
+
+        PyTorch's rotate_half splits first/second half:
+        - rotate_half([x0, ..., x15, x16, ..., x31]) = [-x16, ..., -x31, x0, ..., x15]
+        - cos/sin are concatenated: [c0, ..., c15, c0, ..., c15]
+        """
+        hd = self.head_dim
+        rope_theta = self.config.get("rope_theta", 1000000.0)
+
+        # Precompute inverse frequencies: theta^(-2i/d) for i in [0, hd//2)
+        # Shape: [hd//2]
+        inv_freq = 1.0 / (rope_theta ** (np.arange(0, hd, 2, dtype=np.float32) / hd))
+        self.add_initializer(f"{prefix}/rope_inv_freq", inv_freq)
+
+        # Get sequence length from Q shape [B, T, nh, hd]
+        self.make_node("Shape", [q_4d], [f"{prefix}/q_shape/output_0"])
+        seq_len = self.make_node(
+            "Gather",
+            [f"{prefix}/q_shape/output_0", self.get_constant(1)],
+            [f"{prefix}/seq_len/output_0"],
+        )
+
+        # Create position indices: [0, 1, ..., T-1]
+        positions = self.make_node(
+            "Range",
+            ["range_start", seq_len, "range_step"],
+            [f"{prefix}/positions/output_0"],
+        )
+
+        # Cast positions to float and reshape to [T, 1]
+        positions_f = self.make_node(
+            "Cast", [positions], [f"{prefix}/positions_f/output_0"], to=TensorProto.FLOAT
+        )
+        self.add_initializer(f"{prefix}/pos_shape", np.array([-1, 1], dtype=np.int64))
+        positions_r = self.make_node(
+            "Reshape", [positions_f, f"{prefix}/pos_shape"], [f"{prefix}/positions_r/output_0"]
+        )
+
+        # Compute position * inv_freq: [T, 1] * [hd//2] -> [T, hd//2]
+        freqs = self.make_node(
+            "Mul", [positions_r, f"{prefix}/rope_inv_freq"], [f"{prefix}/freqs/output_0"]
+        )
+
+        # Compute cos and sin: [T, hd//2]
+        cos_half = self.make_node("Cos", [freqs], [f"{prefix}/cos_half/output_0"])
+        sin_half = self.make_node("Sin", [freqs], [f"{prefix}/sin_half/output_0"])
+
+        # Concatenate to get [T, hd]: [c0, c1, ..., c15, c0, c1, ..., c15]
+        # (PyTorch uses concat, not interleave)
+        cos_hd = self.make_node(
+            "Concat", [cos_half, cos_half], [f"{prefix}/cos_hd/output_0"], axis=-1
+        )
+        sin_hd = self.make_node(
+            "Concat", [sin_half, sin_half], [f"{prefix}/sin_hd/output_0"], axis=-1
+        )
+
+        # Reshape for broadcast: [T, hd] -> [1, T, 1, hd] for [B, T, nh, hd]
+        self.add_initializer(f"{prefix}/broadcast_shape", np.array([1, -1, 1, hd], dtype=np.int64))
+        cos_bc = self.make_node(
+            "Reshape", [cos_hd, f"{prefix}/broadcast_shape"], [f"{prefix}/cos_bc/output_0"]
+        )
+        sin_bc = self.make_node(
+            "Reshape", [sin_hd, f"{prefix}/broadcast_shape"], [f"{prefix}/sin_bc/output_0"]
+        )
+
+        # === rotate_half for Q ===
+        # PyTorch: split first/second half, return [-second, first]
+        # Split: [B, T, nh, hd] -> gather first hd//2, gather last hd//2
+        half_hd = hd // 2
+
+        # Using Split op: [B, T, nh, hd] -> [B, T, nh, hd//2], [B, T, nh, hd//2]
+        self.add_initializer(f"{prefix}/split_sizes", np.array([half_hd, half_hd], dtype=np.int64))
+        q_first = f"{prefix}/q_first/output_0"
+        q_second = f"{prefix}/q_second/output_0"
+        node = helper.make_node(
+            "Split",
+            [q_4d, f"{prefix}/split_sizes"],
+            [q_first, q_second],
+            name=f"{prefix}/q_split",
+            axis=-1,
+        )
+        self.nodes.append(node)
+
+        # rotate_half: [-second, first]
+        q_second_neg = self.make_node("Neg", [q_second], [f"{prefix}/q_second_neg/output_0"])
+        q_rot_half = self.make_node(
+            "Concat", [q_second_neg, q_first], [f"{prefix}/q_rot_half/output_0"], axis=-1
+        )
+
+        # Apply: q_rot = q * cos + rotate_half(q) * sin
+        q_cos = self.make_node("Mul", [q_4d, cos_bc], [f"{prefix}/q_cos/output_0"])
+        q_sin = self.make_node("Mul", [q_rot_half, sin_bc], [f"{prefix}/q_sin/output_0"])
+        q_rope = self.make_node("Add", [q_cos, q_sin], [f"{prefix}/q_rope/output_0"])
+
+        # === rotate_half for K ===
+        k_first = f"{prefix}/k_first/output_0"
+        k_second = f"{prefix}/k_second/output_0"
+        node = helper.make_node(
+            "Split",
+            [k_4d, f"{prefix}/split_sizes"],
+            [k_first, k_second],
+            name=f"{prefix}/k_split",
+            axis=-1,
+        )
+        self.nodes.append(node)
+
+        k_second_neg = self.make_node("Neg", [k_second], [f"{prefix}/k_second_neg/output_0"])
+        k_rot_half = self.make_node(
+            "Concat", [k_second_neg, k_first], [f"{prefix}/k_rot_half/output_0"], axis=-1
+        )
+
+        k_cos = self.make_node("Mul", [k_4d, cos_bc], [f"{prefix}/k_cos/output_0"])
+        k_sin = self.make_node("Mul", [k_rot_half, sin_bc], [f"{prefix}/k_sin/output_0"])
+        k_rope = self.make_node("Add", [k_cos, k_sin], [f"{prefix}/k_rope/output_0"])
+
+        return q_rope, k_rope
+
     def build_attention_layer(self, layer_idx: int, hidden_state: str) -> str:
-        """Build a sliding attention layer with causal sliding window mask.
+        """Build a sliding attention layer with causal sliding window mask and RoPE.
 
         For the detokenizer, we use standard attention (no KV cache) with a causal
         sliding window mask. Position i can attend to positions j where:
@@ -1590,15 +1711,20 @@ class AudioDetokenizerBuilder:
         q_4d = self.make_node(
             "Reshape", [q_3d, "reshape_q_heads"], [f"{prefix}/attn/q_4d/output_0"]
         )
-        q_4d_t = self.make_node(
-            "Transpose", [q_4d], [f"{prefix}/attn/q_4d_t/output_0"], perm=[0, 2, 1, 3]
-        )
-
         k_4d = self.make_node(
             "Reshape", [k_3d, "reshape_k_heads"], [f"{prefix}/attn/k_4d/output_0"]
         )
+
+        # Apply RoPE to Q and K (before transpose)
+        # Input: [B, T, nh, hd], Output: [B, T, nh, hd]
+        q_rope, k_rope = self.build_rope(q_4d, k_4d, f"{prefix}/rope")
+
+        # Transpose: [B, T, nh, hd] -> [B, nh, T, hd]
+        q_4d_t = self.make_node(
+            "Transpose", [q_rope], [f"{prefix}/attn/q_4d_t/output_0"], perm=[0, 2, 1, 3]
+        )
         k_4d_t = self.make_node(
-            "Transpose", [k_4d], [f"{prefix}/attn/k_4d_t/output_0"], perm=[0, 2, 1, 3]
+            "Transpose", [k_rope], [f"{prefix}/attn/k_4d_t/output_0"], perm=[0, 2, 1, 3]
         )
 
         v_4d = self.make_node("Reshape", [v, "reshape_v_heads"], [f"{prefix}/attn/v_4d/output_0"])
@@ -1690,8 +1816,11 @@ class AudioDetokenizerBuilder:
             [f"{prefix}/attn/col_idx/output_0"],
         )
 
-        # Distance matrix: d_idx = row_idx - col_idx [T, T]
-        d_idx = self.make_node("Sub", [row_idx, col_idx], [f"{prefix}/attn/d_idx/output_0"])
+        # Distance matrix: d_idx = col_idx - row_idx [T, T]
+        # PyTorch: d_idx = idx - idx[:, None] where d_idx[row, col] = col - row
+        # For causal mask: position row can attend to position col if col <= row
+        # i.e., d_idx <= 0 means col - row <= 0 means col <= row (causal)
+        d_idx = self.make_node("Sub", [col_idx, row_idx], [f"{prefix}/attn/d_idx/output_0"])
 
         # Mask conditions:
         # cond1: d_idx <= 0 (causal: can only attend to current and past)
@@ -1814,13 +1943,20 @@ class AudioDetokenizerBuilder:
         hidden_state = self.build_embedding()
 
         # Build LFM layers
-        # NOTE: The PyTorch Lfm2Model used by liquid_audio creates conv modules for ALL
-        # layers, ignoring layer_types. The self_attn weights in the checkpoint are NOT
-        # used. So we use conv for all layers to match PyTorch behavior.
+        # NOTE: liquid_audio converts "sliding_attention" -> "full_attention" in config,
+        # then loads self_attn.* weights from checkpoint. We do the same:
+        # - conv layers (0, 1, 3, 5, 7) use build_conv_layer
+        # - sliding_attention layers (2, 4, 6) use build_attention_layer with sliding window mask
         for layer_idx in range(self.num_layers):
             layer_type = self.layer_types[layer_idx]
-            logger.info(f"Building detokenizer layer {layer_idx} ({layer_type} -> conv)...")
-            hidden_state = self.build_conv_layer(layer_idx, hidden_state)
+            if layer_type == "sliding_attention":
+                logger.info(
+                    f"Building detokenizer layer {layer_idx} (attention with sliding window)..."
+                )
+                hidden_state = self.build_attention_layer(layer_idx, hidden_state)
+            else:
+                logger.info(f"Building detokenizer layer {layer_idx} (conv)...")
+                hidden_state = self.build_conv_layer(layer_idx, hidden_state)
 
         # Build output linear
         self.build_output_linear(hidden_state)
@@ -1849,21 +1985,18 @@ def export_audio_detokenizer_builder(model_path: str, onnx_dir: pathlib.Path) ->
 
     This exports steps 1-3 to ONNX. Step 4 is done in numpy.
 
-    NOTE: The checkpoint has self_attn.* weights for layers 2, 4, 6 but PyTorch Lfm2Model
-    creates conv modules for ALL layers (since layer_types has "sliding_attention" not
-    "full_attention"). The self_attn.* weights are NOT used - those layers have random
-    weights. We load the PyTorch model to get the actual weights (including random ones).
+    NOTE: The checkpoint has self_attn.* weights for layers 2, 4, 6.
+    liquid_audio converts "sliding_attention" -> "full_attention" in config,
+    then loads self_attn.* weights from checkpoint. We load directly from
+    checkpoint to get the attention weights.
     """
     logger.info("Exporting audio_detokenizer.onnx (full LFM builder version)...")
 
     import json as json_module
 
-    from accelerate import load_checkpoint_in_model
-    from liquid_audio import LFM2AudioDetokenizer
     from liquid_audio.utils import get_model_dir
-    from transformers import Lfm2Config
+    from safetensors.torch import load_file
 
-    # Load the PyTorch model to get actual weights (including random for layers 2,4,6)
     cache_dir = get_model_dir(model_path)
     config_path = cache_dir / "audio_detokenizer" / "config.json"
 
@@ -1876,26 +2009,22 @@ def export_audio_detokenizer_builder(model_path: str, onnx_dir: pathlib.Path) ->
 
     logger.info(f"Audio detokenizer config: {detok_config}")
 
-    # Create PyTorch model and load checkpoint
-    # This will have random weights for layers 2, 4, 6's conv modules
-    # Use fixed seed for reproducibility - the random weights don't significantly
-    # affect output (they produce near-zero contribution) but we want deterministic exports
+    # Load weights directly from checkpoint (has self_attn.* for layers 2, 4, 6)
+    weights_path = cache_dir / "audio_detokenizer" / "model.safetensors"
+    checkpoint_weights = load_file(str(weights_path))
+
+    # Convert to numpy
+    detok_weights = {}
+    for name, param in checkpoint_weights.items():
+        detok_weights[name] = param.float().cpu().numpy()
+
+    logger.info(f"Loaded {len(detok_weights)} audio detokenizer weights from checkpoint")
+
+    # Add ISTFT window (needed for inference)
     import torch
 
-    torch.manual_seed(42)
-    backbone_config = Lfm2Config(**detok_config)
-    pytorch_model = LFM2AudioDetokenizer(backbone_config)
-
-    weights_path = cache_dir / "audio_detokenizer" / "model.safetensors"
-    load_checkpoint_in_model(pytorch_model, str(weights_path))
-    pytorch_model.eval()
-
-    # Extract all weights from PyTorch model (including random ones)
-    detok_weights = {}
-    for name, param in pytorch_model.state_dict().items():
-        detok_weights[name] = param.detach().cpu().numpy()
-
-    logger.info(f"Loaded {len(detok_weights)} audio detokenizer weights from PyTorch model")
+    istft_window = torch.hann_window(1280).numpy()
+    detok_weights["istft.window"] = istft_window
 
     # Build the model using AudioDetokenizerBuilder
     builder = AudioDetokenizerBuilder(detok_config, detok_weights)
