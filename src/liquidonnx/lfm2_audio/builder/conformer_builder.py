@@ -9,9 +9,14 @@ Each Conformer block has:
     x → FFN1 (half) → MHA → Conv → FFN2 (half) → LayerNorm → out
     with residual connections
 
-Note: This is a simplified export that removes dropout and uses
-standard attention instead of relative position attention for
-ONNX compatibility. The adapter MLP is included at the end.
+This implementation includes relative position attention matching
+liquid-audio's RelPositionMultiHeadAttention:
+    - Uses linear_pos, pos_bias_u, pos_bias_v weights
+    - Computes content-content (matrix_ac) and content-position (matrix_bd) attention
+    - Applies rel_shift operation for positional alignment
+    - scores = (matrix_ac + matrix_bd) / sqrt(d_k)
+
+The adapter MLP is included at the end.
 """
 
 import logging
@@ -66,24 +71,24 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         )
 
     def build_subsampling(self, input_name: str) -> str:
-        """Build depthwise-striding subsampling layer.
+        """Build subsampling layer (ConvSubsampling from liquid-audio).
 
         Subsampling reduces temporal resolution by factor of 8:
             [B, T, 128] → [B, T//8, 512]
 
-        Architecture (pre_encode with depthwise separable convs):
+        Architecture:
             [B, T, 128] → reshape [B, 1, T, 128]
-            → DepthwiseConv(256, k=3, s=2) → ReLU
-            → DepthwiseConv(256, k=3, s=2) → PointwiseConv(256) → ReLU
-            → DepthwiseConv(256, k=3, s=2) → PointwiseConv(256) → ReLU
-            → reshape [B, T//8, 256*F'] → Linear(d_model)
+            → Conv2d(1→256, k=3, s=2) → ReLU                    # conv.0, conv.1
+            → DepthwiseConv(256, k=3, s=2) → PointwiseConv(256) # conv.2, conv.3
+            → DepthwiseConv(256, k=3, s=2) → PointwiseConv(256) # conv.5, conv.6
+            → reshape [B, T//8, 256*F'] → Linear(d_model)       # out
 
         Weight mapping:
-            conformer.pre_encode.conv.0 → depthwise conv (stride 2)
-            conformer.pre_encode.conv.2 → depthwise conv (stride 2)
-            conformer.pre_encode.conv.3 → pointwise conv
-            conformer.pre_encode.conv.5 → depthwise conv (stride 2)
-            conformer.pre_encode.conv.6 → pointwise conv
+            conformer.pre_encode.conv.0 → Conv2d(1→256, groups=1, stride=2)
+            conformer.pre_encode.conv.2 → DepthwiseConv(groups=256, stride=2)
+            conformer.pre_encode.conv.3 → PointwiseConv (1x1)
+            conformer.pre_encode.conv.5 → DepthwiseConv(groups=256, stride=2)
+            conformer.pre_encode.conv.6 → PointwiseConv (1x1)
             conformer.pre_encode.out → linear projection
         """
         prefix = "/encoder/pre_encode"
@@ -94,24 +99,16 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             input_name, self.get_constant([1]), f"{prefix}/Unsqueeze/output_0"
         )
 
-        # Expand to C channels: [B, 1, T, F] → [B, C, T, F]
-        # We need to tile the input to match the depthwise conv groups
-        # The depthwise conv weight is [C, 1, 3, 3] meaning C groups, 1 channel each
-        expanded = self.make_node(
-            "Expand",
-            [reshaped, self.get_constant([1, C, 1, 1])],
-            [f"{prefix}/Expand/output_0"],
-        )
-
-        # === Block 1: Depthwise conv (stride 2) + ReLU ===
+        # === Block 1: Conv2d(1→256) + ReLU ===
+        # conv.0 weight is [256, 1, 3, 3] - regular conv, not depthwise
         conv0 = self.make_node(
             "Conv",
-            [expanded, "encoder.pre_encode.conv.0.weight", "encoder.pre_encode.conv.0.bias"],
+            [reshaped, "encoder.pre_encode.conv.0.weight", "encoder.pre_encode.conv.0.bias"],
             [f"{prefix}/conv0/Conv/output_0"],
             kernel_shape=[3, 3],
             strides=[2, 2],
             pads=[1, 1, 1, 1],
-            group=C,
+            group=1,  # Regular conv, not depthwise
         )
         relu0 = self.make_node("Relu", [conv0], [f"{prefix}/conv0/Relu/output_0"])
 
@@ -193,7 +190,7 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             bias_name="encoder.pre_encode.out.bias",
         )
 
-    def build_conformer_block(self, layer_idx: int, hidden_state: str) -> str:
+    def build_conformer_block(self, layer_idx: int, hidden_state: str, pos_emb_name: str) -> str:
         """Build a single Conformer block.
 
         Structure:
@@ -208,8 +205,8 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         ffn1_scaled = self.make_mul(ffn1_out, half_const, f"{prefix}/ffn1/Mul/output_0")
         hidden_state = self.make_add(hidden_state, ffn1_scaled, f"{prefix}/ffn1/Add/output_0")
 
-        # === Self-Attention (simplified, no relative position) ===
-        attn_out = self.build_self_attention(hidden_state, layer_idx)
+        # === Self-Attention with relative position encoding ===
+        attn_out = self.build_self_attention(hidden_state, layer_idx, pos_emb_name)
         hidden_state = self.make_add(hidden_state, attn_out, f"{prefix}/attn/Add/output_0")
 
         # === Convolution module ===
@@ -265,13 +262,136 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             bias_name=f"encoder.layers.{layer_idx}.{name}.linear2.bias",
         )
 
-    def build_self_attention(self, hidden_state: str, layer_idx: int) -> str:
-        """Build self-attention module (simplified without relative position)."""
+    def build_rel_positional_encoding(self, max_len: int = 5000) -> np.ndarray:
+        """Build sinusoidal relative positional encoding.
+
+        For relative position encoding, we need positions from (L-1) to -(L-1),
+        totaling 2*L-1 positions for sequence length L.
+
+        Returns:
+            pos_enc: [1, 2*max_len-1, d_model] sinusoidal encoding
+        """
+        d_model = self.config.d_model
+        pe_len = 2 * max_len - 1
+
+        # Positions from (max_len-1) down to -(max_len-1)
+        positions = np.arange(max_len - 1, -max_len, -1, dtype=np.float32)[:, np.newaxis]
+
+        # Div term: exp(i * -log(10000) / d_model) for i in 0, 2, 4, ...
+        div_term = np.exp(np.arange(0, d_model, 2, dtype=np.float32) * -(np.log(10000.0) / d_model))
+
+        pe = np.zeros((pe_len, d_model), dtype=np.float32)
+        pe[:, 0::2] = np.sin(positions * div_term)
+        pe[:, 1::2] = np.cos(positions * div_term)
+
+        return pe[np.newaxis, :, :]  # [1, 2*max_len-1, d_model]
+
+    def build_rel_shift(self, x_name: str, prefix: str) -> str:
+        """Build relative shift operation for position encoding.
+
+        The rel_shift operation transforms the raw position attention scores
+        to align positions correctly:
+            Input: [B, H, T, 2T-1]
+            1. Pad left with zeros: [B, H, T, 2T]
+            2. Reshape: [B, H, 2T, T]
+            3. Drop first row: [B, H, 2T-1, T]
+            4. Reshape back: [B, H, T, 2T-1]
+
+        For ONNX we need to handle dynamic shapes. The sequence length T
+        is dynamic, so we build the graph to handle it.
+        """
+        # Get shape: [B, H, T, pos_len] where pos_len = 2T-1
+        self.make_node("Shape", [x_name], [f"{prefix}/shape/output_0"])
+
+        # Extract dimensions
+        batch = self.make_gather(
+            f"{prefix}/shape/output_0", self.get_constant(0), f"{prefix}/batch/output_0", axis=0
+        )
+        heads = self.make_gather(
+            f"{prefix}/shape/output_0", self.get_constant(1), f"{prefix}/heads/output_0", axis=0
+        )
+        qlen = self.make_gather(
+            f"{prefix}/shape/output_0", self.get_constant(2), f"{prefix}/qlen/output_0", axis=0
+        )
+        pos_len = self.make_gather(
+            f"{prefix}/shape/output_0", self.get_constant(3), f"{prefix}/pos_len/output_0", axis=0
+        )
+
+        # Step 1: Pad left with zeros: [B, H, T, 2T-1] → [B, H, T, 2T]
+        # ONNX Pad format: [begin_d0, begin_d1, ..., begin_d(N-1), end_d0, end_d1, ..., end_d(N-1)]
+        # For padding dim 3 (pos_len) at the beginning by 1: pads = [0, 0, 0, 1, 0, 0, 0, 0]
+        pads = self.get_constant([0, 0, 0, 1, 0, 0, 0, 0])
+        padded = self.make_node("Pad", [x_name, pads], [f"{prefix}/pad/output_0"], mode="constant")
+
+        # Step 2: Reshape [B, H, T, pos_len+1] → [B, H, pos_len+1, T]
+        # new_pos_len = pos_len + 1
+        new_pos_len = self.make_add(pos_len, self.get_constant(1), f"{prefix}/new_pos_len/output_0")
+
+        reshape_shape = self.make_concat(
+            [
+                self.make_unsqueeze(batch, self.get_constant([0]), f"{prefix}/b_u/output_0"),
+                self.make_unsqueeze(heads, self.get_constant([0]), f"{prefix}/h_u/output_0"),
+                self.make_unsqueeze(new_pos_len, self.get_constant([0]), f"{prefix}/p_u/output_0"),
+                self.make_unsqueeze(qlen, self.get_constant([0]), f"{prefix}/q_u/output_0"),
+            ],
+            f"{prefix}/reshape1_shape/output_0",
+            axis=0,
+        )
+        reshaped = self.make_reshape(padded, reshape_shape, f"{prefix}/reshape1/output_0")
+
+        # Step 3: Drop first row along dim 2 (pos_len+1 dim)
+        # Slice: starts=[0,0,1,0], ends=[max,max,max,max], axes=[0,1,2,3]
+        # Use dynamic slicing
+        starts = self.get_constant([0, 0, 1, 0])
+        ends = self.make_concat(
+            [
+                self.make_unsqueeze(batch, self.get_constant([0]), f"{prefix}/be/output_0"),
+                self.make_unsqueeze(heads, self.get_constant([0]), f"{prefix}/he/output_0"),
+                self.make_unsqueeze(new_pos_len, self.get_constant([0]), f"{prefix}/pe/output_0"),
+                self.make_unsqueeze(qlen, self.get_constant([0]), f"{prefix}/qe/output_0"),
+            ],
+            f"{prefix}/ends/output_0",
+            axis=0,
+        )
+        axes = self.get_constant([0, 1, 2, 3])
+        sliced = self.make_node(
+            "Slice", [reshaped, starts, ends, axes], [f"{prefix}/slice/output_0"]
+        )
+
+        # Step 4: Reshape back [B, H, pos_len, T] → [B, H, T, pos_len]
+        final_shape = self.make_concat(
+            [
+                self.make_unsqueeze(batch, self.get_constant([0]), f"{prefix}/bf/output_0"),
+                self.make_unsqueeze(heads, self.get_constant([0]), f"{prefix}/hf/output_0"),
+                self.make_unsqueeze(qlen, self.get_constant([0]), f"{prefix}/qf/output_0"),
+                self.make_unsqueeze(pos_len, self.get_constant([0]), f"{prefix}/pf/output_0"),
+            ],
+            f"{prefix}/reshape2_shape/output_0",
+            axis=0,
+        )
+        return self.make_reshape(sliced, final_shape, f"{prefix}/output_0")
+
+    def make_gather(self, input_name: str, indices, output_name: str, axis: int = 0) -> str:
+        """Helper to gather single element from tensor."""
+        self.make_node("Gather", [input_name, indices], [output_name], axis=axis)
+        return output_name
+
+    def build_self_attention(self, hidden_state: str, layer_idx: int, pos_emb_name: str) -> str:
+        """Build self-attention module with relative position encoding.
+
+        Implements RelPositionMultiHeadAttention from liquid-audio:
+            q_with_bias_u = (q + pos_bias_u)
+            q_with_bias_v = (q + pos_bias_v)
+            matrix_ac = q_with_bias_u @ k.T  (content-content)
+            matrix_bd = rel_shift(q_with_bias_v @ p.T)  (content-position)
+            scores = (matrix_ac + matrix_bd) / sqrt(d_k)
+        """
         prefix = f"/encoder/layers.{layer_idx}/self_attn"
         weight_prefix = f"conformer.layers.{layer_idx}.self_attn"
         d_model = self.config.d_model
         n_heads = self.config.n_heads
         head_dim = d_model // n_heads
+        scale = 1.0 / (head_dim**0.5)
 
         # LayerNorm
         normed = self.make_layernorm(
@@ -307,26 +427,104 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             bias_name=f"encoder.layers.{layer_idx}.self_attn.v.bias",
         )
 
-        # Reshape for multi-head attention: [B, T, D] → [B, T, H, D/H] → [B, H, T, D/H]
+        # Project positional embeddings: [1, 2T-1, D] → [1, 2T-1, D]
+        p = self.make_linear(
+            pos_emb_name,
+            self.weights[f"{weight_prefix}.linear_pos.weight"],
+            f"encoder.layers.{layer_idx}.self_attn.linear_pos.weight",
+            f"{prefix}/pos_proj",
+        )
+
+        # Reshape for multi-head attention: [B, T, D] → [B, T, H, D/H]
         reshape_const = self.get_constant([0, -1, n_heads, head_dim])
         q_4d = self.make_reshape(q, reshape_const, f"{prefix}/q_reshape/output_0")
         k_4d = self.make_reshape(k, reshape_const, f"{prefix}/k_reshape/output_0")
         v_4d = self.make_reshape(v, reshape_const, f"{prefix}/v_reshape/output_0")
+        p_4d = self.make_reshape(p, reshape_const, f"{prefix}/p_reshape/output_0")
 
-        q_t = self.make_transpose(q_4d, f"{prefix}/q_transpose/output_0", perm=[0, 2, 1, 3])
+        # Transpose K and V to [B, H, T, D/H]
         k_t = self.make_transpose(k_4d, f"{prefix}/k_transpose/output_0", perm=[0, 2, 1, 3])
         v_t = self.make_transpose(v_4d, f"{prefix}/v_transpose/output_0", perm=[0, 2, 1, 3])
+        # P to [B, H, 2T-1, D/H] (but B=1 for pos embeddings)
+        p_t = self.make_transpose(p_4d, f"{prefix}/p_transpose/output_0", perm=[0, 2, 1, 3])
 
-        # Scaled dot-product attention
-        scale = 1.0 / (head_dim**0.5)
+        # Add pos_bias_u and pos_bias_v to query
+        # q_4d is [B, T, H, D/H], pos_bias is [H, D/H]
+        # Need to broadcast: reshape pos_bias to [1, 1, H, D/H]
+        pos_bias_u = f"encoder.layers.{layer_idx}.self_attn.pos_bias_u"
+        pos_bias_v = f"encoder.layers.{layer_idx}.self_attn.pos_bias_v"
+
+        # Unsqueeze pos_bias: [H, D/H] → [1, 1, H, D/H]
+        bias_u_unsq = self.make_unsqueeze(
+            pos_bias_u, self.get_constant([0, 1]), f"{prefix}/bias_u_unsq/output_0"
+        )
+        bias_v_unsq = self.make_unsqueeze(
+            pos_bias_v, self.get_constant([0, 1]), f"{prefix}/bias_v_unsq/output_0"
+        )
+
+        # q + bias: [B, T, H, D/H] + [1, 1, H, D/H] → [B, T, H, D/H]
+        q_with_bias_u = self.make_add(q_4d, bias_u_unsq, f"{prefix}/q_bias_u/output_0")
+        q_with_bias_v = self.make_add(q_4d, bias_v_unsq, f"{prefix}/q_bias_v/output_0")
+
+        # Transpose to [B, H, T, D/H] for matmul
+        q_u_t = self.make_transpose(
+            q_with_bias_u, f"{prefix}/q_u_transpose/output_0", perm=[0, 2, 1, 3]
+        )
+        q_v_t = self.make_transpose(
+            q_with_bias_v, f"{prefix}/q_v_transpose/output_0", perm=[0, 2, 1, 3]
+        )
+
+        # === Content-content attention: matrix_ac = q_u @ k.T ===
+        # [B, H, T, D/H] @ [B, H, D/H, T] → [B, H, T, T]
         k_t_t = self.make_transpose(k_t, f"{prefix}/k_t_transpose/output_0", perm=[0, 1, 3, 2])
-        scores = self.make_matmul(q_t, k_t_t, f"{prefix}/scores/output_0")
-        scaled_scores = self.make_mul(
-            scores, self.get_constant(scale, dtype=np.float32), f"{prefix}/scaled_scores/output_0"
+        matrix_ac = self.make_matmul(q_u_t, k_t_t, f"{prefix}/matrix_ac/output_0")
+
+        # === Content-position attention: matrix_bd = rel_shift(q_v @ p.T) ===
+        # [B, H, T, D/H] @ [1, H, D/H, 2T-1] → [B, H, T, 2T-1]
+        p_t_t = self.make_transpose(p_t, f"{prefix}/p_t_transpose/output_0", perm=[0, 1, 3, 2])
+        matrix_bd_raw = self.make_matmul(q_v_t, p_t_t, f"{prefix}/matrix_bd_raw/output_0")
+
+        # Apply rel_shift
+        matrix_bd_shifted = self.build_rel_shift(matrix_bd_raw, f"{prefix}/rel_shift")
+
+        # Slice matrix_bd to match matrix_ac size (drop extra positions)
+        # matrix_bd_shifted is [B, H, T, 2T-1], need [B, H, T, T]
+        self.make_node("Shape", [matrix_ac], [f"{prefix}/ac_shape/output_0"])
+        ac_last_dim = self.make_gather(
+            f"{prefix}/ac_shape/output_0",
+            self.get_constant(3),
+            f"{prefix}/ac_last/output_0",
+            axis=0,
         )
-        attn_weights = self.make_node(
-            "Softmax", [scaled_scores], [f"{prefix}/softmax/output_0"], axis=-1
+        # Slice: [0:T] on last dimension
+        bd_starts = self.get_constant([0, 0, 0, 0])
+        bd_ends = self.make_concat(
+            [
+                self.get_constant([9223372036854775807]),  # max int64
+                self.get_constant([9223372036854775807]),
+                self.get_constant([9223372036854775807]),
+                self.make_unsqueeze(
+                    ac_last_dim, self.get_constant([0]), f"{prefix}/ac_last_u/output_0"
+                ),
+            ],
+            f"{prefix}/bd_ends/output_0",
+            axis=0,
         )
+        bd_axes = self.get_constant([0, 1, 2, 3])
+        matrix_bd = self.make_node(
+            "Slice",
+            [matrix_bd_shifted, bd_starts, bd_ends, bd_axes],
+            [f"{prefix}/matrix_bd/output_0"],
+        )
+
+        # === Combine: scores = (matrix_ac + matrix_bd) / sqrt(d_k) ===
+        scores_sum = self.make_add(matrix_ac, matrix_bd, f"{prefix}/scores_sum/output_0")
+        scores = self.make_mul(
+            scores_sum, self.get_constant(scale, dtype=np.float32), f"{prefix}/scores/output_0"
+        )
+
+        # Softmax and attention
+        attn_weights = self.make_node("Softmax", [scores], [f"{prefix}/softmax/output_0"], axis=-1)
         attn_out = self.make_matmul(attn_weights, v_t, f"{prefix}/attn_out/output_0")
 
         # Reshape back: [B, H, T, D/H] → [B, T, H, D/H] → [B, T, D]
@@ -457,12 +655,12 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             bias_name="encoder.adapter.linear1.bias",
         )
 
-        # ReLU (implied by typical adapter design)
-        relu = self.make_node("Relu", [linear1], [f"{prefix}/Relu/output_0"])
+        # GELU activation (matching liquid-audio's GELU(approximate='none'))
+        gelu = self.make_node("Gelu", [linear1], [f"{prefix}/Gelu/output_0"])
 
         # Linear 2
         return self.make_linear(
-            relu,
+            gelu,
             self.weights["audio_adapter.model.3.weight"],
             "encoder.adapter.linear2.weight",
             f"{prefix}/linear2",
@@ -552,6 +750,19 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
                 self.add_initializer(f"{out_prefix}.self_attn.out.weight", self.weights[w_name].T)
                 self.add_initializer(f"{out_prefix}.self_attn.out.bias", self.weights[b_name])
 
+            # Relative position attention weights
+            pos_w = f"{prefix}.self_attn.linear_pos.weight"
+            if pos_w in self.weights:
+                self.add_initializer(
+                    f"{out_prefix}.self_attn.linear_pos.weight", self.weights[pos_w].T
+                )
+            pos_bias_u = f"{prefix}.self_attn.pos_bias_u"
+            if pos_bias_u in self.weights:
+                self.add_initializer(f"{out_prefix}.self_attn.pos_bias_u", self.weights[pos_bias_u])
+            pos_bias_v = f"{prefix}.self_attn.pos_bias_v"
+            if pos_bias_v in self.weights:
+                self.add_initializer(f"{out_prefix}.self_attn.pos_bias_v", self.weights[pos_bias_v])
+
             # Conv module weights
             for conv_name in ["pointwise_conv1", "pointwise_conv2", "depthwise_conv"]:
                 w_name = f"{prefix}.conv.{conv_name}.weight"
@@ -598,6 +809,69 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
 
         logger.info(f"Loaded {len(self.weights)} weights")
 
+    def build_pos_encoding_slice(self, hidden_state: str, max_len: int = 5000) -> str:
+        """Build dynamic slicing of positional encoding based on sequence length.
+
+        The full positional encoding is [1, 2*max_len-1, d_model].
+        For input length T, we need positions [1, 2*T-1, d_model].
+
+        center_pos = (2*max_len-1) // 2 + 1 = max_len
+        start_pos = center_pos - T = max_len - T
+        end_pos = center_pos + T - 1 = max_len + T - 1
+        """
+        prefix = "/encoder/pos_enc"
+
+        # Create full positional encoding as initializer
+        pe = self.build_rel_positional_encoding(max_len)
+        self.add_initializer("encoder.pos_enc", pe)
+
+        # Get sequence length from hidden_state: [B, T, D]
+        self.make_node("Shape", [hidden_state], [f"{prefix}/shape/output_0"])
+        seq_len = self.make_gather(
+            f"{prefix}/shape/output_0", self.get_constant(1), f"{prefix}/seq_len/output_0", axis=0
+        )
+
+        # Compute slicing indices
+        # center_pos = max_len (constant)
+        center_pos = self.get_constant(max_len)
+
+        # start_pos = center_pos - seq_len
+        start_pos = self.make_sub(center_pos, seq_len, f"{prefix}/start_pos/output_0")
+
+        # end_pos = center_pos + seq_len - 1
+        end_pos_tmp = self.make_add(center_pos, seq_len, f"{prefix}/end_pos_tmp/output_0")
+        end_pos = self.make_sub(end_pos_tmp, self.get_constant(1), f"{prefix}/end_pos/output_0")
+
+        # Slice: pe[:, start_pos:end_pos, :]
+        starts = self.make_concat(
+            [
+                self.get_constant([0]),
+                self.make_unsqueeze(start_pos, self.get_constant([0]), f"{prefix}/s_u/output_0"),
+                self.get_constant([0]),
+            ],
+            f"{prefix}/starts/output_0",
+            axis=0,
+        )
+        ends = self.make_concat(
+            [
+                self.get_constant([1]),
+                self.make_unsqueeze(end_pos, self.get_constant([0]), f"{prefix}/e_u/output_0"),
+                self.get_constant([self.config.d_model]),
+            ],
+            f"{prefix}/ends/output_0",
+            axis=0,
+        )
+        axes = self.get_constant([0, 1, 2])
+
+        return self.make_node(
+            "Slice", ["encoder.pos_enc", starts, ends, axes], [f"{prefix}/output_0"]
+        )
+
+    def make_sub(self, a: str, b: str, output_name: str) -> str:
+        """Helper for subtraction."""
+        self.make_node("Sub", [a, b], [output_name])
+        return output_name
+
     def build(self, model_path: str) -> onnx.ModelProto:
         """Build the complete ONNX model for audio encoder."""
         logger.info("Building Conformer encoder ONNX model...")
@@ -615,10 +889,16 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         # Build subsampling
         hidden_state = self.build_subsampling("mel_spectrogram")
 
+        # Note: xscale (sqrt(d_model)) is optional in RelPositionalEncoding
+        # LFM2.5-Audio has xscale=None, so we don't apply it
+
+        # Build positional encoding (sliced based on sequence length)
+        pos_emb = self.build_pos_encoding_slice(hidden_state)
+
         # Build conformer layers
         for layer_idx in range(self.config.n_layers):
             logger.info(f"Building conformer layer {layer_idx}...")
-            hidden_state = self.build_conformer_block(layer_idx, hidden_state)
+            hidden_state = self.build_conformer_block(layer_idx, hidden_state, pos_emb)
 
         # Build adapter (projects to LFM2 hidden size)
         hidden_state = self.build_adapter(hidden_state)

@@ -262,9 +262,7 @@ class LFM2AudioInference:
                 cache[key] = outputs[f"present.{idx}.{kv_type}"]
         return cache
 
-    def _sample(
-        self, logits: np.ndarray, temperature: float, top_p: float | None = None
-    ) -> int:
+    def _sample(self, logits: np.ndarray, temperature: float, top_p: float | None = None) -> int:
         """Sample next token using temperature and optional top-p sampling.
 
         Args:
@@ -376,12 +374,8 @@ class LFM2AudioInference:
             )[0]  # [1, 8, 1024]
 
             # Initialize KV cache for depthformer (6 layers)
-            past_keys = np.zeros(
-                (num_layers, 1, 0, num_kv_heads, head_dim), dtype=np.float32
-            )
-            past_values = np.zeros(
-                (num_layers, 1, 0, num_kv_heads, head_dim), dtype=np.float32
-            )
+            past_keys = np.zeros((num_layers, 1, 0, num_kv_heads, head_dim), dtype=np.float32)
+            past_values = np.zeros((num_layers, 1, 0, num_kv_heads, head_dim), dtype=np.float32)
 
             out_tokens = []
             prev_token = 0
@@ -410,17 +404,27 @@ class LFM2AudioInference:
                     token = self._sample(all_logits, temperature, top_p=None)
 
                 out_tokens.append(token)
-                prev_token = min(token, 2047)
+                # Pass token directly to embedding lookup (table has 2049 entries: 0-2048)
+                # Don't clamp - if model predicts 2048, next codebook should see that embedding
+                prev_token = token
 
             codes_list.append(out_tokens)
 
         return np.array(codes_list, dtype=np.int64)  # [batch, 8]
 
-    def _is_end_of_audio(self, frame_codes: np.ndarray) -> bool:
+    def _is_end_of_audio(self, frame_codes: np.ndarray, first_codebook_only: bool = False) -> bool:
         """Check if audio frame indicates end of audio.
 
-        End of audio is signaled when any codebook outputs the end token (2048).
+        Args:
+            frame_codes: [8] array of codebook tokens
+            first_codebook_only: If True, only check first codebook (for interleaved mode,
+                                matching liquid-audio behavior). If False, check any codebook.
+
+        Returns:
+            True if end-of-audio detected
         """
+        if first_codebook_only:
+            return frame_codes[0] == self.END_OF_AUDIO_TOKEN
         return np.any(frame_codes >= self.END_OF_AUDIO_TOKEN)
 
     # === Text Generation ===
@@ -734,9 +738,7 @@ class LFM2AudioInference:
             last_hidden = hidden_states[0, -1:, :]  # [1, hidden_size]
 
             # Sample audio codes (autoregressive sampling, matches reference)
-            frame_codes = self._sample_audio_codes(
-                last_hidden, audio_temperature
-            )  # [1, 8]
+            frame_codes = self._sample_audio_codes(last_hidden, audio_temperature)  # [1, 8]
 
             # Check for end-of-audio (any codebook outputs 2048)
             if self._is_end_of_audio(frame_codes[0]):
@@ -841,25 +843,42 @@ class LFM2AudioInference:
                 last_hidden = hidden_states[0, -1:, :]
 
                 # Autoregressive sampling (matches reference)
-                frame_codes = self._sample_audio_codes(
-                    last_hidden, audio_temperature
-                )
+                frame_codes = self._sample_audio_codes(last_hidden, audio_temperature)
 
-                # Check for end of audio (token 2048 in any codebook)
-                if self._is_end_of_audio(frame_codes[0]):
+                # Check for end of audio (only first codebook, matching liquid-audio)
+                if self._is_end_of_audio(frame_codes[0], first_codebook_only=True):
                     logger.info(f"End of audio detected at frame {len(audio_codes)}")
+                    # Set all codes to 2048 and feed back (matching liquid-audio)
+                    frame_codes[0][:] = self.END_OF_AUDIO_TOKEN
                     in_audio_mode = False
+
+                    # Still need to feed back the end-of-audio embedding
+                    audio_tokens = np.array(
+                        [
+                            [
+                                cb_idx * self.codebook_vocab + self.END_OF_AUDIO_TOKEN
+                                for cb_idx in range(self.num_codebooks)
+                            ]
+                        ],
+                        dtype=np.int64,
+                    )
+                    all_embeds = self._get_audio_embeds(audio_tokens)
+                    next_embeds = all_embeds.sum(axis=1, keepdims=True)
+                    attention_mask = np.ones((batch_size, total_len + 1), dtype=np.int64)
+                    logits, hidden_states, cache = self._run_decoder(
+                        next_embeds, attention_mask, cache
+                    )
+                    total_len += 1
                     continue
 
                 audio_codes.append(frame_codes[0])
 
                 # Feed all 8 codebook tokens as a summed embedding (like PyTorch reference)
-                # Clamp codes to valid range for embedding lookup (0-2047)
-                clamped_codes = np.minimum(frame_codes[0], 2047)
+                # Token 2048 is valid in the embedding table (2049 entries per codebook)
                 audio_tokens = np.array(
                     [
                         [
-                            cb_idx * self.codebook_vocab + int(clamped_codes[cb_idx])
+                            cb_idx * self.codebook_vocab + int(frame_codes[0][cb_idx])
                             for cb_idx in range(self.num_codebooks)
                         ]
                     ],
