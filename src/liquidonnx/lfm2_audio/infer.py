@@ -120,7 +120,9 @@ class LFM2AudioInference:
         decoder_path = self.onnx_dir / (decoder_file or "decoder.onnx")
         audio_embedding_path = self.onnx_dir / (audio_embedding_file or "audio_embedding.onnx")
         audio_encoder_path = self.onnx_dir / (audio_encoder_file or "audio_encoder.onnx")
-        audio_detokenizer_path = self.onnx_dir / (audio_detokenizer_file or "audio_detokenizer.onnx")
+        audio_detokenizer_path = self.onnx_dir / (
+            audio_detokenizer_file or "audio_detokenizer.onnx"
+        )
 
         logger.info(f"Loading decoder from {decoder_path.name}...")
         self.decoder_session = load_session(decoder_path)
@@ -197,12 +199,7 @@ class LFM2AudioInference:
         if local_weights.exists():
             weights_path = str(local_weights)
         else:
-            try:
-                weights_path = hf_hub_download("LiquidAI/LFM2.5-Audio-1.5B", "model.safetensors")
-            except Exception as e:
-                logger.warning(f"Could not load model weights: {e}")
-                self.embed_tokens_weight = None
-                return
+            weights_path = hf_hub_download("LiquidAI/LFM2.5-Audio-1.5B", "model.safetensors")
 
         logger.info("Loading embed_tokens weight for text embedding...")
         weights = load_file(weights_path)
@@ -225,22 +222,18 @@ class LFM2AudioInference:
             self._vocoder_depthformer_file or "vocoder_depthformer.onnx"
         )
 
-        if not projection_path.exists() or not depthformer_path.exists():
-            logger.warning("Vocoder ONNX models not found, TTS will not be available")
-            return
+        if not projection_path.exists():
+            raise FileNotFoundError(f"Vocoder projection not found: {projection_path}")
+        if not depthformer_path.exists():
+            raise FileNotFoundError(f"Vocoder depthformer not found: {depthformer_path}")
 
-        try:
-            logger.info(f"Loading vocoder_projection from {projection_path.name}...")
-            logger.info(f"Loading vocoder_depthformer from {depthformer_path.name}...")
+        logger.info(f"Loading vocoder_projection from {projection_path.name}...")
+        logger.info(f"Loading vocoder_depthformer from {depthformer_path.name}...")
 
-            self.onnx_depthformer = {}
-            self.onnx_depthformer["depth_linear"] = load_session(projection_path)
-            self.onnx_depthformer["depthformer_unified"] = load_session(depthformer_path)
-            logger.info("ONNX vocoder ready for TTS")
-
-        except Exception as e:
-            logger.warning(f"Failed to load ONNX depthformer: {e}")
-            self.onnx_depthformer = None
+        self.onnx_depthformer = {}
+        self.onnx_depthformer["depth_linear"] = load_session(projection_path)
+        self.onnx_depthformer["depthformer_unified"] = load_session(depthformer_path)
+        logger.info("ONNX vocoder ready for TTS")
 
     def _init_cache(self, batch_size: int = 1) -> dict[str, np.ndarray]:
         """Initialize KV cache for generation."""
@@ -513,61 +506,13 @@ class LFM2AudioInference:
     def _compute_mel_features(self, audio_path: str) -> tuple[np.ndarray, np.ndarray]:
         """Compute mel spectrogram features from audio file.
 
-        Uses liquid_audio processor when available for proper preprocessing,
-        falls back to torchaudio with approximate parameters otherwise.
+        Uses pure numpy implementation for portability to NPU backends.
 
         Returns:
             mel_features: [1, time, 128] mel spectrogram
             mel_lengths: [1] length array
         """
-        import torch
-        import torchaudio
-
-        waveform, sample_rate = torchaudio.load(audio_path)
-
-        # Resample to 16kHz if needed
-        if sample_rate != 16000:
-            waveform = torchaudio.functional.resample(waveform, sample_rate, 16000)
-            sample_rate = 16000
-
-        # Convert to mono
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-
-        # Try to use liquid_audio processor for proper preprocessing
-        try:
-            from liquid_audio import LFM2AudioProcessor
-
-            processor = LFM2AudioProcessor.from_pretrained(
-                "LiquidAI/LFM2.5-Audio-1.5B",
-                device="cpu",
-            )
-            length = torch.tensor([waveform.shape[1]], dtype=torch.long)
-            mel, mel_length = processor.audio(waveform, length)
-
-            # mel shape: [1, 128, time] -> [1, time, 128]
-            mel_features = mel[0].transpose(0, 1).unsqueeze(0).numpy()
-            mel_lengths = np.array([mel_features.shape[1]], dtype=np.int64)
-            logger.info("Using liquid_audio processor for mel spectrogram")
-
-        except ImportError as e:
-            logger.warning(f"liquid_audio not available ({e}), using torchaudio fallback")
-            # Fallback to torchaudio (less accurate)
-            mel_transform = torchaudio.transforms.MelSpectrogram(
-                sample_rate=16000,
-                n_fft=512,
-                hop_length=160,
-                n_mels=128,
-                power=2.0,
-            )
-            mel_spec = mel_transform(waveform)
-            mel_spec = mel_spec.log2().clamp(min=-10)
-
-            # [1, 128, time] → [1, time, 128]
-            mel_features = mel_spec.squeeze(0).transpose(0, 1).unsqueeze(0).numpy()
-            mel_lengths = np.array([mel_features.shape[1]], dtype=np.int64)
-
-        return mel_features.astype(np.float32), mel_lengths
+        return compute_mel_spectrogram_numpy(audio_path, self.onnx_dir)
 
     def _format_asr_prompt(self) -> str:
         """Format ASR system instruction using ChatML format.
@@ -1117,6 +1062,131 @@ class LFM2AudioInference:
         return text_output, audio_codes
 
 
+# === Numpy Mel Spectrogram ===
+
+
+def compute_mel_spectrogram_numpy(
+    audio_path: str,
+    onnx_dir: pathlib.Path,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute mel spectrogram using pure numpy (no PyTorch/torchaudio).
+
+    This implementation matches liquid_audio's AudioToMelSpectrogramPreprocessor
+    for compatibility with the ONNX audio encoder.
+
+    Args:
+        audio_path: Path to audio file (WAV)
+        onnx_dir: Path to ONNX directory containing mel_config.json,
+                  mel_filterbank.npy, mel_window.npy
+
+    Returns:
+        mel_features: [1, time, 128] mel spectrogram
+        mel_lengths: [1] length array
+    """
+    import json
+
+    import scipy.io.wavfile
+    import scipy.signal
+
+    # Load mel config and precomputed filterbank
+    config_path = onnx_dir / "mel_config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Mel config not found: {config_path}")
+
+    with open(config_path) as f:
+        mel_config = json.load(f)
+
+    filterbank_path = onnx_dir / "mel_filterbank.npy"
+    if not filterbank_path.exists():
+        raise FileNotFoundError(f"Mel filterbank not found: {filterbank_path}")
+    mel_filterbank = np.load(filterbank_path)
+
+    window_path = onnx_dir / "mel_window.npy"
+    if not window_path.exists():
+        raise FileNotFoundError(f"Mel window not found: {window_path}")
+    hann_window = np.load(window_path)
+
+    # Extract config
+    target_sr = mel_config["sample_rate"]
+    n_fft = mel_config["n_fft"]
+    win_length = mel_config["win_length"]
+    hop_length = mel_config["hop_length"]
+    preemph = mel_config["preemph"]
+    log_zero_guard = mel_config["log_zero_guard"]
+
+    # === 1. Load audio ===
+    sample_rate, audio = scipy.io.wavfile.read(audio_path)
+
+    # Convert to float32 in [-1, 1]
+    if audio.dtype == np.int16:
+        audio = audio.astype(np.float32) / 32768.0
+    elif audio.dtype == np.int32:
+        audio = audio.astype(np.float32) / 2147483648.0
+    elif audio.dtype == np.float64:
+        audio = audio.astype(np.float32)
+
+    # Convert stereo to mono
+    if len(audio.shape) > 1:
+        audio = audio.mean(axis=1)
+
+    # === 2. Resample to 16kHz if needed ===
+    if sample_rate != target_sr:
+        num_samples = int(len(audio) * target_sr / sample_rate)
+        audio = scipy.signal.resample(audio, num_samples)
+
+    # === 3. Pre-emphasis filter ===
+    # y[t] = x[t] - preemph * x[t-1]
+    audio_preemph = np.concatenate([[audio[0]], audio[1:] - preemph * audio[:-1]])
+
+    # === 4. STFT (matching torch.stft with center=True) ===
+    # Pad for center=True
+    pad_amount = n_fft // 2
+    audio_padded = np.pad(audio_preemph, (pad_amount, pad_amount), mode="constant")
+
+    # Frame the signal
+    num_frames = 1 + (len(audio_padded) - n_fft) // hop_length
+    frames = np.zeros((num_frames, n_fft), dtype=np.float32)
+
+    # Center the window in the frame (matching torch.stft behavior)
+    pad_left = (n_fft - win_length) // 2
+    padded_window = np.zeros(n_fft, dtype=np.float32)
+    padded_window[pad_left : pad_left + win_length] = hann_window
+
+    for i in range(num_frames):
+        start = i * hop_length
+        frames[i] = audio_padded[start : start + n_fft] * padded_window
+
+    # FFT
+    stft_complex = np.fft.rfft(frames, axis=1).T  # [n_fft//2+1, time]
+
+    # === 5. Magnitude and power spectrum ===
+    magnitude = np.abs(stft_complex)  # [freq, time]
+    power_spec = magnitude**2
+
+    # === 6. Apply mel filterbank ===
+    # mel_filterbank: [n_mels, n_fft//2+1], power_spec: [n_fft//2+1, time]
+    mel_spec = np.dot(mel_filterbank, power_spec)  # [n_mels, time]
+
+    # === 7. Log with zero guard ===
+    mel_spec = np.log(mel_spec + log_zero_guard)
+
+    # === 8. Per-feature normalization ===
+    # Normalize each frequency bin to zero mean, unit variance
+    seq_len = mel_spec.shape[1]
+    if seq_len > 1:
+        mel_mean = mel_spec.mean(axis=1, keepdims=True)
+        mel_std = mel_spec.std(axis=1, keepdims=True) + 1e-5
+        mel_spec = (mel_spec - mel_mean) / mel_std
+
+    # === 9. Format output ===
+    # [n_mels, time] -> [1, time, n_mels]
+    mel_features = mel_spec.T[np.newaxis, :, :].astype(np.float32)
+    mel_lengths = np.array([mel_features.shape[1]], dtype=np.int64)
+
+    logger.info(f"Computed mel spectrogram: {mel_features.shape}")
+    return mel_features, mel_lengths
+
+
 def audio_codes_to_wav(
     audio_codes: list[np.ndarray],
     output_path: str,
@@ -1138,23 +1208,17 @@ def audio_codes_to_wav(
     codes_transposed = codes.T  # [8, T]
 
     if model_dir is None:
-        logger.error("model_dir required for ONNX decoding")
-        return False
+        raise ValueError("model_dir required for ONNX decoding")
 
     onnx_dir = model_dir / "onnx"
     detok_path = onnx_dir / (audio_detokenizer_file or "audio_detokenizer.onnx")
 
     if not detok_path.exists():
-        logger.error(f"{detok_path.name} not found in {onnx_dir}")
-        return False
+        raise FileNotFoundError(f"{detok_path.name} not found in {onnx_dir}")
 
-    try:
-        return _decode_audio_onnx_numpy(
-            codes_transposed, detok_path, onnx_dir, output_path, sample_rate
-        )
-    except Exception as e:
-        logger.error(f"ONNX decode failed: {e}")
-        return False
+    return _decode_audio_onnx_numpy(
+        codes_transposed, detok_path, onnx_dir, output_path, sample_rate
+    )
 
 
 class StreamingISTFT:
@@ -1366,135 +1430,6 @@ def _decode_audio_onnx_numpy(
     return True
 
 
-def _decode_audio_onnx(
-    codes: np.ndarray,
-    detok_path: pathlib.Path,
-    istft_config_path: pathlib.Path,
-    output_path: str,
-    sample_rate: int,
-) -> bool:
-    """Decode audio using ONNX detokenizer + custom ISTFT.
-
-    Legacy function - use _decode_audio_onnx_numpy instead.
-    """
-    import json
-
-    import scipy.io.wavfile
-    import scipy.signal
-
-    # Load ISTFT config
-    with open(istft_config_path) as f:
-        istft_config = json.load(f)
-
-    n_fft = istft_config.get("n_fft", 1280)
-    hop_length = istft_config.get("hop_length", 320)
-    win_length = istft_config.get("win_length", 1280)
-    n_fft_bins = n_fft // 2 + 1  # 641 for n_fft=1280
-
-    # Load window
-    onnx_dir = detok_path.parent
-    window_path = onnx_dir / "istft_window.npy"
-    if window_path.exists():
-        window = np.load(window_path)
-    else:
-        # Fallback to hann window
-        window = scipy.signal.windows.hann(n_fft, sym=False)
-
-    # Load ONNX detokenizer
-    detok_session = load_session(detok_path)
-
-    # Run detokenizer: [1, 8, T] → [1, T, 1282]
-    codes_batch = codes[np.newaxis, :, :].astype(np.int64)  # [1, 8, T]
-    stft_features = detok_session.run(["stft_features"], {"audio_codes": codes_batch})[0]
-
-    # stft_features shape: [1, T, 1282] where 1282 = n_fft_bins * 2
-    # Format is [log_magnitude | angle] (NOT real + imag!)
-    # Reference: liquid_audio/detokenizer.py lines 133-134
-    stft_features = stft_features[0]  # [T, 1282]
-
-    # Convert to complex STFT using polar form: magnitude * exp(i * angle)
-    log_magnitude = stft_features[:, :n_fft_bins]  # [T, 641]
-    angle = stft_features[:, n_fft_bins:]  # [T, 641]
-    magnitude = np.exp(log_magnitude)
-    complex_stft = magnitude * np.exp(1j * angle)  # polar to complex
-
-    # Use custom ISTFT with 'same' padding (matches liquid_audio)
-    # spec needs to be [freq, time]
-    waveform = _istft_same_padding(complex_stft.T, n_fft, hop_length, win_length, window)
-
-    # Normalize and save
-    max_val = np.abs(waveform).max()
-    if max_val > 0:
-        waveform = waveform / max_val
-
-    # Convert to int16 for WAV
-    waveform_int16 = (waveform * 32767).astype(np.int16)
-    scipy.io.wavfile.write(output_path, sample_rate, waveform_int16)
-
-    duration = len(waveform) / sample_rate
-    logger.info(f"Saved audio to {output_path} ({duration:.2f}s) [ONNX decode]")
-    return True
-
-
-def _decode_audio_pytorch(codes: np.ndarray, output_path: str, sample_rate: int) -> bool:
-    """Decode audio using PyTorch LFM2AudioDetokenizer.
-
-    Uses the native liquid_audio detokenizer which has sliding_attention layers.
-    This produces correct audio while the ONNX version (with full_attention) does not.
-    """
-    try:
-        import json
-
-        import scipy.io.wavfile
-        import torch
-        from accelerate import load_checkpoint_in_model
-        from liquid_audio import LFM2AudioDetokenizer
-        from liquid_audio.utils import get_model_dir
-        from transformers import Lfm2Config
-
-        # codes: [T, 8] → [1, 8, T]
-        codes_tensor = torch.tensor(codes.T, dtype=torch.int64).unsqueeze(0)
-        codes_tensor = torch.clamp(codes_tensor, 0, 2047)
-
-        # Load detokenizer with native config (includes sliding_attention)
-        cache_dir = get_model_dir("LiquidAI/LFM2.5-Audio-1.5B")
-        config_path = cache_dir / "audio_detokenizer" / "config.json"
-        with open(config_path) as f:
-            config_dict = json.load(f)
-
-        backbone_config = Lfm2Config(**config_dict)
-        detok = LFM2AudioDetokenizer(backbone_config)
-
-        weights_path = cache_dir / "audio_detokenizer" / "model.safetensors"
-        load_checkpoint_in_model(detok, str(weights_path))
-        detok.eval()
-
-        with torch.no_grad():
-            waveform = detok(codes_tensor)
-
-        # Convert to numpy
-        waveform_np = waveform[0].cpu().numpy()
-
-        # Normalize
-        max_val = np.abs(waveform_np).max()
-        if max_val > 0:
-            waveform_np = waveform_np / max_val
-
-        # Convert to int16 for WAV
-        waveform_int16 = (waveform_np * 32767).astype(np.int16)
-        scipy.io.wavfile.write(output_path, sample_rate, waveform_int16)
-
-        duration = len(waveform_np) / sample_rate
-        logger.info(f"Saved audio to {output_path} ({duration:.2f}s) [PyTorch decode]")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to decode audio with PyTorch: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="LFM2.5-Audio ONNX inference (all modes)",
@@ -1683,7 +1618,10 @@ def main():
 
         if args.output and audio_codes:
             if audio_codes_to_wav(
-                audio_codes, args.output, model_dir=args.model_dir, audio_detokenizer_file=files["audio_detokenizer"]
+                audio_codes,
+                args.output,
+                model_dir=args.model_dir,
+                audio_detokenizer_file=files["audio_detokenizer"],
             ):
                 print(f"Output: {args.output}")
         print("=" * 60)
@@ -1718,7 +1656,10 @@ def main():
 
         if args.output and audio_codes:
             if audio_codes_to_wav(
-                audio_codes, args.output, model_dir=args.model_dir, audio_detokenizer_file=files["audio_detokenizer"]
+                audio_codes,
+                args.output,
+                model_dir=args.model_dir,
+                audio_detokenizer_file=files["audio_detokenizer"],
             ):
                 print(f"Output: {args.output}")
         print("=" * 60)

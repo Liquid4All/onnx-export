@@ -1120,23 +1120,59 @@ def do_quantize(onnx_dir: pathlib.Path, bits: int, block_size: int, symmetric: b
 # === 7. Audio Detokenizer Export ===
 
 
-def save_istft_config(config: dict, onnx_dir: pathlib.Path):
-    """Save ISTFT configuration for NumPy-based decoding."""
-    import json
+def save_mel_config(onnx_dir: pathlib.Path):
+    """Save mel spectrogram configuration and filterbank for numpy-based preprocessing.
 
-    istft_config = {
-        "n_fft": 1280,
-        "hop_length": 320,
-        "win_length": 1280,
-        "sample_rate": 24000,
-        "center": True,
+    This enables pure numpy mel spectrogram computation without PyTorch/torchaudio,
+    making it portable to AMD NPU, Qualcomm NPU, etc.
+
+    Parameters match liquid_audio's AudioToMelSpectrogramPreprocessor config.
+    """
+    import librosa
+
+    # Mel spectrogram parameters from LFM2.5-Audio config
+    mel_config = {
+        "sample_rate": 16000,
+        "n_fft": 512,
+        "win_length": 400,  # window_size (0.025) * sample_rate
+        "hop_length": 160,  # window_stride (0.01) * sample_rate
+        "n_mels": 128,
+        "fmin": 0,
+        "fmax": 8000,  # sample_rate / 2
+        "preemph": 0.97,
+        "log_zero_guard": 5.960464477539063e-08,  # 2^-24
+        "normalize": "per_feature",
+        "mel_norm": "slaney",
     }
 
-    config_path = onnx_dir / "istft_config.json"
-    with open(config_path, "w") as f:
-        json.dump(istft_config, f, indent=2)
+    # Generate mel filterbank matrix using librosa (same as NeMo/liquid_audio)
+    mel_filterbank = librosa.filters.mel(
+        sr=mel_config["sample_rate"],
+        n_fft=mel_config["n_fft"],
+        n_mels=mel_config["n_mels"],
+        fmin=mel_config["fmin"],
+        fmax=mel_config["fmax"],
+        norm=mel_config["mel_norm"],
+    ).astype(np.float32)
 
-    logger.info(f"ISTFT config saved to {config_path}")
+    # Generate hann window
+    hann_window = np.hanning(mel_config["win_length"]).astype(np.float32)
+
+    # Save config
+    config_path = onnx_dir / "mel_config.json"
+    with open(config_path, "w") as f:
+        json.dump(mel_config, f, indent=2)
+    logger.info(f"Mel config saved to {config_path}")
+
+    # Save filterbank matrix [n_mels, n_fft//2+1] = [128, 257]
+    filterbank_path = onnx_dir / "mel_filterbank.npy"
+    np.save(filterbank_path, mel_filterbank)
+    logger.info(f"Mel filterbank saved to {filterbank_path} {mel_filterbank.shape}")
+
+    # Save hann window
+    window_path = onnx_dir / "mel_window.npy"
+    np.save(window_path, hann_window)
+    logger.info(f"Mel window saved to {window_path} {hann_window.shape}")
 
 
 class AudioDetokenizerBuilder:
@@ -2073,7 +2109,7 @@ def export_full_model(model_path: str, output_dir: pathlib.Path):
     export_depth_linear_builder(model_path, onnx_dir)
     export_depthformer_unified_builder(model_path, onnx_dir)
     export_audio_detokenizer_builder(model_path, onnx_dir)
-    save_istft_config(config, onnx_dir)
+    save_mel_config(onnx_dir)
 
     # Clean up weights after builder exports
     weights.clear()
