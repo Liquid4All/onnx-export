@@ -731,11 +731,13 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         return output, new_k, new_v
 
     def build_step_logits(self, x: str) -> str:
-        """Build step-indexed logits projection (no norm - to_logits is just linear).
+        """Build step-indexed RMSNorm + logits projection.
 
-        The PyTorch model's depth_embeddings[i].to_logits is a plain Linear layer
-        without any preceding normalization. The embedding_norm is only used
-        when embedding tokens, not before computing logits.
+        PyTorch: depth_embeddings[i].get_logits(x) = to_logits(embedding_norm(x))
+
+        The embedding_norm is RMSNorm applied before the logits projection:
+            x_normed = x * weight / sqrt(mean(x^2) + eps)
+            logits = x_normed @ to_logits.weight.T
 
         Args:
             x: Transformer output [B, 1024]
@@ -745,16 +747,32 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         """
         prefix = "/logits"
 
-        # Get step-specific logits weight: stacked_logits_weights[step_idx] → [2049, 1024]
+        # === Step 1: Get step-specific weights ===
+        # Norm weight: stacked_logits_norm_weights[step_idx] → [1024]
+        norm_weight = self.make_gather(
+            "stacked_logits_norm_weights", "step_idx", f"{prefix}/norm_w/output_0", axis=0
+        )
+        # Logits weight: stacked_logits_weights[step_idx] → [2049, 1024]
         logits_weight = self.make_gather(
             "stacked_logits_weights", "step_idx", f"{prefix}/logits_w/output_0", axis=0
         )
 
-        # Linear: [B, 1024] @ [1024, 2049] → [B, 2049]
+        # === Step 2: RMSNorm using SimplifiedLayerNormalization ===
+        # SimplifiedLayerNormalization is RMSNorm: x * weight / sqrt(mean(x^2) + eps)
+        # It takes scale as input (not attribute), so we can pass the gathered weight
+        x_normed = self.make_node(
+            "SimplifiedLayerNormalization",
+            [x, norm_weight],
+            [f"{prefix}/rms_norm/output_0"],
+            epsilon=self.norm_eps,
+        )
+
+        # === Step 3: Linear projection ===
+        # logits = x_normed @ weight.T
         logits_w_t = self.make_transpose(
             logits_weight, f"{prefix}/logits_w_t/output_0", perm=[1, 0]
         )
-        return self.make_matmul(x, logits_w_t, "logits")
+        return self.make_matmul(x_normed, logits_w_t, "logits")
 
     def load_weights(self, model_path: str):
         """Load all depthformer weights from HuggingFace model."""
@@ -778,12 +796,16 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         # === Stacked embeddings: [8, 2049, 1024] ===
         embed_list = []
         logits_list = []
+        logits_norm_list = []
         for i in range(self.num_codebooks):
             embed_list.append(self.weights[f"depth_embeddings.{i}.embedding.weight"])
             logits_list.append(self.weights[f"depth_embeddings.{i}.to_logits.weight"])
+            logits_norm_list.append(self.weights[f"depth_embeddings.{i}.embedding_norm.weight"])
 
         self.add_initializer("stacked_embed_weights", np.stack(embed_list, axis=0))
         self.add_initializer("stacked_logits_weights", np.stack(logits_list, axis=0))
+        # Stacked embedding_norm weights for RMSNorm before logits: [8, 1024]
+        self.add_initializer("stacked_logits_norm_weights", np.stack(logits_norm_list, axis=0))
 
         # === RoPE frequencies ===
         freqs_cos, freqs_sin = self.compute_rope_freqs()

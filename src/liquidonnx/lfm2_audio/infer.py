@@ -42,6 +42,11 @@ import onnxruntime as ort
 
 logger = logging.getLogger(__name__)
 
+# === Default System Prompts ===
+DEFAULT_SYSTEM_PROMPT_ASR = "Perform ASR."
+DEFAULT_SYSTEM_PROMPT_TTS = "Perform TTS. Use the UK female voice."
+DEFAULT_SYSTEM_PROMPT_INTERLEAVED = "Respond with interleaved text and audio."
+
 
 def resolve_precision_files(precision: str | None) -> dict[str, str | None]:
     """Resolve file names from precision shorthand.
@@ -514,12 +519,14 @@ class LFM2AudioInference:
         """
         return compute_mel_spectrogram_numpy(audio_path, self.onnx_dir)
 
-    def _format_asr_prompt(self) -> str:
+    def _format_asr_prompt(
+        self, system_prompt: str = DEFAULT_SYSTEM_PROMPT_ASR
+    ) -> str:
         """Format ASR system instruction using ChatML format.
 
         The audio embeddings will be inserted at the user position.
         """
-        return "<|startoftext|><|im_start|>system\nPerform ASR.<|im_end|>\n<|im_start|>user\n"
+        return f"<|startoftext|><|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n"
 
     def _format_asr_suffix(self) -> str:
         """Format the suffix after audio embeddings."""
@@ -530,12 +537,13 @@ class LFM2AudioInference:
         audio_path: str,
         max_new_tokens: int = 100,
         temperature: float = 0.7,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT_ASR,
     ) -> str:
         """Transcribe audio to text using ChatML format.
 
         The prompt structure is:
         <|startoftext|><|im_start|>system
-        Perform ASR.<|im_end|>
+        {system_prompt}<|im_end|>
         <|im_start|>user
         [AUDIO EMBEDDINGS]<|im_end|>
         <|im_start|>assistant
@@ -556,7 +564,7 @@ class LFM2AudioInference:
         # Build the prompt: prefix + audio + suffix
         # 1. Encode prefix text (system + user start)
         # Note: add_special_tokens=False since we include <|startoftext|> in the prompt
-        prefix_text = self._format_asr_prompt()
+        prefix_text = self._format_asr_prompt(system_prompt)
         prefix_ids = self.tokenizer.encode(
             prefix_text, return_tensors="np", add_special_tokens=False
         )
@@ -613,11 +621,13 @@ class LFM2AudioInference:
 
     # === TTS (Text → Audio) ===
 
-    def _format_tts_prompt(self, text: str) -> str:
+    def _format_tts_prompt(
+        self, text: str, system_prompt: str = DEFAULT_SYSTEM_PROMPT_TTS
+    ) -> str:
         """Format text with TTS system instruction using ChatML format."""
         return (
             "<|startoftext|><|im_start|>system\n"
-            "Perform TTS. Use the UK female voice.<|im_end|>\n"
+            f"{system_prompt}<|im_end|>\n"
             f"<|im_start|>user\n{text}<|im_end|>\n"
             "<|im_start|>assistant\n"
         )
@@ -626,8 +636,10 @@ class LFM2AudioInference:
         self,
         text: str,
         max_new_tokens: int = 100,
-        audio_temperature: float = 0.7,
+        audio_temperature: float = 0.8,
+        audio_top_k: int = 64,
         text_temperature: float = 0.7,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT_TTS,
     ) -> list[np.ndarray]:
         """Synthesize audio from text using depthformer.
 
@@ -639,7 +651,10 @@ class LFM2AudioInference:
             max_new_tokens: Maximum number of new tokens (text + audio frames combined),
                 matching PyTorch reference behavior.
             audio_temperature: Temperature for audio sampling (0 = greedy).
+                Default 0.8 matches liquid-audio's fixed TTS settings.
+            audio_top_k: Top-k sampling for audio (64 matches liquid-audio).
             text_temperature: Temperature for text sampling (0 = greedy).
+            system_prompt: System prompt for TTS.
 
         Returns list of audio code frames (8 codes each).
         Each frame is [8] array of codebook indices.
@@ -649,7 +664,7 @@ class LFM2AudioInference:
 
         # Format prompt with TTS system instruction
         # Note: add_special_tokens=False since we include <|startoftext|> in the prompt
-        prompt = self._format_tts_prompt(text)
+        prompt = self._format_tts_prompt(text, system_prompt)
         input_ids = self.tokenizer.encode(prompt, return_tensors="np", add_special_tokens=False)
         batch_size, seq_len = input_ids.shape
 
@@ -712,8 +727,10 @@ class LFM2AudioInference:
             # Get hidden states for the last position: [1, hidden_size]
             last_hidden = hidden_states[0, -1:, :]  # [1, hidden_size]
 
-            # Sample audio codes (autoregressive sampling, matches reference)
-            frame_codes = self._sample_audio_codes(last_hidden, audio_temperature)  # [1, 8]
+            # Sample audio codes (autoregressive sampling, matches liquid-audio)
+            frame_codes = self._sample_audio_codes(
+                last_hidden, audio_temperature, top_k=audio_top_k
+            )  # [1, 8]
 
             # Check for end-of-audio (any codebook outputs 2048)
             if self._is_end_of_audio(frame_codes[0]):
@@ -766,11 +783,13 @@ class LFM2AudioInference:
 
     # === Interleaved Mode ===
 
-    def _format_interleaved_prompt(self, text: str) -> str:
+    def _format_interleaved_prompt(
+        self, text: str, system_prompt: str = DEFAULT_SYSTEM_PROMPT_INTERLEAVED
+    ) -> str:
         """Format text with interleaved system instruction using ChatML format."""
         return (
             "<|startoftext|><|im_start|>system\n"
-            "Respond with interleaved text and audio.<|im_end|>\n"
+            f"{system_prompt}<|im_end|>\n"
             f"<|im_start|>user\n{text}<|im_end|>\n"
             "<|im_start|>assistant\n"
         )
@@ -781,13 +800,14 @@ class LFM2AudioInference:
         max_new_tokens: int = 20,
         audio_temperature: float = 0,
         text_temperature: float = 0,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT_INTERLEAVED,
     ) -> tuple[str, list[np.ndarray]]:
         """Generate interleaved text and audio from text prompt.
 
         Defaults match liquid-audio library defaults (greedy decoding).
         """
         # Note: add_special_tokens=False since we include <|startoftext|> in the prompt
-        formatted_prompt = self._format_interleaved_prompt(prompt)
+        formatted_prompt = self._format_interleaved_prompt(prompt, system_prompt)
         input_ids = self.tokenizer.encode(
             formatted_prompt, return_tensors="np", add_special_tokens=False
         )
@@ -911,6 +931,7 @@ class LFM2AudioInference:
         text_temperature: float = 1.0,
         audio_temperature: float = 1.0,
         audio_top_k: int = 4,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT_INTERLEAVED,
     ) -> tuple[str, list[np.ndarray]]:
         """Generate interleaved text+audio response from audio input.
 
@@ -925,6 +946,7 @@ class LFM2AudioInference:
             text_temperature: Sampling temperature for text (1.0 matches liquid-audio)
             audio_temperature: Sampling temperature for audio (1.0 matches liquid-audio)
             audio_top_k: Top-k sampling for audio (4 matches liquid-audio)
+            system_prompt: System prompt for interleaved mode.
 
         Returns:
             Tuple of (text_response, audio_codes)
@@ -937,10 +959,9 @@ class LFM2AudioInference:
         )
 
         # Build prompt: system + user audio + assistant
-        # System prompt matches official liquid-audio demo
         prefix_text = (
             "<|startoftext|><|im_start|>system\n"
-            "Respond with interleaved text and audio.<|im_end|>\n"
+            f"{system_prompt}<|im_end|>\n"
             "<|im_start|>user\n"
         )
         suffix_text = "<|im_end|>\n<|im_start|>assistant\n"
@@ -1515,10 +1536,33 @@ def main():
         "--audio-temperature",
         type=float,
         default=None,
-        help="Audio sampling temperature (default: 0.7 for TTS)",
+        help="Audio sampling temperature (default: 0.8 for TTS, 1.0 for interleaved)",
+    )
+    parser.add_argument(
+        "--audio-top-k",
+        type=int,
+        default=None,
+        help="Top-k sampling for audio (default: 64 for TTS, 4 for interleaved)",
+    )
+    parser.add_argument(
+        "--system",
+        type=str,
+        default=None,
+        help="System prompt (mode-specific defaults: ASR='Perform ASR.', "
+        "TTS='Perform TTS. Use the UK female voice.', "
+        "interleaved='Respond with interleaved text and audio.')",
     )
 
     args = parser.parse_args()
+
+    # Apply mode-specific system prompt defaults
+    if args.system is None:
+        if args.mode == "asr":
+            args.system = DEFAULT_SYSTEM_PROMPT_ASR
+        elif args.mode == "tts":
+            args.system = DEFAULT_SYSTEM_PROMPT_TTS
+        elif args.mode == "interleaved":
+            args.system = DEFAULT_SYSTEM_PROMPT_INTERLEAVED
 
     # Apply mode-specific temperature defaults
     if args.mode == "asr":
@@ -1531,12 +1575,22 @@ def main():
             args.temperature = 1.0
         if args.audio_temperature is None:
             args.audio_temperature = 1.0
-    else:
-        # TTS, text use temperature sampling
+        if args.audio_top_k is None:
+            args.audio_top_k = 4  # Matching liquid-audio interleaved
+    elif args.mode == "tts":
+        # TTS uses fixed sampling settings to match liquid-audio
         if args.temperature is None:
             args.temperature = 0.7
         if args.audio_temperature is None:
-            args.audio_temperature = 0.7
+            args.audio_temperature = 0.8  # Matching liquid-audio TTS
+        if args.audio_top_k is None:
+            args.audio_top_k = 64  # Matching liquid-audio TTS
+    else:
+        # Text mode
+        if args.temperature is None:
+            args.temperature = 0.7
+        if args.audio_temperature is None:
+            args.audio_temperature = 0.8
 
     # Apply mode-specific max_tokens defaults
     if args.max_tokens is None:
@@ -1593,10 +1647,12 @@ def main():
             parser.error("ASR mode requires --audio argument")
         logger.info("Mode: ASR (Speech Recognition)")
         logger.info(f"Audio: {args.audio}")
+        logger.info(f"System prompt: {args.system}")
         transcription = model.transcribe(
             args.audio,
             max_new_tokens=args.max_tokens,
             temperature=args.temperature,
+            system_prompt=args.system,
         )
         print("\n" + "=" * 60)
         print(f"Audio:         {args.audio}")
@@ -1606,11 +1662,15 @@ def main():
     elif args.mode == "tts":
         logger.info("Mode: TTS (Text-to-Speech)")
         logger.info(f"Text: {args.prompt}")
+        logger.info(f"System prompt: {args.system}")
+        logger.info(f"Audio sampling: temperature={args.audio_temperature}, top_k={args.audio_top_k}")
         audio_codes = model.synthesize(
             args.prompt,
             max_new_tokens=args.max_tokens,
             audio_temperature=args.audio_temperature,
+            audio_top_k=args.audio_top_k,
             text_temperature=args.temperature,
+            system_prompt=args.system,
         )
         print("\n" + "=" * 60)
         print(f"Input: {args.prompt}")
@@ -1628,6 +1688,7 @@ def main():
 
     elif args.mode == "interleaved":
         logger.info("Mode: Interleaved")
+        logger.info(f"System prompt: {args.system}")
         if args.audio:
             # Audio input mode (matching liquid-audio demo)
             logger.info(f"Audio: {args.audio}")
@@ -1636,6 +1697,7 @@ def main():
                 max_new_tokens=args.max_tokens,
                 text_temperature=args.temperature,
                 audio_temperature=args.audio_temperature,
+                system_prompt=args.system,
             )
             print("\n" + "=" * 60)
             print(f"Audio input: {args.audio}")
@@ -1647,6 +1709,7 @@ def main():
                 max_new_tokens=args.max_tokens,
                 audio_temperature=args.audio_temperature,
                 text_temperature=args.temperature,
+                system_prompt=args.system,
             )
             print("\n" + "=" * 60)
             print(f"Input:  {args.prompt}")
