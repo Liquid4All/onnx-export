@@ -119,7 +119,7 @@ def export_audio_encoder_builder(
 def export_embed_tokens(
     weights: dict[str, np.ndarray], config: dict, onnx_dir: pathlib.Path
 ) -> pathlib.Path:
-    """Export embed_tokens.onnx and embed_tokens.npy."""
+    """Export embed_tokens.onnx for text token embedding lookup."""
     logger.info("Exporting embed_tokens.onnx...")
 
     lfm_config = config.get("lfm", {})
@@ -158,11 +158,6 @@ def export_embed_tokens(
     output_path = onnx_dir / "embed_tokens.onnx"
     onnx.save_model(model, str(output_path))
     logger.info(f"embed_tokens saved to {output_path}")
-
-    # Also save numpy weights for PyTorch-free inference
-    numpy_path = onnx_dir / "embed_tokens.npy"
-    np.save(numpy_path, embed_weight)
-    logger.info(f"embed_tokens.npy saved to {numpy_path}")
 
     return output_path
 
@@ -424,15 +419,13 @@ def do_quantize(onnx_dir: pathlib.Path, bits: int, block_size: int, symmetric: b
 
 
 def save_mel_config(onnx_dir: pathlib.Path):
-    """Save mel spectrogram configuration and filterbank for numpy-based preprocessing.
+    """Save mel spectrogram configuration for ASR preprocessing.
 
-    This enables pure numpy mel spectrogram computation without PyTorch/torchaudio,
-    making it portable to AMD NPU, Qualcomm NPU, etc.
+    The mel filterbank and window are generated at runtime using librosa,
+    making inference compatible with transformers.js which cannot load numpy files.
 
     Parameters match liquid_audio's AudioToMelSpectrogramPreprocessor config.
     """
-    import librosa
-
     # Mel spectrogram parameters from LFM2.5-Audio config
     mel_config = {
         "sample_rate": 16000,
@@ -448,34 +441,11 @@ def save_mel_config(onnx_dir: pathlib.Path):
         "mel_norm": "slaney",
     }
 
-    # Generate mel filterbank matrix using librosa (same as NeMo/liquid_audio)
-    mel_filterbank = librosa.filters.mel(
-        sr=mel_config["sample_rate"],
-        n_fft=mel_config["n_fft"],
-        n_mels=mel_config["n_mels"],
-        fmin=mel_config["fmin"],
-        fmax=mel_config["fmax"],
-        norm=mel_config["mel_norm"],
-    ).astype(np.float32)
-
-    # Generate hann window
-    hann_window = np.hanning(mel_config["win_length"]).astype(np.float32)
-
-    # Save config
+    # Save config only - filterbank and window generated at runtime via librosa
     config_path = onnx_dir / "mel_config.json"
     with open(config_path, "w") as f:
         json.dump(mel_config, f, indent=2)
     logger.info(f"Mel config saved to {config_path}")
-
-    # Save filterbank matrix [n_mels, n_fft//2+1] = [128, 257]
-    filterbank_path = onnx_dir / "mel_filterbank.npy"
-    np.save(filterbank_path, mel_filterbank)
-    logger.info(f"Mel filterbank saved to {filterbank_path} {mel_filterbank.shape}")
-
-    # Save hann window
-    window_path = onnx_dir / "mel_window.npy"
-    np.save(window_path, hann_window)
-    logger.info(f"Mel window saved to {window_path} {hann_window.shape}")
 
 
 # === Main Export ===

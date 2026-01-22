@@ -702,10 +702,7 @@ def export_audio_detokenizer_builder(model_path: str, onnx_dir: pathlib.Path) ->
     onnx.save_model(model, str(output_path))
     logger.info(f"audio_detokenizer saved to {output_path}")
 
-    # Save ISTFT window for scipy
-    if "istft.window" in detok_weights:
-        window = detok_weights["istft.window"].astype(np.float32)
-        np.save(str(onnx_dir / "istft_window.npy"), window)
-        logger.info(f"ISTFT window saved to {onnx_dir / 'istft_window.npy'}")
+    # Note: ISTFT window is generated at runtime via np.hanning() in infer.py
+    # This makes inference compatible with transformers.js which cannot load numpy files
 
     return output_path

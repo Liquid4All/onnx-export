@@ -130,6 +130,11 @@ class LFM2AudioInference:
         logger.info(f"Loading audio_embedding from {audio_embedding_path.name}...")
         self.audio_embed_session = load_session(audio_embedding_path)
 
+        # Load embed_tokens.onnx for text embedding lookup
+        embed_tokens_path = self.onnx_dir / "embed_tokens.onnx"
+        logger.info(f"Loading embed_tokens from {embed_tokens_path.name}...")
+        self.embed_tokens_session = load_session(embed_tokens_path)
+
         if audio_encoder_path.exists():
             logger.info(f"Loading audio_encoder from {audio_encoder_path.name}...")
             self.audio_encoder_session = load_session(audio_encoder_path)
@@ -149,7 +154,6 @@ class LFM2AudioInference:
         self._load_onnx_depthformer()
 
         self._load_config()
-        self._load_embed_tokens_weight()
 
     def _load_config(self):
         """Load model config from config.json."""
@@ -172,41 +176,6 @@ class LFM2AudioInference:
         self.audio_vocab_size = 16392  # 8 codebooks * 2049
         self.num_codebooks = 8
         self.codebook_vocab = 2049
-
-    def _load_embed_tokens_weight(self):
-        """Load embed_tokens weight from model weights for text embedding lookup.
-
-        Tries to load from (in order):
-        1. Pre-exported numpy file (onnx/embed_tokens.npy) - no PyTorch needed
-        2. Local model.safetensors - requires PyTorch
-        3. HuggingFace download - requires PyTorch
-        """
-        # Option 1: Pre-exported numpy file (no PyTorch dependency)
-        numpy_path = self.model_dir / "onnx" / "embed_tokens.npy"
-        if numpy_path.exists():
-            logger.info(f"Loading embed_tokens from {numpy_path.name}...")
-            self.embed_tokens_weight = np.load(numpy_path)
-            logger.info(f"embed_tokens weight loaded: {self.embed_tokens_weight.shape}")
-            return
-
-        # Option 2/3: Load from safetensors (requires PyTorch for bfloat16)
-        logger.info("embed_tokens.npy not found, falling back to safetensors (requires PyTorch)...")
-
-        from huggingface_hub import hf_hub_download
-        from safetensors.torch import load_file
-
-        local_weights = self.model_dir / "model.safetensors"
-        if local_weights.exists():
-            weights_path = str(local_weights)
-        else:
-            weights_path = hf_hub_download("LiquidAI/LFM2.5-Audio-1.5B", "model.safetensors")
-
-        logger.info("Loading embed_tokens weight for text embedding...")
-        weights = load_file(weights_path)
-        embed_tensor = weights["lfm.embed_tokens.weight"].float()
-        self.embed_tokens_weight = embed_tensor.numpy()
-
-        logger.info(f"embed_tokens weight loaded: {self.embed_tokens_weight.shape}")
 
     def _load_onnx_depthformer(self):
         """Load ONNX vocoder model for autoregressive audio codebook prediction.
@@ -305,9 +274,11 @@ class LFM2AudioInference:
             return int(np.random.choice(len(probs), p=probs))
 
     def _get_text_embeds(self, input_ids: np.ndarray) -> np.ndarray:
-        """Get text embeddings via numpy lookup."""
+        """Get text embeddings via ONNX embed_tokens model."""
         # input_ids: [batch, seq_len] -> embeds: [batch, seq_len, hidden]
-        return self.embed_tokens_weight[input_ids]
+        return self.embed_tokens_session.run(
+            ["inputs_embeds"], {"input_ids": input_ids.astype(np.int64)}
+        )[0]
 
     def _get_audio_embeds(self, audio_codes: np.ndarray) -> np.ndarray:
         """Get audio code embeddings."""
@@ -1096,8 +1067,8 @@ def compute_mel_spectrogram_numpy(
 
     Args:
         audio_path: Path to audio file (WAV)
-        onnx_dir: Path to ONNX directory containing mel_config.json,
-                  mel_filterbank.npy, mel_window.npy
+        onnx_dir: Path to ONNX directory containing mel_config.json
+                  (mel filterbank and window are generated at runtime via librosa)
 
     Returns:
         mel_features: [1, time, 128] mel spectrogram
@@ -1105,25 +1076,28 @@ def compute_mel_spectrogram_numpy(
     """
     import json
 
+    import librosa
     import scipy.io.wavfile
 
-    # Load mel config and precomputed filterbank
+    # Mel spectrogram config (matching liquid_audio's AudioToMelSpectrogramPreprocessor)
+    # Load from config file if available, otherwise use defaults
     config_path = onnx_dir / "mel_config.json"
-    if not config_path.exists():
-        raise FileNotFoundError(f"Mel config not found: {config_path}")
-
-    with open(config_path) as f:
-        mel_config = json.load(f)
-
-    filterbank_path = onnx_dir / "mel_filterbank.npy"
-    if not filterbank_path.exists():
-        raise FileNotFoundError(f"Mel filterbank not found: {filterbank_path}")
-    mel_filterbank = np.load(filterbank_path)
-
-    window_path = onnx_dir / "mel_window.npy"
-    if not window_path.exists():
-        raise FileNotFoundError(f"Mel window not found: {window_path}")
-    hann_window = np.load(window_path)
+    if config_path.exists():
+        with open(config_path) as f:
+            mel_config = json.load(f)
+    else:
+        mel_config = {
+            "sample_rate": 16000,
+            "n_fft": 512,
+            "win_length": 400,
+            "hop_length": 160,
+            "n_mels": 128,
+            "fmin": 0,
+            "fmax": 8000,
+            "preemph": 0.97,
+            "log_zero_guard": 5.960464477539063e-08,
+            "mel_norm": "slaney",
+        }
 
     # Extract config
     target_sr = mel_config["sample_rate"]
@@ -1132,6 +1106,19 @@ def compute_mel_spectrogram_numpy(
     hop_length = mel_config["hop_length"]
     preemph = mel_config["preemph"]
     log_zero_guard = mel_config["log_zero_guard"]
+
+    # Generate mel filterbank at runtime using librosa (same as NeMo/liquid_audio)
+    mel_filterbank = librosa.filters.mel(
+        sr=target_sr,
+        n_fft=n_fft,
+        n_mels=mel_config.get("n_mels", 128),
+        fmin=mel_config.get("fmin", 0),
+        fmax=mel_config.get("fmax", target_sr // 2),
+        norm=mel_config.get("mel_norm", "slaney"),
+    ).astype(np.float32)
+
+    # Generate Hann window at runtime
+    hann_window = np.hanning(win_length).astype(np.float32)
 
     # === 1. Load audio ===
     sample_rate, audio = scipy.io.wavfile.read(audio_path)
@@ -1424,12 +1411,8 @@ def _decode_audio_onnx_numpy(
     win_length = 1280
     n_fft_bins = n_fft // 2 + 1
 
-    # Load window (or use default hann)
-    window_path = onnx_dir / "istft_window.npy"
-    if window_path.exists():
-        window = np.load(window_path)
-    else:
-        window = np.hanning(n_fft).astype(np.float32)
+    # Generate Hann window at runtime (~18µs, faster than loading from disk)
+    window = np.hanning(n_fft).astype(np.float32)
 
     # Load ONNX detokenizer
     detok_session = load_session(detok_path)
