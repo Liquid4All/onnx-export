@@ -16,6 +16,7 @@ autoregressive generation, which produces higher quality audio than parallel ONN
 
 Usage:
     uv run lfm2-audio-export LiquidAI/LFM2.5-Audio-1.5B
+    uv run lfm2-audio-export LiquidAI/LFM2.5-Audio-1.5B --precision fp16
     uv run lfm2-audio-export LiquidAI/LFM2.5-Audio-1.5B --precision q4
 """
 
@@ -40,7 +41,7 @@ from liquidonnx.lfm2_audio.builder.depthformer_builder import (
 from liquidonnx.lfm2_audio.builder.detokenizer_builder import (
     export_audio_detokenizer_builder,
 )
-from liquidonnx.quantize import get_model_size, quantize_model
+from liquidonnx.quantize import get_model_size, get_total_model_size_mb, quantize_model
 
 logger = logging.getLogger(__name__)
 
@@ -368,6 +369,77 @@ def do_quantize(onnx_dir: pathlib.Path, bits: int, block_size: int, symmetric: b
         logger.info(f"  {model_path}: {orig_mb:.1f} -> {quant_mb:.1f} MB")
 
 
+# === FP16 Conversion ===
+
+
+def convert_to_fp16(
+    input_path: pathlib.Path,
+    output_path: pathlib.Path,
+    keep_io_types: bool = True,
+):
+    """Convert ONNX model from FP32 to FP16.
+
+    Args:
+        input_path: Path to FP32 ONNX model
+        output_path: Path for FP16 output model
+        keep_io_types: Keep inputs/outputs as FP32 for compatibility
+    """
+    from onnx.external_data_helper import load_external_data_for_model
+    from onnxruntime.transformers.float16 import convert_float_to_float16
+
+    logger.info(f"Converting {input_path.name} to FP16...")
+
+    model = onnx.load(str(input_path), load_external_data=False)
+    load_external_data_for_model(model, str(input_path.parent))
+
+    model_fp16 = convert_float_to_float16(
+        model,
+        keep_io_types=keep_io_types,
+        force_fp16_initializers=True,
+        disable_shape_infer=True,
+    )
+
+    output_data_path = output_path.parent / f"{output_path.stem}.onnx_data"
+    if output_data_path.exists():
+        output_data_path.unlink()
+
+    onnx.save_model(
+        model_fp16,
+        str(output_path),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=f"{output_path.stem}.onnx_data",
+    )
+
+    orig_mb = get_total_model_size_mb(input_path)
+    fp16_mb = get_total_model_size_mb(output_path)
+    ratio = orig_mb / fp16_mb if fp16_mb > 0 else 0
+    logger.info(f"  {input_path.name}: {orig_mb:.1f} -> {fp16_mb:.1f} MB ({ratio:.1f}x)")
+
+
+def do_fp16(onnx_dir: pathlib.Path):
+    """Convert all models to FP16."""
+    models = [
+        "decoder",
+        "audio_encoder",
+        "audio_embedding",
+        "audio_detokenizer",
+        "vocoder_depthformer",
+    ]
+
+    for model_name in models:
+        fp32_path = onnx_dir / f"{model_name}.onnx"
+        fp16_path = onnx_dir / f"{model_name}_fp16.onnx"
+
+        if not fp32_path.exists():
+            continue
+        if fp16_path.exists():
+            logger.info(f"  {model_name}_fp16.onnx already exists, skipping")
+            continue
+
+        convert_to_fp16(fp32_path, fp16_path)
+
+
 # === 7. Audio Detokenizer Export ===
 
 
@@ -489,7 +561,7 @@ def main():
         "--precision",
         nargs="*",
         metavar="PRECISION",
-        help="Output precisions: q4, q8 (default if no args)",
+        help="Output precisions: fp16, q4, q8 (default if no args: fp16, q4, q8)",
     )
     parser.add_argument(
         "--block-size",
@@ -520,17 +592,30 @@ def main():
 
     export_full_model(args.model, output_dir)
 
-    # Quantize
+    # Parse precision options
+    do_fp16_conversion = False
     quant_bits = []
     if args.precision is not None:
         if len(args.precision) == 0:
+            # Default: export all precisions
+            do_fp16_conversion = True
             quant_bits = [4, 8]
         else:
             for p in args.precision:
                 p = p.lower()
-                if p in ("q4", "q8"):
+                if p == "fp16":
+                    do_fp16_conversion = True
+                elif p in ("q4", "q8"):
                     quant_bits.append(int(p[1]))
 
+    # FP16 conversion
+    if do_fp16_conversion:
+        logger.info("=" * 60)
+        logger.info("Converting to FP16")
+        logger.info("=" * 60)
+        do_fp16(onnx_dir)
+
+    # Quantization
     for bits in quant_bits:
         logger.info("=" * 60)
         logger.info(f"Quantizing to Q{bits}")
