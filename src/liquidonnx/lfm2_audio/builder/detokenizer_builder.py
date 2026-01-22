@@ -11,10 +11,12 @@ import numpy as np
 import onnx
 from onnx import TensorProto, helper
 
+from liquidonnx.builder_base import ONNXBuilderBase
+
 logger = logging.getLogger(__name__)
 
 
-class AudioDetokenizerBuilder:
+class AudioDetokenizerBuilder(ONNXBuilderBase):
     """Builder for audio detokenizer ONNX export.
 
     The audio detokenizer has the following architecture:
@@ -27,6 +29,7 @@ class AudioDetokenizerBuilder:
     """
 
     def __init__(self, config: dict, weights: dict[str, np.ndarray]):
+        super().__init__()
         self.config = config
         self.weights = weights
 
@@ -59,36 +62,23 @@ class AudioDetokenizerBuilder:
         self.num_layers = len(self.layer_types)
         self.sliding_window = config.get("sliding_window", 30)
 
-        # Graph components
-        self.nodes: list = []
-        self.initializers: list = []
-        self._initializer_names: set[str] = set()
+    def build_inputs(self):
+        """Build graph inputs."""
+        self.inputs.append(
+            helper.make_tensor_value_info(
+                "audio_codes", TensorProto.INT64, ["batch_size", self.num_codebooks, "time"]
+            )
+        )
 
-    def add_initializer(self, name: str, tensor: np.ndarray, dtype=None):
-        """Add weight tensor as initializer."""
-        if name in self._initializer_names:
-            return
-        self._initializer_names.add(name)
-        if dtype is None:
-            if tensor.dtype not in [np.int32, np.int64]:
-                tensor = tensor.astype(np.float32)
-        else:
-            tensor = tensor.astype(dtype)
-        self.initializers.append(onnx.numpy_helper.from_array(tensor, name))
-
-    def get_constant(self, value, dtype=np.int64) -> str:
-        """Add constant and return its name."""
-        arr = np.asarray(value, dtype=dtype)
-        name = f"/constants/{str(value).replace(' ', '')}"
-        self.add_initializer(name, arr)
-        return name
-
-    def make_node(self, op_type: str, inputs: list, outputs: list, **attrs):
-        """Create an ONNX node."""
-        name = outputs[0].replace("/output_0", "")
-        node = helper.make_node(op_type, inputs, outputs, name=name, **attrs)
-        self.nodes.append(node)
-        return outputs[0]
+    def build_outputs(self):
+        """Build graph outputs."""
+        self.outputs.append(
+            helper.make_tensor_value_info(
+                "stft_features",
+                TensorProto.FLOAT,
+                ["batch_size", "time", self.output_size],
+            )
+        )
 
     def build_embedding(self) -> str:
         """Build fused codebook embedding.
@@ -121,73 +111,54 @@ class AudioDetokenizerBuilder:
         self.make_node("Shape", ["/emb/transposed/output_0"], ["/emb/shape/output_0"])
 
         # Flatten for gather: [B, T, 8] -> [B*T*8]
-        self.add_initializer("flatten_shape", np.array([-1], dtype=np.int64))
-        self.make_node(
-            "Reshape", ["/emb/transposed/output_0", "flatten_shape"], ["/emb/flat/output_0"]
-        )
+        self.make_reshape("/emb/transposed/output_0", self.get_constant([-1]), "/emb/flat/output_0")
 
         # Gather embeddings: [B*T*8, 512]
-        self.make_node("Gather", ["emb.weight", "/emb/flat/output_0"], ["/emb/gathered/output_0"])
+        self.make_gather("emb.weight", "/emb/flat/output_0", "/emb/gathered/output_0")
 
         # Get batch and time dimensions
-        self.add_initializer("zero_idx", np.array([0], dtype=np.int64))
-        self.add_initializer("one_idx", np.array([1], dtype=np.int64))
-        self.add_initializer("two_idx", np.array([2], dtype=np.int64))
-        self.add_initializer("eight_const", np.array([8], dtype=np.int64))
-        self.add_initializer("hidden_const", np.array([self.hidden_size], dtype=np.int64))
-
-        self.make_node(
-            "Slice", ["/emb/shape/output_0", "zero_idx", "one_idx"], ["/emb/batch_dim/output_0"]
+        batch_dim = self.make_slice(
+            "/emb/shape/output_0",
+            self.get_constant([0]),
+            self.get_constant([1]),
+            self.get_constant([0]),
+            "/emb/batch_dim/output_0",
         )
-        self.make_node(
-            "Slice", ["/emb/shape/output_0", "one_idx", "two_idx"], ["/emb/time_dim/output_0"]
+        time_dim = self.make_slice(
+            "/emb/shape/output_0",
+            self.get_constant([1]),
+            self.get_constant([2]),
+            self.get_constant([0]),
+            "/emb/time_dim/output_0",
         )
 
         # Build reshape shape [B, T, 8, 512]
-        self.make_node(
-            "Concat",
-            ["/emb/batch_dim/output_0", "/emb/time_dim/output_0", "eight_const", "hidden_const"],
-            ["/emb/reshape_shape/output_0"],
+        reshape_shape = self.make_concat(
+            [batch_dim, time_dim, self.get_constant([8]), self.get_constant([self.hidden_size])],
+            "/emb/reshape_shape/output_0",
             axis=0,
         )
 
         # Reshape: [B*T*8, 512] -> [B, T, 8, 512]
-        self.make_node(
-            "Reshape",
-            ["/emb/gathered/output_0", "/emb/reshape_shape/output_0"],
-            ["/emb/reshaped/output_0"],
-        )
+        self.make_reshape("/emb/gathered/output_0", reshape_shape, "/emb/reshaped/output_0")
 
         # Mean across codebooks: [B, T, 8, 512] -> [B, T, 512]
-        # Reference: liquid_audio/detokenizer.py FusedEmbedding.forward() uses .mean(1)
-        self.add_initializer("mean_axis", np.array([2], dtype=np.int64))
         self.make_node(
             "ReduceMean",
-            ["/emb/reshaped/output_0", "mean_axis"],
+            ["/emb/reshaped/output_0", self.get_constant([2])],
             ["/emb/summed/output_0"],
             keepdims=0,
         )
 
-        # NOTE: embedding_norm is applied AFTER all layers in Lfm2Model, not here!
-        # See build_output_linear() for the final norm.
         emb_output = "/emb/summed/output_0"
 
         # === 6x Upsampling ===
-        # Reference: liquid_audio/detokenizer.py LFM2AudioDetokenizer.forward()
-        # upsample_size = 6 * x.shape[1]
-        # x = nn.functional.interpolate(x.mT, upsample_size, mode="nearest-exact").mT
-        #
-        # Flow: [B, T, H] → transpose → [B, H, T] → resize 6x → [B, H, 6T] → transpose → [B, 6T, H]
-
-        # Transpose [B, T, H] → [B, H, T]
-        self.make_node("Transpose", [emb_output], ["/emb/pre_upsample_t/output_0"], perm=[0, 2, 1])
+        # [B, T, H] → transpose → [B, H, T] → resize 6x → [B, H, 6T] → transpose → [B, 6T, H]
+        self.make_transpose(emb_output, "/emb/pre_upsample_t/output_0", perm=[0, 2, 1])
 
         # Resize: [B, H, T] → [B, H, 6*T]
-        # Using Resize with scales [1, 1, 6] for nearest-neighbor interpolation
         self.add_initializer("upsample_scales", np.array([1.0, 1.0, 6.0], dtype=np.float32))
-        # Empty roi and sizes as per ONNX spec (use scales instead)
         self.add_initializer("empty_roi", np.array([], dtype=np.float32))
-        self.add_initializer("empty_sizes", np.array([], dtype=np.int64))
 
         node = helper.make_node(
             "Resize",
@@ -201,28 +172,12 @@ class AudioDetokenizerBuilder:
         self.nodes.append(node)
 
         # Transpose back: [B, H, 6T] → [B, 6T, H]
-        return self.make_node(
-            "Transpose",
-            ["/emb/upsampled/output_0"],
-            ["/emb/post_upsample_t/output_0"],
-            perm=[0, 2, 1],
+        return self.make_transpose(
+            "/emb/upsampled/output_0", "/emb/post_upsample_t/output_0", perm=[0, 2, 1]
         )
-
-    def build_layernorm(self, input_name: str, weight_name: str, path: str) -> str:
-        """Build SimplifiedLayerNormalization (no bias)."""
-        output_name = f"{path}/output_0"
-        node = helper.make_node(
-            "SimplifiedLayerNormalization",
-            [input_name, weight_name],
-            [output_name],
-            name=path,
-            epsilon=self.norm_eps,
-        )
-        self.nodes.append(node)
-        return output_name
 
     def build_mlp(self, layer_idx: int, hidden_state: str) -> str:
-        """Build MLP block (SwiGLU activation)."""
+        """Build MLP block (SwiGLU activation) using shared helper."""
         prefix = f"/lfm/layers.{layer_idx}"
         weight_prefix = f"lfm.layers.{layer_idx}"
 
@@ -233,53 +188,36 @@ class AudioDetokenizerBuilder:
             f"{weight_prefix}.ffn_norm.weight",
             self.weights[f"{weight_prefix}.ffn_norm.weight"].astype(np.float32),
         )
-        normed = self.build_layernorm(
-            hidden_state, f"{weight_prefix}.ffn_norm.weight", f"{prefix}/ffn_norm"
+        normed = self.make_layernorm(
+            hidden_state,
+            f"{weight_prefix}.ffn_norm.weight",
+            None,
+            f"{prefix}/ffn_norm",
+            epsilon=self.norm_eps,
         )
 
-        # Gate projection: [B, T, H] -> [B, T, intermediate]
-        gate_w = self.weights[f"{weight_prefix}.feed_forward.w1.weight"].astype(np.float32).T
-        self.add_initializer(f"{weight_prefix}.gate.weight", gate_w)
-        gate = self.make_node(
-            "MatMul",
-            [normed, f"{weight_prefix}.gate.weight"],
-            [f"{prefix}/mlp/gate/output_0"],
+        # Prepare weights (transposed for MatMul)
+        w1_name = f"{weight_prefix}.w1.weight"
+        w2_name = f"{weight_prefix}.w2.weight"
+        w3_name = f"{weight_prefix}.w3.weight"
+
+        self.add_initializer(
+            w1_name, self.weights[f"{weight_prefix}.feed_forward.w1.weight"].astype(np.float32).T
+        )
+        self.add_initializer(
+            w2_name, self.weights[f"{weight_prefix}.feed_forward.w2.weight"].astype(np.float32).T
+        )
+        self.add_initializer(
+            w3_name, self.weights[f"{weight_prefix}.feed_forward.w3.weight"].astype(np.float32).T
         )
 
-        # Up projection
-        up_w = self.weights[f"{weight_prefix}.feed_forward.w3.weight"].astype(np.float32).T
-        self.add_initializer(f"{weight_prefix}.up.weight", up_w)
-        up = self.make_node(
-            "MatMul",
-            [normed, f"{weight_prefix}.up.weight"],
-            [f"{prefix}/mlp/up/output_0"],
+        # Use shared SwiGLU helper
+        return self.build_swiglu_ffn(
+            normed, w1_name, w2_name, w3_name, f"{prefix}/mlp", residual=residual
         )
-
-        # SiLU on gate: gate * sigmoid(gate)
-        gate_sig = self.make_node("Sigmoid", [gate], [f"{prefix}/mlp/sigmoid/output_0"])
-        gate_silu = self.make_node("Mul", [gate, gate_sig], [f"{prefix}/mlp/silu/output_0"])
-
-        # gate * up
-        gated = self.make_node("Mul", [gate_silu, up], [f"{prefix}/mlp/gated/output_0"])
-
-        # Down projection
-        down_w = self.weights[f"{weight_prefix}.feed_forward.w2.weight"].astype(np.float32).T
-        self.add_initializer(f"{weight_prefix}.down.weight", down_w)
-        down = self.make_node(
-            "MatMul",
-            [gated, f"{weight_prefix}.down.weight"],
-            [f"{prefix}/mlp/down/output_0"],
-        )
-
-        # Residual
-        return self.make_node("Add", [residual, down], [f"{prefix}/mlp/residual/output_0"])
 
     def build_conv_layer(self, layer_idx: int, hidden_state: str) -> str:
-        """Build a conv layer (short convolution with gating).
-
-        Note: For the detokenizer, we don't use caching - we just apply the convolution
-        to the full sequence with padding.
-        """
+        """Build a conv layer (short convolution with gating)."""
         prefix = f"/lfm/layers.{layer_idx}"
         weight_prefix = f"lfm.layers.{layer_idx}"
         H = self.hidden_size
@@ -292,29 +230,30 @@ class AudioDetokenizerBuilder:
             f"{weight_prefix}.operator_norm.weight",
             self.weights[f"{weight_prefix}.operator_norm.weight"].astype(np.float32),
         )
-        normed = self.build_layernorm(
-            hidden_state, f"{weight_prefix}.operator_norm.weight", f"{prefix}/operator_norm"
+        normed = self.make_layernorm(
+            hidden_state,
+            f"{weight_prefix}.operator_norm.weight",
+            None,
+            f"{prefix}/operator_norm",
+            epsilon=self.norm_eps,
         )
 
         # In projection: [B, T, H] -> [B, T, 3H]
         in_proj_w = self.weights[f"{weight_prefix}.conv.in_proj.weight"].astype(np.float32).T
         self.add_initializer(f"{weight_prefix}.in_proj.weight", in_proj_w)
-        in_proj = self.make_node(
-            "MatMul",
-            [normed, f"{weight_prefix}.in_proj.weight"],
-            [f"{prefix}/conv/in_proj/output_0"],
+        in_proj = self.make_matmul(
+            normed, f"{weight_prefix}.in_proj.weight", f"{prefix}/conv/in_proj/output_0"
         )
 
         # Transpose: [B, T, 3H] -> [B, 3H, T]
-        in_proj_t = self.make_node(
-            "Transpose", [in_proj], [f"{prefix}/conv/transpose1/output_0"], perm=[0, 2, 1]
+        in_proj_t = self.make_transpose(
+            in_proj, f"{prefix}/conv/transpose1/output_0", perm=[0, 2, 1]
         )
 
         # Split into B, C, x (each [B, H, T])
-        self.add_initializer("split_sizes", np.array([H, H, H], dtype=np.int64))
         node = helper.make_node(
             "Split",
-            [in_proj_t, "split_sizes"],
+            [in_proj_t, self.get_constant([H, H, H])],
             [
                 f"{prefix}/conv/B/output_0",
                 f"{prefix}/conv/C/output_0",
@@ -326,14 +265,11 @@ class AudioDetokenizerBuilder:
         self.nodes.append(node)
 
         # Bx = B * x (input gating, no sigmoid)
-        Bx = self.make_node(
-            "Mul",
-            [f"{prefix}/conv/B/output_0", f"{prefix}/conv/x/output_0"],
-            [f"{prefix}/conv/Bx/output_0"],
+        Bx = self.make_mul(
+            f"{prefix}/conv/B/output_0", f"{prefix}/conv/x/output_0", f"{prefix}/conv/Bx/output_0"
         )
 
         # Pad Bx for causal convolution: [B, H, T] -> [B, H, L-1 + T]
-        # Pad format: [x1_begin, x2_begin, x3_begin, x1_end, x2_end, x3_end]
         self.add_initializer("conv_pads", np.array([0, 0, L - 1, 0, 0, 0], dtype=np.int64))
         Bx_padded = self.make_node(
             "Pad", [Bx, "conv_pads"], [f"{prefix}/conv/padded/output_0"], mode="constant"
@@ -351,30 +287,20 @@ class AudioDetokenizerBuilder:
         )
 
         # Output gating: y = C * conv_out
-        y = self.make_node(
-            "Mul",
-            [f"{prefix}/conv/C/output_0", conv_out],
-            [f"{prefix}/conv/y/output_0"],
-        )
+        y = self.make_mul(f"{prefix}/conv/C/output_0", conv_out, f"{prefix}/conv/y/output_0")
 
         # Transpose: [B, H, T] -> [B, T, H]
-        y_t = self.make_node(
-            "Transpose", [y], [f"{prefix}/conv/transpose2/output_0"], perm=[0, 2, 1]
-        )
+        y_t = self.make_transpose(y, f"{prefix}/conv/transpose2/output_0", perm=[0, 2, 1])
 
         # Out projection
         out_proj_w = self.weights[f"{weight_prefix}.conv.out_proj.weight"].astype(np.float32).T
         self.add_initializer(f"{weight_prefix}.out_proj.weight", out_proj_w)
-        out_proj = self.make_node(
-            "MatMul",
-            [y_t, f"{weight_prefix}.out_proj.weight"],
-            [f"{prefix}/conv/out_proj/output_0"],
+        out_proj = self.make_matmul(
+            y_t, f"{weight_prefix}.out_proj.weight", f"{prefix}/conv/out_proj/output_0"
         )
 
         # Residual
-        hidden_state = self.make_node(
-            "Add", [residual, out_proj], [f"{prefix}/conv/residual/output_0"]
-        )
+        hidden_state = self.make_add(residual, out_proj, f"{prefix}/conv/residual/output_0")
 
         # MLP
         return self.build_mlp(layer_idx, hidden_state)
@@ -392,74 +318,57 @@ class AudioDetokenizerBuilder:
         hd = self.head_dim
         rope_theta = self.config.get("rope_theta", 1000000.0)
 
-        # Precompute inverse frequencies: theta^(-2i/d) for i in [0, hd//2)
-        # Shape: [hd//2]
-        inv_freq = 1.0 / (rope_theta ** (np.arange(0, hd, 2, dtype=np.float32) / hd))
+        # Precompute inverse frequencies
+        inv_freq = self.compute_rope_inv_freq(hd, rope_theta)
         self.add_initializer(f"{prefix}/rope_inv_freq", inv_freq)
 
         # Get sequence length from Q shape [B, T, nh, hd]
         self.make_node("Shape", [q_4d], [f"{prefix}/q_shape/output_0"])
-        seq_len = self.make_node(
-            "Gather",
-            [f"{prefix}/q_shape/output_0", self.get_constant(1)],
-            [f"{prefix}/seq_len/output_0"],
+        seq_len = self.make_gather(
+            f"{prefix}/q_shape/output_0", self.get_constant(1), f"{prefix}/seq_len/output_0"
         )
 
         # Create position indices: [0, 1, ..., T-1]
+        self.add_initializer("range_start", np.array(0, dtype=np.int64))
+        self.add_initializer("range_step", np.array(1, dtype=np.int64))
         positions = self.make_node(
-            "Range",
-            ["range_start", seq_len, "range_step"],
-            [f"{prefix}/positions/output_0"],
+            "Range", ["range_start", seq_len, "range_step"], [f"{prefix}/positions/output_0"]
         )
 
         # Cast positions to float and reshape to [T, 1]
         positions_f = self.make_node(
             "Cast", [positions], [f"{prefix}/positions_f/output_0"], to=TensorProto.FLOAT
         )
-        self.add_initializer(f"{prefix}/pos_shape", np.array([-1, 1], dtype=np.int64))
-        positions_r = self.make_node(
-            "Reshape", [positions_f, f"{prefix}/pos_shape"], [f"{prefix}/positions_r/output_0"]
+        positions_r = self.make_reshape(
+            positions_f, self.get_constant([-1, 1]), f"{prefix}/positions_r/output_0"
         )
 
         # Compute position * inv_freq: [T, 1] * [hd//2] -> [T, hd//2]
-        freqs = self.make_node(
-            "Mul", [positions_r, f"{prefix}/rope_inv_freq"], [f"{prefix}/freqs/output_0"]
-        )
+        freqs = self.make_mul(positions_r, f"{prefix}/rope_inv_freq", f"{prefix}/freqs/output_0")
 
         # Compute cos and sin: [T, hd//2]
         cos_half = self.make_node("Cos", [freqs], [f"{prefix}/cos_half/output_0"])
         sin_half = self.make_node("Sin", [freqs], [f"{prefix}/sin_half/output_0"])
 
         # Concatenate to get [T, hd]: [c0, c1, ..., c15, c0, c1, ..., c15]
-        # (PyTorch uses concat, not interleave)
-        cos_hd = self.make_node(
-            "Concat", [cos_half, cos_half], [f"{prefix}/cos_hd/output_0"], axis=-1
-        )
-        sin_hd = self.make_node(
-            "Concat", [sin_half, sin_half], [f"{prefix}/sin_hd/output_0"], axis=-1
-        )
+        cos_hd = self.make_concat([cos_half, cos_half], f"{prefix}/cos_hd/output_0", axis=-1)
+        sin_hd = self.make_concat([sin_half, sin_half], f"{prefix}/sin_hd/output_0", axis=-1)
 
         # Reshape for broadcast: [T, hd] -> [1, T, 1, hd] for [B, T, nh, hd]
-        self.add_initializer(f"{prefix}/broadcast_shape", np.array([1, -1, 1, hd], dtype=np.int64))
-        cos_bc = self.make_node(
-            "Reshape", [cos_hd, f"{prefix}/broadcast_shape"], [f"{prefix}/cos_bc/output_0"]
+        cos_bc = self.make_reshape(
+            cos_hd, self.get_constant([1, -1, 1, hd]), f"{prefix}/cos_bc/output_0"
         )
-        sin_bc = self.make_node(
-            "Reshape", [sin_hd, f"{prefix}/broadcast_shape"], [f"{prefix}/sin_bc/output_0"]
+        sin_bc = self.make_reshape(
+            sin_hd, self.get_constant([1, -1, 1, hd]), f"{prefix}/sin_bc/output_0"
         )
 
         # === rotate_half for Q ===
-        # PyTorch: split first/second half, return [-second, first]
-        # Split: [B, T, nh, hd] -> gather first hd//2, gather last hd//2
         half_hd = hd // 2
-
-        # Using Split op: [B, T, nh, hd] -> [B, T, nh, hd//2], [B, T, nh, hd//2]
-        self.add_initializer(f"{prefix}/split_sizes", np.array([half_hd, half_hd], dtype=np.int64))
         q_first = f"{prefix}/q_first/output_0"
         q_second = f"{prefix}/q_second/output_0"
         node = helper.make_node(
             "Split",
-            [q_4d, f"{prefix}/split_sizes"],
+            [q_4d, self.get_constant([half_hd, half_hd])],
             [q_first, q_second],
             name=f"{prefix}/q_split",
             axis=-1,
@@ -468,21 +377,21 @@ class AudioDetokenizerBuilder:
 
         # rotate_half: [-second, first]
         q_second_neg = self.make_node("Neg", [q_second], [f"{prefix}/q_second_neg/output_0"])
-        q_rot_half = self.make_node(
-            "Concat", [q_second_neg, q_first], [f"{prefix}/q_rot_half/output_0"], axis=-1
+        q_rot_half = self.make_concat(
+            [q_second_neg, q_first], f"{prefix}/q_rot_half/output_0", axis=-1
         )
 
         # Apply: q_rot = q * cos + rotate_half(q) * sin
-        q_cos = self.make_node("Mul", [q_4d, cos_bc], [f"{prefix}/q_cos/output_0"])
-        q_sin = self.make_node("Mul", [q_rot_half, sin_bc], [f"{prefix}/q_sin/output_0"])
-        q_rope = self.make_node("Add", [q_cos, q_sin], [f"{prefix}/q_rope/output_0"])
+        q_cos = self.make_mul(q_4d, cos_bc, f"{prefix}/q_cos/output_0")
+        q_sin = self.make_mul(q_rot_half, sin_bc, f"{prefix}/q_sin/output_0")
+        q_rope = self.make_add(q_cos, q_sin, f"{prefix}/q_rope/output_0")
 
         # === rotate_half for K ===
         k_first = f"{prefix}/k_first/output_0"
         k_second = f"{prefix}/k_second/output_0"
         node = helper.make_node(
             "Split",
-            [k_4d, f"{prefix}/split_sizes"],
+            [k_4d, self.get_constant([half_hd, half_hd])],
             [k_first, k_second],
             name=f"{prefix}/k_split",
             axis=-1,
@@ -490,26 +399,18 @@ class AudioDetokenizerBuilder:
         self.nodes.append(node)
 
         k_second_neg = self.make_node("Neg", [k_second], [f"{prefix}/k_second_neg/output_0"])
-        k_rot_half = self.make_node(
-            "Concat", [k_second_neg, k_first], [f"{prefix}/k_rot_half/output_0"], axis=-1
+        k_rot_half = self.make_concat(
+            [k_second_neg, k_first], f"{prefix}/k_rot_half/output_0", axis=-1
         )
 
-        k_cos = self.make_node("Mul", [k_4d, cos_bc], [f"{prefix}/k_cos/output_0"])
-        k_sin = self.make_node("Mul", [k_rot_half, sin_bc], [f"{prefix}/k_sin/output_0"])
-        k_rope = self.make_node("Add", [k_cos, k_sin], [f"{prefix}/k_rope/output_0"])
+        k_cos = self.make_mul(k_4d, cos_bc, f"{prefix}/k_cos/output_0")
+        k_sin = self.make_mul(k_rot_half, sin_bc, f"{prefix}/k_sin/output_0")
+        k_rope = self.make_add(k_cos, k_sin, f"{prefix}/k_rope/output_0")
 
         return q_rope, k_rope
 
     def build_attention_layer(self, layer_idx: int, hidden_state: str) -> str:
-        """Build a sliding attention layer with causal sliding window mask and RoPE.
-
-        For the detokenizer, we use standard attention (no KV cache) with a causal
-        sliding window mask. Position i can attend to positions j where:
-        - j <= i (causal constraint)
-        - j > i - sliding_window (sliding window constraint)
-
-        This matches the PyTorch reference implementation in liquid_audio/detokenizer.py.
-        """
+        """Build a sliding attention layer with causal sliding window mask and RoPE."""
         prefix = f"/lfm/layers.{layer_idx}"
         weight_prefix = f"lfm.layers.{layer_idx}"
         H = self.hidden_size
@@ -524,8 +425,12 @@ class AudioDetokenizerBuilder:
             f"{weight_prefix}.operator_norm.weight",
             self.weights[f"{weight_prefix}.operator_norm.weight"].astype(np.float32),
         )
-        normed = self.build_layernorm(
-            hidden_state, f"{weight_prefix}.operator_norm.weight", f"{prefix}/operator_norm"
+        normed = self.make_layernorm(
+            hidden_state,
+            f"{weight_prefix}.operator_norm.weight",
+            None,
+            f"{prefix}/operator_norm",
+            epsilon=self.norm_eps,
         )
 
         # Q/K/V projections
@@ -537,142 +442,85 @@ class AudioDetokenizerBuilder:
         self.add_initializer(f"{weight_prefix}.k.weight", k_w)
         self.add_initializer(f"{weight_prefix}.v.weight", v_w)
 
-        q = self.make_node(
-            "MatMul", [normed, f"{weight_prefix}.q.weight"], [f"{prefix}/attn/q/output_0"]
-        )
-        k = self.make_node(
-            "MatMul", [normed, f"{weight_prefix}.k.weight"], [f"{prefix}/attn/k/output_0"]
-        )
-        v = self.make_node(
-            "MatMul", [normed, f"{weight_prefix}.v.weight"], [f"{prefix}/attn/v/output_0"]
-        )
+        q = self.make_matmul(normed, f"{weight_prefix}.q.weight", f"{prefix}/attn/q/output_0")
+        k = self.make_matmul(normed, f"{weight_prefix}.k.weight", f"{prefix}/attn/k/output_0")
+        v = self.make_matmul(normed, f"{weight_prefix}.v.weight", f"{prefix}/attn/v/output_0")
 
         # Q/K LayerNorm (per-head)
+        # Note: Cannot use make_per_head_layernorm here because it flattens to [-1, hd]
+        # which loses batch dimension info needed for output shape [0, -1, nh, hd].
         q_ln_w = self.weights[f"{weight_prefix}.self_attn.q_layernorm.weight"].astype(np.float32)
         k_ln_w = self.weights[f"{weight_prefix}.self_attn.k_layernorm.weight"].astype(np.float32)
         self.add_initializer(f"{weight_prefix}.q_ln.weight", q_ln_w)
         self.add_initializer(f"{weight_prefix}.k_ln.weight", k_ln_w)
 
         # Reshape Q for per-head norm: [B, T, H] -> [B, T*nh, hd]
-        self.add_initializer("reshape_for_norm", np.array([0, -1, hd], dtype=np.int64))
-        self.add_initializer("reshape_q_back", np.array([0, -1, H], dtype=np.int64))
-        self.add_initializer("reshape_k_back", np.array([0, -1, nkv * hd], dtype=np.int64))
-
-        q_reshaped = self.make_node(
-            "Reshape", [q, "reshape_for_norm"], [f"{prefix}/attn/q_reshape1/output_0"]
+        q_reshaped = self.make_reshape(
+            q, self.get_constant([0, -1, hd]), f"{prefix}/attn/q_reshape1/output_0"
         )
-        q_normed = self.build_layernorm(
-            q_reshaped, f"{weight_prefix}.q_ln.weight", f"{prefix}/attn/q_norm"
+        q_normed = self.make_layernorm(
+            q_reshaped,
+            f"{weight_prefix}.q_ln.weight",
+            None,
+            f"{prefix}/attn/q_norm",
+            epsilon=self.norm_eps,
         )
-        q_3d = self.make_node(
-            "Reshape", [q_normed, "reshape_q_back"], [f"{prefix}/attn/q_reshape2/output_0"]
-        )
-
-        k_reshaped = self.make_node(
-            "Reshape", [k, "reshape_for_norm"], [f"{prefix}/attn/k_reshape1/output_0"]
-        )
-        k_normed = self.build_layernorm(
-            k_reshaped, f"{weight_prefix}.k_ln.weight", f"{prefix}/attn/k_norm"
-        )
-        k_3d = self.make_node(
-            "Reshape", [k_normed, "reshape_k_back"], [f"{prefix}/attn/k_reshape2/output_0"]
+        q_4d = self.make_reshape(
+            q_normed, self.get_constant([0, -1, nh, hd]), f"{prefix}/attn/q_4d/output_0"
         )
 
-        # Reshape for attention: [B, T, H] -> [B, nh, T, hd]
-        self.add_initializer("reshape_q_heads", np.array([0, -1, nh, hd], dtype=np.int64))
-        self.add_initializer("reshape_k_heads", np.array([0, -1, nkv, hd], dtype=np.int64))
-        self.add_initializer("reshape_v_heads", np.array([0, -1, nkv, hd], dtype=np.int64))
-
-        q_4d = self.make_node(
-            "Reshape", [q_3d, "reshape_q_heads"], [f"{prefix}/attn/q_4d/output_0"]
+        k_reshaped = self.make_reshape(
+            k, self.get_constant([0, -1, hd]), f"{prefix}/attn/k_reshape1/output_0"
         )
-        k_4d = self.make_node(
-            "Reshape", [k_3d, "reshape_k_heads"], [f"{prefix}/attn/k_4d/output_0"]
+        k_normed = self.make_layernorm(
+            k_reshaped,
+            f"{weight_prefix}.k_ln.weight",
+            None,
+            f"{prefix}/attn/k_norm",
+            epsilon=self.norm_eps,
+        )
+        k_4d = self.make_reshape(
+            k_normed, self.get_constant([0, -1, nkv, hd]), f"{prefix}/attn/k_4d/output_0"
         )
 
         # Apply RoPE to Q and K (before transpose)
-        # Input: [B, T, nh, hd], Output: [B, T, nh, hd]
         q_rope, k_rope = self.build_rope(q_4d, k_4d, f"{prefix}/rope")
 
         # Transpose: [B, T, nh, hd] -> [B, nh, T, hd]
-        q_4d_t = self.make_node(
-            "Transpose", [q_rope], [f"{prefix}/attn/q_4d_t/output_0"], perm=[0, 2, 1, 3]
-        )
-        k_4d_t = self.make_node(
-            "Transpose", [k_rope], [f"{prefix}/attn/k_4d_t/output_0"], perm=[0, 2, 1, 3]
-        )
+        q_4d_t = self.make_transpose(q_rope, f"{prefix}/attn/q_4d_t/output_0", perm=[0, 2, 1, 3])
+        k_4d_t = self.make_transpose(k_rope, f"{prefix}/attn/k_4d_t/output_0", perm=[0, 2, 1, 3])
 
-        v_4d = self.make_node("Reshape", [v, "reshape_v_heads"], [f"{prefix}/attn/v_4d/output_0"])
-        v_4d_t = self.make_node(
-            "Transpose", [v_4d], [f"{prefix}/attn/v_4d_t/output_0"], perm=[0, 2, 1, 3]
+        v_4d = self.make_reshape(
+            v, self.get_constant([0, -1, nkv, hd]), f"{prefix}/attn/v_4d/output_0"
         )
+        v_4d_t = self.make_transpose(v_4d, f"{prefix}/attn/v_4d_t/output_0", perm=[0, 2, 1, 3])
 
-        # Scaled dot product attention (SDPA)
-        # For simplicity, use the SDPA op if available, otherwise manual implementation
-        # Note: ONNX opset 21 doesn't have SDPA, but we can use com.microsoft.Attention
-        # or implement manually
+        # Scaled dot product attention
         scale = 1.0 / np.sqrt(hd)
-        self.add_initializer("attn_scale", np.array([scale], dtype=np.float32))
 
-        # K transpose: [B, nkv, T, hd] -> [B, nkv, hd, T]
-        k_t = self.make_node(
-            "Transpose", [k_4d_t], [f"{prefix}/attn/k_t/output_0"], perm=[0, 1, 3, 2]
-        )
+        # GQA: expand KV heads to match Q heads
+        k_gqa, v_gqa = self.expand_kv_for_gqa(k_4d_t, v_4d_t, nh, nkv, hd, f"{prefix}/attn")
 
-        # Repeat KV heads to match Q heads if needed (GQA)
-        if nkv != nh:
-            repeat_factor = nh // nkv
-            # Expand K: [B, nkv, hd, T] -> [B, nkv, 1, hd, T] -> [B, nkv, repeat, hd, T]
-            self.add_initializer("unsq_axis", np.array([2], dtype=np.int64))
-            k_t_exp = self.make_node(
-                "Unsqueeze", [k_t, "unsq_axis"], [f"{prefix}/attn/k_t_exp/output_0"]
-            )
-            repeat_shape = np.array([1, 1, repeat_factor, 1, 1], dtype=np.int64)
-            self.add_initializer("repeat_shape", repeat_shape)
-            k_t_rep = self.make_node(
-                "Tile", [k_t_exp, "repeat_shape"], [f"{prefix}/attn/k_t_rep/output_0"]
-            )
-            self.add_initializer("reshape_k_gqa", np.array([0, nh, hd, -1], dtype=np.int64))
-            k_t = self.make_node(
-                "Reshape", [k_t_rep, "reshape_k_gqa"], [f"{prefix}/attn/k_gqa/output_0"]
-            )
-
-            # Expand V similarly
-            v_exp = self.make_node(
-                "Unsqueeze", [v_4d_t, "unsq_axis"], [f"{prefix}/attn/v_exp/output_0"]
-            )
-            v_rep = self.make_node(
-                "Tile", [v_exp, "repeat_shape"], [f"{prefix}/attn/v_rep/output_0"]
-            )
-            self.add_initializer("reshape_v_gqa", np.array([0, nh, -1, hd], dtype=np.int64))
-            v_4d_t = self.make_node(
-                "Reshape", [v_rep, "reshape_v_gqa"], [f"{prefix}/attn/v_gqa/output_0"]
-            )
+        # K transpose for Q @ K^T: [B, nh, T, hd] -> [B, nh, hd, T]
+        k_gqa_t = self.make_transpose(k_gqa, f"{prefix}/attn/k_gqa_t/output_0", perm=[0, 1, 3, 2])
 
         # Attention scores: Q @ K^T [B, nh, T, T]
-        scores = self.make_node("MatMul", [q_4d_t, k_t], [f"{prefix}/attn/scores/output_0"])
-        scores_scaled = self.make_node(
-            "Mul", [scores, "attn_scale"], [f"{prefix}/attn/scores_scaled/output_0"]
+        scores = self.make_matmul(q_4d_t, k_gqa_t, f"{prefix}/attn/scores/output_0")
+        scores_scaled = self.make_mul(
+            scores,
+            self.get_constant(scale, dtype=np.float32),
+            f"{prefix}/attn/scores_scaled/output_0",
         )
 
         # === Causal Sliding Window Mask ===
-        # PyTorch reference (liquid_audio/detokenizer.py):
-        #   idx = torch.arange(x.shape[1])
-        #   d_idx = idx - idx[:, None]
-        #   mask = (d_idx <= 0) & (d_idx > -sliding_window_size)
-        # Position i can attend to positions j where: j <= i AND j > i - sliding_window
-
-        # Get sequence length T from scores shape [B, nh, T, T]
         self.make_node("Shape", [scores], [f"{prefix}/attn/scores_shape/output_0"])
-        seq_len = self.make_node(
-            "Gather",
-            [f"{prefix}/attn/scores_shape/output_0", self.get_constant(2)],
-            [f"{prefix}/attn/seq_len/output_0"],
+        seq_len = self.make_gather(
+            f"{prefix}/attn/scores_shape/output_0",
+            self.get_constant(2),
+            f"{prefix}/attn/seq_len/output_0",
         )
 
         # Create position indices: [0, 1, 2, ..., T-1]
-        self.add_initializer("range_start", np.array(0, dtype=np.int64))
-        self.add_initializer("range_step", np.array(1, dtype=np.int64))
         indices = self.make_node(
             "Range",
             ["range_start", seq_len, "range_step"],
@@ -680,65 +528,40 @@ class AudioDetokenizerBuilder:
         )
 
         # Create row indices [T, 1] and col indices [1, T]
-        row_idx = self.make_node(
-            "Unsqueeze",
-            [indices, self.get_constant([1])],
-            [f"{prefix}/attn/row_idx/output_0"],
+        row_idx = self.make_unsqueeze(
+            indices, self.get_constant([1]), f"{prefix}/attn/row_idx/output_0"
         )
-        col_idx = self.make_node(
-            "Unsqueeze",
-            [indices, self.get_constant([0])],
-            [f"{prefix}/attn/col_idx/output_0"],
+        col_idx = self.make_unsqueeze(
+            indices, self.get_constant([0]), f"{prefix}/attn/col_idx/output_0"
         )
 
         # Distance matrix: d_idx = col_idx - row_idx [T, T]
-        # PyTorch: d_idx = idx - idx[:, None] where d_idx[row, col] = col - row
-        # For causal mask: position row can attend to position col if col <= row
-        # i.e., d_idx <= 0 means col - row <= 0 means col <= row (causal)
         d_idx = self.make_node("Sub", [col_idx, row_idx], [f"{prefix}/attn/d_idx/output_0"])
 
-        # Mask conditions:
-        # cond1: d_idx <= 0 (causal: can only attend to current and past)
-        # cond2: d_idx > -sliding_window (sliding window constraint)
+        # Mask conditions
         cond1 = self.make_node(
-            "LessOrEqual",
-            [d_idx, self.get_constant(0)],
-            [f"{prefix}/attn/cond1/output_0"],
+            "LessOrEqual", [d_idx, self.get_constant(0)], [f"{prefix}/attn/cond1/output_0"]
         )
-
         sw_neg = -self.sliding_window
         cond2 = self.make_node(
-            "Greater",
-            [d_idx, self.get_constant(sw_neg)],
-            [f"{prefix}/attn/cond2/output_0"],
+            "Greater", [d_idx, self.get_constant(sw_neg)], [f"{prefix}/attn/cond2/output_0"]
         )
 
-        # Combined mask: cond1 AND cond2 -> valid positions
+        # Combined mask
         valid_mask = self.make_node("And", [cond1, cond2], [f"{prefix}/attn/valid_mask/output_0"])
-
-        # Convert bool mask to float: True -> 0.0, False -> -inf
-        # invalid_mask = NOT valid_mask
         invalid_mask = self.make_node("Not", [valid_mask], [f"{prefix}/attn/invalid_mask/output_0"])
-        # Cast to float
         invalid_mask_f = self.make_node(
-            "Cast",
-            [invalid_mask],
-            [f"{prefix}/attn/invalid_mask_f/output_0"],
-            to=TensorProto.FLOAT,
+            "Cast", [invalid_mask], [f"{prefix}/attn/invalid_mask_f/output_0"], to=TensorProto.FLOAT
         )
-        # Multiply by -inf (use large negative value for numerical stability)
-        self.add_initializer("neg_inf", np.array(-1e9, dtype=np.float32))
-        mask_bias = self.make_node(
-            "Mul",
-            [invalid_mask_f, "neg_inf"],
-            [f"{prefix}/attn/mask_bias/output_0"],
+        mask_bias = self.make_mul(
+            invalid_mask_f,
+            self.get_constant(-1e9, dtype=np.float32),
+            f"{prefix}/attn/mask_bias/output_0",
         )
 
-        # Add mask bias to scores: [B, nh, T, T] + [T, T] (broadcast)
-        scores_masked = self.make_node(
-            "Add",
-            [scores_scaled, mask_bias],
-            [f"{prefix}/attn/scores_masked/output_0"],
+        # Add mask bias to scores
+        scores_masked = self.make_add(
+            scores_scaled, mask_bias, f"{prefix}/attn/scores_masked/output_0"
         )
 
         # Softmax on masked scores
@@ -747,44 +570,43 @@ class AudioDetokenizerBuilder:
         )
 
         # Attention output: [B, nh, T, hd]
-        attn_out = self.make_node(
-            "MatMul", [attn_weights, v_4d_t], [f"{prefix}/attn/attn_out/output_0"]
-        )
+        attn_out = self.make_matmul(attn_weights, v_gqa, f"{prefix}/attn/attn_out/output_0")
 
         # Reshape back: [B, nh, T, hd] -> [B, T, H]
-        attn_out_t = self.make_node(
-            "Transpose", [attn_out], [f"{prefix}/attn/attn_out_t/output_0"], perm=[0, 2, 1, 3]
+        attn_out_t = self.make_transpose(
+            attn_out, f"{prefix}/attn/attn_out_t/output_0", perm=[0, 2, 1, 3]
         )
-        self.add_initializer("reshape_out", np.array([0, -1, H], dtype=np.int64))
-        attn_out_3d = self.make_node(
-            "Reshape", [attn_out_t, "reshape_out"], [f"{prefix}/attn/attn_out_3d/output_0"]
+        attn_out_3d = self.make_reshape(
+            attn_out_t, self.get_constant([0, -1, H]), f"{prefix}/attn/attn_out_3d/output_0"
         )
 
         # Output projection
         o_w = self.weights[f"{weight_prefix}.self_attn.out_proj.weight"].astype(np.float32).T
         self.add_initializer(f"{weight_prefix}.o.weight", o_w)
-        o_proj = self.make_node(
-            "MatMul", [attn_out_3d, f"{weight_prefix}.o.weight"], [f"{prefix}/attn/o_proj/output_0"]
+        o_proj = self.make_matmul(
+            attn_out_3d, f"{weight_prefix}.o.weight", f"{prefix}/attn/o_proj/output_0"
         )
 
         # Residual
-        hidden_state = self.make_node(
-            "Add", [residual, o_proj], [f"{prefix}/attn/residual/output_0"]
-        )
+        hidden_state = self.make_add(residual, o_proj, f"{prefix}/attn/residual/output_0")
 
         # MLP
         return self.build_mlp(layer_idx, hidden_state)
 
     def build_output_linear(self, hidden_state: str) -> str:
         """Build final linear projection to STFT space."""
-        # Final embedding norm (applied after all layers in Lfm2Model)
+        # Final embedding norm
         if "lfm.embedding_norm.weight" in self.weights:
             self.add_initializer(
                 "lfm.embedding_norm.weight",
                 self.weights["lfm.embedding_norm.weight"].astype(np.float32),
             )
-            hidden_state = self.build_layernorm(
-                hidden_state, "lfm.embedding_norm.weight", "/lfm/final_norm"
+            hidden_state = self.make_layernorm(
+                hidden_state,
+                "lfm.embedding_norm.weight",
+                None,
+                "/lfm/final_norm",
+                epsilon=self.norm_eps,
             )
 
         # Linear projection: [B, T, H] -> [B, T, output_size]
@@ -793,35 +615,19 @@ class AudioDetokenizerBuilder:
         self.add_initializer("lin.weight", lin_w)
         self.add_initializer("lin.bias", lin_b)
 
-        lin_out = self.make_node("MatMul", [hidden_state, "lin.weight"], ["/lin/matmul/output_0"])
-        return self.make_node("Add", [lin_out, "lin.bias"], ["stft_features"])
+        lin_out = self.make_matmul(hidden_state, "lin.weight", "/lin/matmul/output_0")
+        return self.make_add(lin_out, "lin.bias", "stft_features")
 
     def build(self) -> onnx.ModelProto:
         """Build the complete audio detokenizer ONNX model."""
-        # Input
-        inputs = [
-            helper.make_tensor_value_info(
-                "audio_codes", TensorProto.INT64, ["batch_size", self.num_codebooks, "time"]
-            )
-        ]
-
-        # Output
-        outputs = [
-            helper.make_tensor_value_info(
-                "stft_features",
-                TensorProto.FLOAT,
-                ["batch_size", "time", self.output_size],
-            )
-        ]
+        # Build inputs/outputs
+        self.build_inputs()
+        self.build_outputs()
 
         # Build embedding
         hidden_state = self.build_embedding()
 
         # Build LFM layers
-        # NOTE: liquid_audio converts "sliding_attention" -> "full_attention" in config,
-        # then loads self_attn.* weights from checkpoint. We do the same:
-        # - conv layers (0, 1, 3, 5, 7) use build_conv_layer
-        # - sliding_attention layers (2, 4, 6) use build_attention_layer with sliding window mask
         for layer_idx in range(self.num_layers):
             layer_type = self.layer_types[layer_idx]
             if layer_type == "sliding_attention":
@@ -836,17 +642,8 @@ class AudioDetokenizerBuilder:
         # Build output linear
         self.build_output_linear(hidden_state)
 
-        # Create graph
-        graph = helper.make_graph(
-            self.nodes, "audio_detokenizer", inputs, outputs, self.initializers
-        )
-        model = helper.make_model(
-            graph,
-            opset_imports=[helper.make_opsetid("", 21)],
-            ir_version=10,
-        )
-        model.producer_name = "liquidonnx"
-        return model
+        # Use inherited build_graph method
+        return self.build_graph("audio_detokenizer", ms_domain=False)
 
 
 def export_audio_detokenizer_builder(model_path: str, onnx_dir: pathlib.Path) -> pathlib.Path:
@@ -859,11 +656,6 @@ def export_audio_detokenizer_builder(model_path: str, onnx_dir: pathlib.Path) ->
     4. ISTFT: [B, T, 1282] -> waveform (done in numpy/scipy)
 
     This exports steps 1-3 to ONNX. Step 4 is done in numpy.
-
-    NOTE: The checkpoint has self_attn.* weights for layers 2, 4, 6.
-    liquid_audio converts "sliding_attention" -> "full_attention" in config,
-    then loads self_attn.* weights from checkpoint. We load directly from
-    checkpoint to get the attention weights.
     """
     logger.info("Exporting audio_detokenizer.onnx (full LFM builder version)...")
 
@@ -884,7 +676,7 @@ def export_audio_detokenizer_builder(model_path: str, onnx_dir: pathlib.Path) ->
 
     logger.info(f"Audio detokenizer config: {detok_config}")
 
-    # Load weights directly from checkpoint (has self_attn.* for layers 2, 4, 6)
+    # Load weights directly from checkpoint
     weights_path = cache_dir / "audio_detokenizer" / "model.safetensors"
     checkpoint_weights = load_file(str(weights_path))
 

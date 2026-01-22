@@ -184,6 +184,10 @@ class ONNXBuilderBase:
         """Create Add node: output = a + b."""
         return self.make_node("Add", [a, b], [output_name])
 
+    def make_sub(self, a: str, b: str, output_name: str) -> str:
+        """Create Sub node: output = a - b."""
+        return self.make_node("Sub", [a, b], [output_name])
+
     def make_mul(self, a: str, b: str, output_name: str) -> str:
         """Create Mul node: output = a * b."""
         return self.make_node("Mul", [a, b], [output_name])
@@ -333,6 +337,151 @@ class ONNXBuilderBase:
             return self.make_add(matmul_out, bias_name, f"{output_prefix}/out")
 
         return matmul_out
+
+    def build_swiglu_ffn(
+        self,
+        input_name: str,
+        w1_name: str,
+        w2_name: str,
+        w3_name: str,
+        prefix: str,
+        residual: str | None = None,
+    ) -> str:
+        """Build SwiGLU feed-forward network.
+
+        Architecture: w1 → w3 → silu(w1) * w3 → w2 [→ + residual]
+
+        Args:
+            input_name: Input tensor (already normalized)
+            w1_name: Gate projection weight name (already transposed for MatMul)
+            w2_name: Down projection weight name (already transposed for MatMul)
+            w3_name: Up projection weight name (already transposed for MatMul)
+            prefix: Path prefix for node names
+            residual: Optional residual tensor to add at the end
+
+        Returns:
+            Output tensor name
+        """
+        # w1 (gate) and w3 (up) projections
+        w1_out = self.make_matmul(input_name, w1_name, f"{prefix}/w1/output_0")
+        w3_out = self.make_matmul(input_name, w3_name, f"{prefix}/w3/output_0")
+
+        # SiLU(w1) * w3
+        silu_out = self.make_silu(w1_out, f"{prefix}/silu")
+        gate_out = self.make_mul(silu_out, w3_out, f"{prefix}/gate/output_0")
+
+        # w2 (down) projection
+        w2_out = self.make_matmul(gate_out, w2_name, f"{prefix}/w2/output_0")
+
+        # Optional residual
+        if residual is not None:
+            return self.make_add(w2_out, residual, f"{prefix}/residual/output_0")
+        return w2_out
+
+    def compute_rope_inv_freq(self, dim: int, theta: float = 10000.0) -> np.ndarray:
+        """Compute RoPE inverse frequencies.
+
+        Args:
+            dim: Head dimension
+            theta: RoPE base frequency (default 10000.0)
+
+        Returns:
+            Inverse frequencies array [dim//2] for RoPE computation
+        """
+        return 1.0 / (theta ** (np.arange(0, dim, 2, dtype=np.float32) / dim))
+
+    def expand_kv_for_gqa(
+        self,
+        k: str,
+        v: str,
+        num_q_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        prefix: str,
+    ) -> tuple[str, str]:
+        """Expand KV heads for grouped query attention.
+
+        Expands KV tensors from [B, H_kv, T, D] to [B, H_q, T, D] by repeating
+        each KV head (num_q_heads // num_kv_heads) times.
+
+        Args:
+            k: Key tensor name [B, num_kv_heads, T, head_dim]
+            v: Value tensor name [B, num_kv_heads, T, head_dim]
+            num_q_heads: Number of query heads
+            num_kv_heads: Number of KV heads
+            head_dim: Head dimension
+            prefix: Path prefix for node names
+
+        Returns:
+            (expanded_k, expanded_v) tensor names, both [B, num_q_heads, T, head_dim]
+        """
+        if num_q_heads == num_kv_heads:
+            return k, v
+
+        num_groups = num_q_heads // num_kv_heads
+
+        # Expand K: [B, H_kv, T, D] → [B, H_kv, 1, T, D] → [B, H_kv, G, T, D] → [B, H_q, T, D]
+        k_exp = self.make_unsqueeze(k, self.get_constant([2]), f"{prefix}/k_exp/output_0")
+        k_expanded = self.make_node(
+            "Expand",
+            [k_exp, self.get_constant([1, 1, num_groups, 1, 1])],
+            [f"{prefix}/k_expanded/output_0"],
+        )
+        k_gqa = self.make_reshape(
+            k_expanded,
+            self.get_constant([0, num_q_heads, -1, head_dim]),
+            f"{prefix}/k_gqa/output_0",
+        )
+
+        # Expand V: same pattern
+        v_exp = self.make_unsqueeze(v, self.get_constant([2]), f"{prefix}/v_exp/output_0")
+        v_expanded = self.make_node(
+            "Expand",
+            [v_exp, self.get_constant([1, 1, num_groups, 1, 1])],
+            [f"{prefix}/v_expanded/output_0"],
+        )
+        v_gqa = self.make_reshape(
+            v_expanded,
+            self.get_constant([0, num_q_heads, -1, head_dim]),
+            f"{prefix}/v_gqa/output_0",
+        )
+
+        return k_gqa, v_gqa
+
+    def make_per_head_layernorm(
+        self,
+        tensor: str,
+        weight_name: str,
+        head_dim: int,
+        output_shape: list[int],
+        prefix: str,
+        epsilon: float = 1e-5,
+    ) -> str:
+        """Apply LayerNorm per-head by flattening, normalizing, and reshaping.
+
+        Used for Q/K per-head normalization in attention layers.
+
+        Args:
+            tensor: Input tensor name (any shape with last dim = head_dim)
+            weight_name: LayerNorm weight initializer name
+            head_dim: Head dimension (last dim size)
+            output_shape: Shape to reshape back to after normalization
+            prefix: Path prefix for node names
+            epsilon: LayerNorm epsilon
+
+        Returns:
+            Normalized tensor reshaped to output_shape
+        """
+        # Flatten to [-1, head_dim]
+        flat = self.make_reshape(
+            tensor, self.get_constant([-1, head_dim]), f"{prefix}/flat/output_0"
+        )
+
+        # Apply SimplifiedLayerNormalization (RMSNorm)
+        normed = self.make_layernorm(flat, weight_name, None, prefix, epsilon=epsilon)
+
+        # Reshape back to output_shape
+        return self.make_reshape(normed, self.get_constant(output_shape), f"{prefix}/output_0")
 
     def make_slice_last_n(self, input_name: str, n_elements: str, path: str, axis: int = 2) -> str:
         """Slice last N elements along axis (dynamic N).

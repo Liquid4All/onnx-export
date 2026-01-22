@@ -35,8 +35,7 @@ from liquidonnx.lfm2.builder import LFM2Builder, LFM2Config
 from liquidonnx.lfm2_audio.builder.config import ConformerConfig
 from liquidonnx.lfm2_audio.builder.conformer_builder import ConformerEncoderBuilder
 from liquidonnx.lfm2_audio.builder.depthformer_builder import (
-    export_depth_linear_builder,
-    export_depthformer_unified_builder,
+    export_vocoder_depthformer,
 )
 from liquidonnx.lfm2_audio.builder.detokenizer_builder import (
     export_audio_detokenizer_builder,
@@ -395,7 +394,6 @@ def do_quantize(onnx_dir: pathlib.Path, bits: int, block_size: int, symmetric: b
         ("audio_encoder", False),
         ("audio_embedding", False),
         ("audio_detokenizer", False),
-        ("vocoder_projection", False),
         ("vocoder_depthformer", False),
     ]
 
@@ -492,8 +490,7 @@ def export_full_model(model_path: str, output_dir: pathlib.Path):
     - audio_encoder.onnx: Conformer encoder for ASR
     - audio_embedding.onnx: Audio code embeddings for TTS
     - audio_detokenizer.onnx: Neural vocoder for TTS
-    - vocoder_projection.onnx: Projects hidden states to depthformer space
-    - vocoder_depthformer.onnx: Autoregressive audio codebook prediction
+    - vocoder_depthformer.onnx: Autoregressive audio codebook prediction (includes depth_linear)
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     onnx_dir = output_dir / "onnx"
@@ -508,8 +505,7 @@ def export_full_model(model_path: str, output_dir: pathlib.Path):
     export_audio_embedding(weights, config, onnx_dir)
     export_decoder(weights, config, onnx_dir)
     export_audio_encoder_builder(model_path, config, onnx_dir)
-    export_depth_linear_builder(model_path, onnx_dir)
-    export_depthformer_unified_builder(model_path, onnx_dir)
+    export_vocoder_depthformer(model_path, onnx_dir)
     export_audio_detokenizer_builder(model_path, onnx_dir)
     save_mel_config(onnx_dir)
 

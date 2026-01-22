@@ -385,11 +385,6 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         )
         return self.make_reshape(sliced, final_shape, f"{prefix}/output_0")
 
-    def make_gather(self, input_name: str, indices, output_name: str, axis: int = 0) -> str:
-        """Helper to gather single element from tensor."""
-        self.make_node("Gather", [input_name, indices], [output_name], axis=axis)
-        return output_name
-
     def build_self_attention(self, hidden_state: str, layer_idx: int, pos_emb_name: str) -> str:
         """Build self-attention module with relative position encoding.
 
@@ -505,10 +500,7 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         # matrix_bd_shifted is [B, H, T, 2T-1], need [B, H, T, T]
         self.make_node("Shape", [matrix_ac], [f"{prefix}/ac_shape/output_0"])
         ac_last_dim = self.make_gather(
-            f"{prefix}/ac_shape/output_0",
-            self.get_constant(3),
-            f"{prefix}/ac_last/output_0",
-            axis=0,
+            f"{prefix}/ac_shape/output_0", self.get_constant(3), f"{prefix}/ac_last/output_0"
         )
         # Slice: [0:T] on last dimension
         bd_starts = self.get_constant([0, 0, 0, 0])
@@ -683,21 +675,50 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         )
 
     def build_length_output(self) -> str:
-        """Compute output lengths after subsampling."""
-        # Output length = input_length // subsampling_factor
-        factor = self.get_constant(self.config.subsampling_factor)
+        """Compute output lengths after subsampling.
+
+        The subsampling consists of 3 strided convolutions (stride=2 each).
+        For Conv2d with kernel=3, stride=2, pad=1:
+            output_len = (input_len + 2*pad - kernel) // stride + 1
+                       = (input_len + 2 - 3) // 2 + 1
+                       = (input_len - 1) // 2 + 1
+
+        Applied 3 times, this is NOT the same as input_len // 8.
+        """
+        # Step 1: After conv0 (stride 2)
+        len_after_conv0 = self._compute_conv_length(
+            "mel_lengths", kernel=3, stride=2, pad=1, prefix="/encoder/len_out/conv0"
+        )
+        # Step 2: After conv2 (stride 2)
+        len_after_conv2 = self._compute_conv_length(
+            len_after_conv0, kernel=3, stride=2, pad=1, prefix="/encoder/len_out/conv2"
+        )
+        # Step 3: After conv5 (stride 2)
+        len_after_conv5 = self._compute_conv_length(
+            len_after_conv2, kernel=3, stride=2, pad=1, prefix="/encoder/len_out/conv5"
+        )
+        # Cast back to int64 for output
         return self.make_node(
-            "Div", ["mel_lengths", factor], ["audio_lengths"], name="/encoder/length_div"
+            "Cast",
+            [len_after_conv5],
+            ["audio_lengths"],
+            to=7,  # int64
+            name="/encoder/len_out/Cast",
         )
 
-    def _compute_conv_length(self, input_length: str, kernel: int, stride: int, pad: int, prefix: str) -> str:
+    def _compute_conv_length(
+        self, input_length: str, kernel: int, stride: int, pad: int, prefix: str
+    ) -> str:
         """Compute output length after a strided convolution.
 
         Formula: (input_length + 2*pad - kernel) // stride + 1
         """
         # Cast to float for computation
         length_float = self.make_node(
-            "Cast", [input_length], [f"{prefix}/cast/output_0"], to=1  # float32
+            "Cast",
+            [input_length],
+            [f"{prefix}/cast/output_0"],
+            to=1,  # float32
         )
         # (length + 2*pad - kernel)
         numerator = self.make_node(
@@ -749,7 +770,10 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
 
         # Cast to float for comparison
         time_range_float = self.make_node(
-            "Cast", [time_range], [f"{prefix}/range_float/output_0"], to=1  # float32
+            "Cast",
+            [time_range],
+            [f"{prefix}/range_float/output_0"],
+            to=1,  # float32
         )
 
         # valid_length might be [B], reshape to [B, 1] for broadcasting
@@ -761,7 +785,10 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
 
         # Cast to float
         mask_float = self.make_node(
-            "Cast", [mask_bool], [f"{prefix}/mask_float/output_0"], to=1  # float32
+            "Cast",
+            [mask_bool],
+            [f"{prefix}/mask_float/output_0"],
+            to=1,  # float32
         )
 
         # Reshape mask from [T] to [1, 1, T, 1] for broadcasting with [B, C, T, F]
@@ -963,11 +990,6 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         return self.make_node(
             "Slice", ["encoder.pos_enc", starts, ends, axes], [f"{prefix}/output_0"]
         )
-
-    def make_sub(self, a: str, b: str, output_name: str) -> str:
-        """Helper for subtraction."""
-        self.make_node("Sub", [a, b], [output_name])
-        return output_name
 
     def build(self, model_path: str) -> onnx.ModelProto:
         """Build the complete ONNX model for audio encoder."""

@@ -9,11 +9,10 @@ Uses ONNX models:
 - decoder.onnx: LFM2 backbone (embeddings → logits/hidden_states)
 - audio_encoder.onnx: Conformer encoder for ASR
 - audio_embedding.onnx: Audio code embeddings for TTS
-- audio_detokenizer.onnx: Neural vocoder for TTS
-- vocoder_projection.onnx: [B, 2048] → [B, 8, 1024] (called 1× per frame)
-- vocoder_depthformer.onnx: Transformer+embed+logits (called 8× per frame)
+- audio_detokenizer.onnx: Audio codes → STFT features for waveform synthesis
+- vocoder_depthformer.onnx: Autoregressive audio codebook prediction (8× per frame)
 
-All components including depthformer use ONNX-only inference.
+All components use ONNX-only inference.
 
 Usage:
     # Text generation
@@ -63,7 +62,6 @@ def resolve_precision_files(precision: str | None) -> dict[str, str | None]:
             "audio_embedding": None,
             "audio_encoder": None,
             "audio_detokenizer": None,
-            "vocoder_projection": None,
             "vocoder_depthformer": None,
         }
 
@@ -76,7 +74,6 @@ def resolve_precision_files(precision: str | None) -> dict[str, str | None]:
         "audio_embedding": f"audio_embedding_{precision}.onnx",
         "audio_encoder": f"audio_encoder_{precision}.onnx",
         "audio_detokenizer": f"audio_detokenizer_{precision}.onnx",
-        "vocoder_projection": f"vocoder_projection_{precision}.onnx",
         "vocoder_depthformer": f"vocoder_depthformer_{precision}.onnx",
     }
 
@@ -106,14 +103,12 @@ class LFM2AudioInference:
         audio_embedding_file: str | None = None,
         audio_encoder_file: str | None = None,
         audio_detokenizer_file: str | None = None,
-        vocoder_projection_file: str | None = None,
         vocoder_depthformer_file: str | None = None,
     ):
         self.model_dir = model_dir
         self.onnx_dir = model_dir / "onnx"
 
-        # Store file names for vocoder loading
-        self._vocoder_projection_file = vocoder_projection_file
+        # Store file name for vocoder loading
         self._vocoder_depthformer_file = vocoder_depthformer_file
 
         # Load tokenizer
@@ -214,30 +209,21 @@ class LFM2AudioInference:
         logger.info(f"embed_tokens weight loaded: {self.embed_tokens_weight.shape}")
 
     def _load_onnx_depthformer(self):
-        """Load ONNX vocoder models for autoregressive inference.
+        """Load ONNX vocoder model for autoregressive audio codebook prediction.
 
-        Loads 2-model structure:
-        - vocoder_projection.onnx: [B, 2048] → [B, 8, 1024] (called 1× per frame)
-        - vocoder_depthformer.onnx: Transformer+embed+logits (called 8× per frame)
+        vocoder_depthformer.onnx takes hidden_states [B, 2048] and generates
+        audio codebook logits. Called 8× per audio frame (one per codebook).
         """
-        projection_path = self.onnx_dir / (
-            self._vocoder_projection_file or "vocoder_projection.onnx"
-        )
         depthformer_path = self.onnx_dir / (
             self._vocoder_depthformer_file or "vocoder_depthformer.onnx"
         )
 
-        if not projection_path.exists():
-            raise FileNotFoundError(f"Vocoder projection not found: {projection_path}")
         if not depthformer_path.exists():
             raise FileNotFoundError(f"Vocoder depthformer not found: {depthformer_path}")
 
-        logger.info(f"Loading vocoder_projection from {projection_path.name}...")
         logger.info(f"Loading vocoder_depthformer from {depthformer_path.name}...")
 
-        self.onnx_depthformer = {}
-        self.onnx_depthformer["depth_linear"] = load_session(projection_path)
-        self.onnx_depthformer["depthformer_unified"] = load_session(depthformer_path)
+        self.onnx_depthformer = load_session(depthformer_path)
         logger.info("ONNX vocoder ready for TTS")
 
     def _init_cache(self, batch_size: int = 1) -> dict[str, np.ndarray]:
@@ -356,15 +342,10 @@ class LFM2AudioInference:
         temperature: float = 0.9,
         top_k: int | None = None,
     ) -> np.ndarray:
-        """Sample audio codes using ONNX autoregressive depthformer.
+        """Sample audio codes using ONNX depthformer.
 
-        Uses the consolidated depthformer_unified model which combines:
-        - Transformer step with KV cache
-        - All 8 embedding tables
-        - All 8 logits projections
-
-        Token 2048 is the end-of-audio token. When the model predicts this,
-        it signals the end of audio generation.
+        Runs 8 autoregressive steps (one per codebook) to generate a full
+        audio frame. Token 2048 is the end-of-audio token.
 
         Args:
             hidden_states: [batch, hidden_size] or [batch, 1, hidden_size]
@@ -374,12 +355,10 @@ class LFM2AudioInference:
         Returns:
             codes: [batch, 8] audio codes for each codebook
         """
-        df = self.onnx_depthformer
-
-        if df is None or "depthformer_unified" not in df:
+        if self.onnx_depthformer is None:
             raise RuntimeError(
                 "ONNX depthformer not available for TTS.\n"
-                "Ensure depthformer_unified.onnx is exported."
+                "Ensure vocoder_depthformer.onnx is exported."
             )
 
         num_codebooks = 8
@@ -396,11 +375,6 @@ class LFM2AudioInference:
         for b in range(batch_size):
             embedding = hidden_states[b : b + 1]  # [1, hidden_size]
 
-            # Project to depth dimension: [1, 2048] → [1, 8, 1024]
-            depth_hidden = df["depth_linear"].run(
-                ["depth_hidden"], {"hidden_states": embedding.astype(np.float32)}
-            )[0]  # [1, 8, 1024]
-
             # Initialize KV cache for depthformer (6 layers)
             past_keys = np.zeros((num_layers, 1, 0, num_kv_heads, head_dim), dtype=np.float32)
             past_values = np.zeros((num_layers, 1, 0, num_kv_heads, head_dim), dtype=np.float32)
@@ -409,10 +383,10 @@ class LFM2AudioInference:
             prev_token = 0
 
             for i in range(num_codebooks):
-                logits, _, new_keys, new_values = df["depthformer_unified"].run(
-                    ["logits", "token_embed", "new_keys", "new_values"],
+                logits, _, new_keys, new_values = self.onnx_depthformer.run(
+                    ["logits", "depth_slices", "new_keys", "new_values"],
                     {
-                        "depth_slices": depth_hidden.astype(np.float32),
+                        "hidden_states": embedding.astype(np.float32),
                         "step_idx": np.array(i, dtype=np.int64),
                         "prev_token": np.array([prev_token], dtype=np.int64),
                         "past_keys": past_keys,
@@ -519,9 +493,7 @@ class LFM2AudioInference:
         """
         return compute_mel_spectrogram_numpy(audio_path, self.onnx_dir)
 
-    def _format_asr_prompt(
-        self, system_prompt: str = DEFAULT_SYSTEM_PROMPT_ASR
-    ) -> str:
+    def _format_asr_prompt(self, system_prompt: str = DEFAULT_SYSTEM_PROMPT_ASR) -> str:
         """Format ASR system instruction using ChatML format.
 
         The audio embeddings will be inserted at the user position.
@@ -621,9 +593,7 @@ class LFM2AudioInference:
 
     # === TTS (Text → Audio) ===
 
-    def _format_tts_prompt(
-        self, text: str, system_prompt: str = DEFAULT_SYSTEM_PROMPT_TTS
-    ) -> str:
+    def _format_tts_prompt(self, text: str, system_prompt: str = DEFAULT_SYSTEM_PROMPT_TTS) -> str:
         """Format text with TTS system instruction using ChatML format."""
         return (
             "<|startoftext|><|im_start|>system\n"
@@ -659,7 +629,7 @@ class LFM2AudioInference:
         Returns list of audio code frames (8 codes each).
         Each frame is [8] array of codebook indices.
         """
-        if self.onnx_depthformer is None or "depthformer_unified" not in self.onnx_depthformer:
+        if self.onnx_depthformer is None:
             raise RuntimeError("ONNX depthformer not loaded, TTS unavailable")
 
         # Format prompt with TTS system instruction
@@ -829,11 +799,7 @@ class LFM2AudioInference:
 
             if in_audio_mode:
                 # Use ONNX depthformer to generate audio frame
-                if (
-                    self.onnx_depthformer is None
-                    or "depthformer_unified" not in self.onnx_depthformer
-                    or hidden_states is None
-                ):
+                if self.onnx_depthformer is None or hidden_states is None:
                     logger.warning("ONNX depthformer unavailable, exiting audio mode")
                     in_audio_mode = False
                     continue
@@ -960,9 +926,7 @@ class LFM2AudioInference:
 
         # Build prompt: system + user audio + assistant
         prefix_text = (
-            "<|startoftext|><|im_start|>system\n"
-            f"{system_prompt}<|im_end|>\n"
-            "<|im_start|>user\n"
+            f"<|startoftext|><|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n"
         )
         suffix_text = "<|im_end|>\n<|im_start|>assistant\n"
 
@@ -1018,27 +982,30 @@ class LFM2AudioInference:
                     in_audio_mode = False
                     modality_left = INTERLEAVED_N_TEXT
 
-                # Check for end of audio - ANY codebook with 2048 (matching liquid-audio)
-                if (frame == 2048).any():
-                    logger.info(f"Skipping frame with 2048 at step {step}")
-                    # After text_done, 2048 means END of generation
-                    if text_done:
-                        logger.info(f"End of audio after text_done at step {step}")
-                        break
+                # Check for end of audio - first codebook == 2048 (matching liquid-audio)
+                # liquid-audio: if next_token[0] == 2048: next_token[:] = 2048; current_modality = TEXT
+                # NOTE: liquid-audio does NOT reset modality_left, just switches mode
+                if frame[0] == 2048:
+                    logger.info(f"End of audio token at step {step}")
+                    frame[:] = 2048  # Set all codes to 2048 (matching liquid-audio)
                     in_audio_mode = False
-                    modality_left = INTERLEAVED_N_TEXT
-                    continue
+                    # NOTE: Don't reset modality_left - it continues from where it was
+                    # Don't save this frame, but still feed it back (matching liquid-audio)
+                else:
+                    # Save valid frame
+                    clamped_frame = np.minimum(frame, 2047)
+                    audio_codes.append(clamped_frame.copy())
 
-                # Clamp and save
-                clamped_frame = np.minimum(frame, 2047)
-                audio_codes.append(clamped_frame.copy())
+                    if len(audio_codes) % 20 == 0:
+                        logger.info(f"Generated {len(audio_codes)} audio frames...")
 
-                # Get embeddings for next step
-                clamped_codes = np.minimum(frame, 2047)
+                # Get embeddings for next step (always feed back, even for 2048 frames)
+                # Use 2048 directly for end-of-audio, clamp others
+                feed_codes = np.where(frame == 2048, 2048, np.minimum(frame, 2047))
                 audio_tokens = np.array(
                     [
                         [
-                            cb_idx * self.codebook_vocab + int(clamped_codes[cb_idx])
+                            cb_idx * self.codebook_vocab + int(feed_codes[cb_idx])
                             for cb_idx in range(self.num_codebooks)
                         ]
                     ],
@@ -1046,9 +1013,6 @@ class LFM2AudioInference:
                 )
                 audio_embed = self._get_audio_embeds(audio_tokens)
                 next_embeds = audio_embed.sum(axis=1, keepdims=True)
-
-                if len(audio_codes) % 20 == 0:
-                    logger.info(f"Generated {len(audio_codes)} audio frames...")
             else:
                 # Generate text token
                 last_logits = logits[0, -1, :]
@@ -1234,7 +1198,10 @@ def compute_mel_spectrogram_numpy(
     if valid_len > 1:
         valid_mel = mel_spec[:, :valid_len]
         mel_mean = valid_mel.mean(axis=1, keepdims=True)
-        mel_std = np.sqrt(np.sum((valid_mel - mel_mean) ** 2, axis=1, keepdims=True) / (valid_len - 1)) + 1e-5
+        mel_std = (
+            np.sqrt(np.sum((valid_mel - mel_mean) ** 2, axis=1, keepdims=True) / (valid_len - 1))
+            + 1e-5
+        )
         mel_spec = (mel_spec - mel_mean) / mel_std
         # Zero out frames beyond valid length
         if total_frames > valid_len:
@@ -1243,7 +1210,10 @@ def compute_mel_spectrogram_numpy(
     # === 9. Format output ===
     # [n_mels, time] -> [1, time, n_mels]
     mel_features = mel_spec.T[np.newaxis, :, :].astype(np.float32)
-    mel_lengths = np.array([valid_len], dtype=np.int64)
+    # Return actual number of frames (not valid_len which is used only for normalization)
+    # This matches liquid-audio's ChatState behavior which uses the actual tensor length
+    actual_frames = mel_features.shape[1]
+    mel_lengths = np.array([actual_frames], dtype=np.int64)
 
     logger.info(f"Computed mel spectrogram: {mel_features.shape}")
     return mel_features, mel_lengths
@@ -1552,11 +1522,6 @@ def main():
         help="Audio detokenizer ONNX file (relative to onnx/ dir)",
     )
     parser.add_argument(
-        "--vocoder-projection",
-        metavar="FILE",
-        help="Vocoder projection ONNX file (relative to onnx/ dir)",
-    )
-    parser.add_argument(
         "--vocoder-depthformer",
         metavar="FILE",
         help="Vocoder depthformer ONNX file (relative to onnx/ dir)",
@@ -1592,6 +1557,18 @@ def main():
         help="System prompt (mode-specific defaults: ASR='Perform ASR.', "
         "TTS='Perform TTS. Use the UK female voice.', "
         "interleaved='Respond with interleaved text and audio.')",
+    )
+    parser.add_argument(
+        "--save-codes",
+        type=str,
+        metavar="FILE",
+        help="Save audio codes to numpy file (.npy) for comparison with other decoders",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducible generation (default: 42)",
     )
 
     args = parser.parse_args()
@@ -1642,6 +1619,10 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
+    # Set random seed for reproducibility
+    np.random.seed(args.seed)
+    logger.info(f"Random seed: {args.seed}")
+
     # Resolve component files from --precision
     files = resolve_precision_files(args.precision)
 
@@ -1654,8 +1635,6 @@ def main():
         files["audio_encoder"] = args.audio_encoder
     if args.audio_detokenizer:
         files["audio_detokenizer"] = args.audio_detokenizer
-    if args.vocoder_projection:
-        files["vocoder_projection"] = args.vocoder_projection
     if args.vocoder_depthformer:
         files["vocoder_depthformer"] = args.vocoder_depthformer
 
@@ -1666,7 +1645,6 @@ def main():
         audio_embedding_file=files["audio_embedding"],
         audio_encoder_file=files["audio_encoder"],
         audio_detokenizer_file=files["audio_detokenizer"],
-        vocoder_projection_file=files["vocoder_projection"],
         vocoder_depthformer_file=files["vocoder_depthformer"],
     )
 
@@ -1704,7 +1682,9 @@ def main():
         logger.info("Mode: TTS (Text-to-Speech)")
         logger.info(f"Text: {args.prompt}")
         logger.info(f"System prompt: {args.system}")
-        logger.info(f"Audio sampling: temperature={args.audio_temperature}, top_k={args.audio_top_k}")
+        logger.info(
+            f"Audio sampling: temperature={args.audio_temperature}, top_k={args.audio_top_k}"
+        )
         audio_codes = model.synthesize(
             args.prompt,
             max_new_tokens=args.max_tokens,
@@ -1716,6 +1696,11 @@ def main():
         print("\n" + "=" * 60)
         print(f"Input: {args.prompt}")
         print(f"Generated {len(audio_codes)} audio frames")
+
+        if args.save_codes and audio_codes:
+            codes_array = np.stack(audio_codes, axis=0)  # [T, 8]
+            np.save(args.save_codes, codes_array)
+            print(f"Codes:  {args.save_codes} {codes_array.shape}")
 
         if args.output and audio_codes:
             if audio_codes_to_wav(
@@ -1757,6 +1742,11 @@ def main():
 
         print(f"Text:   {text_output}")
         print(f"Audio:  {len(audio_codes)} frames")
+
+        if args.save_codes and audio_codes:
+            codes_array = np.stack(audio_codes, axis=0)  # [T, 8]
+            np.save(args.save_codes, codes_array)
+            print(f"Codes:  {args.save_codes} {codes_array.shape}")
 
         if args.output and audio_codes:
             if audio_codes_to_wav(
