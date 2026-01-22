@@ -86,6 +86,24 @@ def load_session(model_path: pathlib.Path) -> ort.InferenceSession:
     return ort.InferenceSession(str(model_path), sess_options, providers=providers)
 
 
+def extract_embed_tokens_weight(decoder_path: pathlib.Path) -> np.ndarray:
+    """Extract embed_tokens.weight from decoder ONNX model.
+
+    The embed_tokens weight is stored in the decoder for the tied LM head.
+    We extract it here for text embedding lookup, avoiding a separate ONNX file.
+    """
+    import onnx
+
+    # Handle external data (decoder uses external data files)
+    model = onnx.load(str(decoder_path), load_external_data=True)
+
+    for initializer in model.graph.initializer:
+        if initializer.name == "model.embed_tokens.weight":
+            return onnx.numpy_helper.to_array(initializer)
+
+    raise ValueError(f"embed_tokens.weight not found in {decoder_path}")
+
+
 class LFM2AudioInference:
     """ONNX inference for LFM2.5-Audio supporting all modes."""
 
@@ -127,13 +145,13 @@ class LFM2AudioInference:
         logger.info(f"Loading decoder from {decoder_path.name}...")
         self.decoder_session = load_session(decoder_path)
 
+        # Extract embed_tokens.weight from decoder for text embedding lookup
+        # (The weight is already in decoder for the tied LM head)
+        logger.info("Extracting embed_tokens.weight from decoder...")
+        self.embed_tokens_weight = extract_embed_tokens_weight(decoder_path)
+
         logger.info(f"Loading audio_embedding from {audio_embedding_path.name}...")
         self.audio_embed_session = load_session(audio_embedding_path)
-
-        # Load embed_tokens.onnx for text embedding lookup
-        embed_tokens_path = self.onnx_dir / "embed_tokens.onnx"
-        logger.info(f"Loading embed_tokens from {embed_tokens_path.name}...")
-        self.embed_tokens_session = load_session(embed_tokens_path)
 
         if audio_encoder_path.exists():
             logger.info(f"Loading audio_encoder from {audio_encoder_path.name}...")
@@ -274,11 +292,13 @@ class LFM2AudioInference:
             return int(np.random.choice(len(probs), p=probs))
 
     def _get_text_embeds(self, input_ids: np.ndarray) -> np.ndarray:
-        """Get text embeddings via ONNX embed_tokens model."""
+        """Get text embeddings via numpy indexing on embed_tokens.weight.
+
+        This is equivalent to a Gather operation but done in numpy,
+        using the weight extracted from decoder.onnx at load time.
+        """
         # input_ids: [batch, seq_len] -> embeds: [batch, seq_len, hidden]
-        return self.embed_tokens_session.run(
-            ["inputs_embeds"], {"input_ids": input_ids.astype(np.int64)}
-        )[0]
+        return self.embed_tokens_weight[input_ids].astype(np.float32)
 
     def _get_audio_embeds(self, audio_codes: np.ndarray) -> np.ndarray:
         """Get audio code embeddings."""

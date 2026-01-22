@@ -113,56 +113,9 @@ def export_audio_encoder_builder(
     return output_path
 
 
-# === 2. Embed Tokens Export ===
-
-
-def export_embed_tokens(
-    weights: dict[str, np.ndarray], config: dict, onnx_dir: pathlib.Path
-) -> pathlib.Path:
-    """Export embed_tokens.onnx for text token embedding lookup."""
-    logger.info("Exporting embed_tokens.onnx...")
-
-    lfm_config = config.get("lfm", {})
-    hidden_size = lfm_config.get("hidden_size", 2048)
-
-    if "lfm.embed_tokens.weight" not in weights:
-        raise ValueError("Could not find embed_tokens weight")
-    embed_weight = weights["lfm.embed_tokens.weight"].astype(np.float32)
-
-    # Build simple Gather graph
-    inputs = [
-        helper.make_tensor_value_info(
-            "input_ids", TensorProto.INT64, ["batch_size", "sequence_length"]
-        )
-    ]
-    outputs = [
-        helper.make_tensor_value_info(
-            "inputs_embeds", TensorProto.FLOAT, ["batch_size", "sequence_length", hidden_size]
-        )
-    ]
-    initializers = [onnx.numpy_helper.from_array(embed_weight, "model.embed_tokens.weight")]
-    nodes = [
-        helper.make_node(
-            "Gather",
-            ["model.embed_tokens.weight", "input_ids"],
-            ["inputs_embeds"],
-            name="/model/embed_tokens/Gather",
-            axis=0,
-        )
-    ]
-
-    graph = helper.make_graph(nodes, "embed_tokens", inputs, outputs, initializers)
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)], ir_version=10)
-    model.producer_name = "liquidonnx"
-
-    output_path = onnx_dir / "embed_tokens.onnx"
-    onnx.save_model(model, str(output_path))
-    logger.info(f"embed_tokens saved to {output_path}")
-
-    return output_path
-
-
-# === 3. Audio Embedding Export (builder) ===
+# === 2. Audio Embedding Export (builder) ===
+# Note: embed_tokens is NOT exported separately - it's included in decoder.onnx
+# and extracted at inference time for text embedding lookup.
 
 
 def export_audio_embedding(
@@ -455,12 +408,14 @@ def export_full_model(model_path: str, output_dir: pathlib.Path):
     """Export all components of LFM2.5-Audio to ONNX.
 
     Exports:
-    - embed_tokens.onnx/.npy: Text token embeddings
-    - decoder.onnx: LFM2 backbone with text embeddings
+    - decoder.onnx: LFM2 backbone (includes embed_tokens.weight for text embedding)
     - audio_encoder.onnx: Conformer encoder for ASR
     - audio_embedding.onnx: Audio code embeddings for TTS
     - audio_detokenizer.onnx: Neural vocoder for TTS
-    - vocoder_depthformer.onnx: Autoregressive audio codebook prediction (includes depth_linear)
+    - vocoder_depthformer.onnx: Autoregressive audio codebook prediction
+
+    Note: embed_tokens.weight is stored in decoder.onnx (used for tied LM head).
+    Inference extracts this weight for text embedding lookup.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     onnx_dir = output_dir / "onnx"
@@ -471,7 +426,7 @@ def export_full_model(model_path: str, output_dir: pathlib.Path):
     weights = load_audio_model_weights(model_path)
 
     # === Builder-based exports (no PyTorch model needed) ===
-    export_embed_tokens(weights, config, onnx_dir)
+    # Note: embed_tokens is NOT exported separately - it's included in decoder.onnx
     export_audio_embedding(weights, config, onnx_dir)
     export_decoder(weights, config, onnx_dir)
     export_audio_encoder_builder(model_path, config, onnx_dir)
