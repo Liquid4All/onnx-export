@@ -1224,22 +1224,26 @@ def compute_mel_spectrogram_numpy(
     mel_spec = np.log(mel_spec + log_zero_guard)
 
     # === 8. Per-feature normalization ===
-    # Normalize each frequency bin to zero mean, unit variance
-    seq_len = mel_spec.shape[1]
-    if seq_len > 1:
-        mel_mean = mel_spec.mean(axis=1, keepdims=True)
-        mel_std = mel_spec.std(axis=1, keepdims=True) + 1e-5
+    # Compute valid length first (matches FilterbankFeatures.get_seq_len)
+    input_samples = len(audio)  # after resampling, before padding
+    valid_len = input_samples // hop_length
+
+    # Normalize using only valid frames (matching liquid-audio's normalize_batch)
+    # Uses Bessel's correction (N-1) for std
+    total_frames = mel_spec.shape[1]
+    if valid_len > 1:
+        valid_mel = mel_spec[:, :valid_len]
+        mel_mean = valid_mel.mean(axis=1, keepdims=True)
+        mel_std = np.sqrt(np.sum((valid_mel - mel_mean) ** 2, axis=1, keepdims=True) / (valid_len - 1)) + 1e-5
         mel_spec = (mel_spec - mel_mean) / mel_std
+        # Zero out frames beyond valid length
+        if total_frames > valid_len:
+            mel_spec[:, valid_len:] = 0.0
 
     # === 9. Format output ===
     # [n_mels, time] -> [1, time, n_mels]
     mel_features = mel_spec.T[np.newaxis, :, :].astype(np.float32)
-
-    # Compute valid length using PyTorch's formula (not actual frame count)
-    # This matches FilterbankFeatures.get_seq_len() with exact_pad=False:
-    # seq_len = (input_samples + n_fft - n_fft) // hop_length = input_samples // hop_length
-    input_samples = len(audio)  # after resampling, before padding
-    mel_lengths = np.array([input_samples // hop_length], dtype=np.int64)
+    mel_lengths = np.array([valid_len], dtype=np.int64)
 
     logger.info(f"Computed mel spectrogram: {mel_features.shape}")
     return mel_features, mel_lengths
