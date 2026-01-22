@@ -112,6 +112,12 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         )
         relu0 = self.make_node("Relu", [conv0], [f"{prefix}/conv0/Relu/output_0"])
 
+        # Compute valid length after conv0: (input_len + 2*pad - kernel) // stride + 1
+        # = (mel_lengths + 2 - 3) // 2 + 1 = (mel_lengths - 1) // 2 + 1
+        len_after_conv0 = self._compute_conv_length(
+            "mel_lengths", kernel=3, stride=2, pad=1, prefix=f"{prefix}/len0"
+        )
+
         # === Block 2: Depthwise conv (stride 2) + Pointwise conv + ReLU ===
         conv2 = self.make_node(
             "Conv",
@@ -131,10 +137,18 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         )
         relu3 = self.make_node("Relu", [conv3], [f"{prefix}/conv3/Relu/output_0"])
 
+        # Compute valid length after conv2 and apply mask before conv5
+        len_after_conv2 = self._compute_conv_length(
+            len_after_conv0, kernel=3, stride=2, pad=1, prefix=f"{prefix}/len2"
+        )
+        # Apply mask to zero out positions >= len_after_conv2
+        # relu3 shape: [B, C, T, F]
+        relu3_masked = self._apply_conv2d_mask(relu3, len_after_conv2, f"{prefix}/mask2")
+
         # === Block 3: Depthwise conv (stride 2) + Pointwise conv + ReLU ===
         conv5 = self.make_node(
             "Conv",
-            [relu3, "encoder.pre_encode.conv.5.weight", "encoder.pre_encode.conv.5.bias"],
+            [relu3_masked, "encoder.pre_encode.conv.5.weight", "encoder.pre_encode.conv.5.bias"],
             [f"{prefix}/conv5/Conv/output_0"],
             kernel_shape=[3, 3],
             strides=[2, 2],
@@ -675,6 +689,89 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         return self.make_node(
             "Div", ["mel_lengths", factor], ["audio_lengths"], name="/encoder/length_div"
         )
+
+    def _compute_conv_length(self, input_length: str, kernel: int, stride: int, pad: int, prefix: str) -> str:
+        """Compute output length after a strided convolution.
+
+        Formula: (input_length + 2*pad - kernel) // stride + 1
+        """
+        # Cast to float for computation
+        length_float = self.make_node(
+            "Cast", [input_length], [f"{prefix}/cast/output_0"], to=1  # float32
+        )
+        # (length + 2*pad - kernel)
+        numerator = self.make_node(
+            "Add",
+            [length_float, self.get_constant(2.0 * pad - kernel, dtype=np.float32)],
+            [f"{prefix}/numerator/output_0"],
+        )
+        # // stride
+        divided = self.make_node(
+            "Div",
+            [numerator, self.get_constant(float(stride), dtype=np.float32)],
+            [f"{prefix}/divided/output_0"],
+        )
+        floored = self.make_node("Floor", [divided], [f"{prefix}/floored/output_0"])
+        # + 1
+        result = self.make_node(
+            "Add",
+            [floored, self.get_constant(1.0, dtype=np.float32)],
+            [f"{prefix}/output_0"],
+        )
+        return result
+
+    def _apply_conv2d_mask(self, tensor: str, valid_length: str, prefix: str) -> str:
+        """Apply masking to zero out positions >= valid_length in time dimension.
+
+        Args:
+            tensor: Input tensor of shape [B, C, T, F]
+            valid_length: Scalar or [B] tensor with valid lengths
+            prefix: Prefix for node names
+
+        Returns:
+            Masked tensor of shape [B, C, T, F]
+        """
+        # Get tensor shape
+        shape = self.make_node("Shape", [tensor], [f"{prefix}/shape/output_0"])
+        # Get T (time dimension, index 2)
+        T = self.make_node(
+            "Gather", [shape, self.get_constant(2)], [f"{prefix}/T/output_0"], axis=0
+        )
+
+        # Create range [0, 1, ..., T-1]
+        # Range needs start, limit, delta as scalars
+        zeros_scalar = self.get_constant(0, dtype=np.int64)
+        ones_scalar = self.get_constant(1, dtype=np.int64)
+        T_int = self.make_node("Cast", [T], [f"{prefix}/T_int/output_0"], to=7)  # int64
+        time_range = self.make_node(
+            "Range", [zeros_scalar, T_int, ones_scalar], [f"{prefix}/range/output_0"]
+        )
+
+        # Cast to float for comparison
+        time_range_float = self.make_node(
+            "Cast", [time_range], [f"{prefix}/range_float/output_0"], to=1  # float32
+        )
+
+        # valid_length might be [B], reshape to [B, 1] for broadcasting
+        # But for batch=1 case, it's just a scalar
+        # Create mask: time_range < valid_length → [T] bool mask
+        mask_bool = self.make_node(
+            "Less", [time_range_float, valid_length], [f"{prefix}/mask_bool/output_0"]
+        )
+
+        # Cast to float
+        mask_float = self.make_node(
+            "Cast", [mask_bool], [f"{prefix}/mask_float/output_0"], to=1  # float32
+        )
+
+        # Reshape mask from [T] to [1, 1, T, 1] for broadcasting with [B, C, T, F]
+        mask_reshaped = self.make_reshape(
+            mask_float, self.get_constant([1, 1, -1, 1]), f"{prefix}/mask_reshape/output_0"
+        )
+
+        # Apply mask
+        masked = self.make_mul(tensor, mask_reshaped, f"{prefix}/masked/output_0")
+        return masked
 
     def prepare_weights(self):
         """Register all weights as initializers."""
