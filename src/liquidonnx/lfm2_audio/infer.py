@@ -1086,11 +1086,46 @@ class LFM2AudioInference:
 # === Numpy Mel Spectrogram ===
 
 
+def _resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    """Resample audio to target sample rate.
+
+    This is INPUT PREPROCESSING only - converts audio files to 16kHz before
+    mel spectrogram computation. Not part of the ONNX model.
+
+    Uses torchaudio for best accuracy (matches PyTorch pipeline exactly).
+    Falls back to scipy if torchaudio is unavailable.
+
+    Args:
+        audio: Audio waveform as numpy array
+        orig_sr: Original sample rate
+        target_sr: Target sample rate (16000 for this model)
+
+    Returns:
+        Resampled audio as numpy array
+    """
+    if orig_sr == target_sr:
+        return audio
+
+    try:
+        import torch
+        import torchaudio
+
+        audio_tensor = torch.from_numpy(audio).unsqueeze(0)  # [1, samples]
+        resampled = torchaudio.functional.resample(audio_tensor, orig_sr, target_sr)
+        return resampled.squeeze(0).numpy()
+    except ImportError:
+        # Fallback to scipy (slightly different results due to FFT-based algorithm)
+        import scipy.signal
+
+        num_samples = int(len(audio) * target_sr / orig_sr)
+        return scipy.signal.resample(audio, num_samples)
+
+
 def compute_mel_spectrogram_numpy(
     audio_path: str,
     onnx_dir: pathlib.Path,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute mel spectrogram using pure numpy (no PyTorch/torchaudio).
+    """Compute mel spectrogram for ONNX audio encoder.
 
     This implementation matches liquid_audio's AudioToMelSpectrogramPreprocessor
     for compatibility with the ONNX audio encoder.
@@ -1107,7 +1142,6 @@ def compute_mel_spectrogram_numpy(
     import json
 
     import scipy.io.wavfile
-    import scipy.signal
 
     # Load mel config and precomputed filterbank
     config_path = onnx_dir / "mel_config.json"
@@ -1150,10 +1184,8 @@ def compute_mel_spectrogram_numpy(
     if len(audio.shape) > 1:
         audio = audio.mean(axis=1)
 
-    # === 2. Resample to 16kHz if needed ===
-    if sample_rate != target_sr:
-        num_samples = int(len(audio) * target_sr / sample_rate)
-        audio = scipy.signal.resample(audio, num_samples)
+    # === 2. Resample to 16kHz (input preprocessing) ===
+    audio = _resample_audio(audio, sample_rate, target_sr)
 
     # === 3. Pre-emphasis filter ===
     # y[t] = x[t] - preemph * x[t-1]
@@ -1202,7 +1234,12 @@ def compute_mel_spectrogram_numpy(
     # === 9. Format output ===
     # [n_mels, time] -> [1, time, n_mels]
     mel_features = mel_spec.T[np.newaxis, :, :].astype(np.float32)
-    mel_lengths = np.array([mel_features.shape[1]], dtype=np.int64)
+
+    # Compute valid length using PyTorch's formula (not actual frame count)
+    # This matches FilterbankFeatures.get_seq_len() with exact_pad=False:
+    # seq_len = (input_samples + n_fft - n_fft) // hop_length = input_samples // hop_length
+    input_samples = len(audio)  # after resampling, before padding
+    mel_lengths = np.array([input_samples // hop_length], dtype=np.int64)
 
     logger.info(f"Computed mel spectrogram: {mel_features.shape}")
     return mel_features, mel_lengths
