@@ -420,6 +420,53 @@ class LFM2AudioInference:
             return frame_codes[0] == self.END_OF_AUDIO_TOKEN
         return np.any(frame_codes >= self.END_OF_AUDIO_TOKEN)
 
+    def decode_audio(self, codes: np.ndarray) -> np.ndarray:
+        """Decode audio codes to waveform using ONNX detokenizer.
+
+        Args:
+            codes: Audio codes with shape [T, 8] where T is number of frames
+
+        Returns:
+            Waveform as float32 numpy array in range [-1, 1]
+        """
+        if self.audio_detokenizer_session is None:
+            raise RuntimeError("Audio detokenizer not loaded")
+
+        # ISTFT parameters (fixed for this model)
+        n_fft = 1280
+        hop_length = 320
+        win_length = 1280
+        n_fft_bins = n_fft // 2 + 1
+
+        # Generate Hann window
+        window = np.hanning(n_fft).astype(np.float32)
+
+        # Transpose: [T, 8] → [8, T] and add batch dimension → [1, 8, T]
+        codes_t = codes.T.astype(np.int64)
+        codes_batch = codes_t[np.newaxis, :, :]
+
+        # Run detokenizer: [1, 8, T] → [1, T, 1282]
+        stft_features = self.audio_detokenizer_session.run(
+            ["stft_features"], {"audio_codes": codes_batch}
+        )[0]
+        stft_features = stft_features[0]  # [T, 1282]
+
+        # Convert to complex STFT: [log_magnitude | angle] → complex
+        log_magnitude = stft_features[:, :n_fft_bins]
+        angle = stft_features[:, n_fft_bins:]
+        magnitude = np.exp(log_magnitude)
+        complex_stft = magnitude * np.exp(1j * angle)
+
+        # ISTFT with 'same' padding
+        waveform = _istft_same_padding(complex_stft.T, n_fft, hop_length, win_length, window)
+
+        # Normalize to [-1, 1]
+        max_val = np.abs(waveform).max()
+        if max_val > 0:
+            waveform = waveform / max_val * 0.9
+
+        return waveform.astype(np.float32)
+
     # === Text Generation ===
 
     def generate_text(

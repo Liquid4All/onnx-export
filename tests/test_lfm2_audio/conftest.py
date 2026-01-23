@@ -48,7 +48,7 @@ def reference_model():
 
 @pytest.fixture(scope="module")
 def onnx_model(exports_dir: pathlib.Path):
-    """Load ONNX audio model.
+    """Load ONNX audio model (fp32).
 
     Returns LFM2AudioInference instance.
     """
@@ -91,3 +91,24 @@ def audio_processor():
 
     del processor
     gc.collect()
+
+
+@pytest.fixture(scope="session")
+def sample_audio_short(exports_dir: pathlib.Path) -> pathlib.Path:
+    """Short sample audio file for testing."""
+    # Navigate from exports/ to samples/
+    base_dir = exports_dir.parent
+    audio_path = base_dir / "samples" / "audio" / "woodworks_question.wav"
+    if not audio_path.exists():
+        pytest.skip(f"Sample audio not found: {audio_path}")
+    return audio_path
+
+
+@pytest.fixture(scope="session")
+def sample_audio_long(exports_dir: pathlib.Path) -> pathlib.Path:
+    """Longer sample audio file for testing."""
+    base_dir = exports_dir.parent
+    audio_path = base_dir / "samples" / "audio" / "fool_me_once_mono.wav"
+    if not audio_path.exists():
+        pytest.skip(f"Sample audio not found: {audio_path}")
+    return audio_path
