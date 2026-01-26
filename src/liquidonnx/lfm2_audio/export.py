@@ -174,6 +174,61 @@ def export_audio_embedding(
     return output_path
 
 
+# === 3b. Text Embedding Export ===
+#
+# Why export embed_tokens separately?
+#
+# The embed_tokens.weight is already stored in decoder.onnx (for the tied LM head),
+# but we export it as a standalone binary file for cross-platform consistency:
+#
+# - Python CAN extract weights from ONNX via `onnx.load()` + graph.initializer
+# - JavaScript CANNOT - ONNX Runtime Web only exposes inference APIs, not internals
+#
+# By exporting as raw binary, both Python and JS use the same artifact and code path:
+#   weight = load_binary("embed_tokens.bin")
+#   embedding = weight[token_id]
+#
+# This avoids maintaining two different extraction methods and ensures identical behavior.
+
+
+def export_embed_tokens(
+    weights: dict[str, np.ndarray], config: dict, onnx_dir: pathlib.Path
+) -> pathlib.Path:
+    """Export embed_tokens weight as raw binary.
+
+    Saves embed_tokens.weight as:
+    1. embed_tokens.bin - raw float32 binary (vocab_size * hidden_size * 4 bytes)
+    2. embed_tokens.json - metadata (vocab_size, hidden_size, dtype)
+
+    Both Python and JavaScript load this the same way for consistency.
+    """
+    embed_weight = weights["lfm.embed_tokens.weight"]  # [vocab_size, hidden_size]
+    vocab_size, hidden_size = embed_weight.shape
+    logger.info(f"embed_tokens weight shape: {embed_weight.shape}")
+
+    # Save as raw binary (float32, little-endian)
+    bin_path = onnx_dir / "embed_tokens.bin"
+    embed_weight.astype(np.float32).tofile(bin_path)
+    logger.info(f"embed_tokens.bin saved ({bin_path.stat().st_size / 1e6:.1f} MB)")
+
+    # Save metadata
+    meta_path = onnx_dir / "embed_tokens.json"
+    with open(meta_path, "w") as f:
+        json.dump(
+            {
+                "vocab_size": int(vocab_size),
+                "hidden_size": int(hidden_size),
+                "dtype": "float32",
+                "byte_order": "little",
+            },
+            f,
+            indent=2,
+        )
+    logger.info(f"embed_tokens.json saved")
+
+    return bin_path
+
+
 # === 4. Decoder Export (builder) ===
 
 
@@ -498,8 +553,8 @@ def export_full_model(model_path: str, output_dir: pathlib.Path):
     weights = load_audio_model_weights(model_path)
 
     # === Builder-based exports (no PyTorch model needed) ===
-    # Note: embed_tokens is NOT exported separately - it's included in decoder.onnx
     export_audio_embedding(weights, config, onnx_dir)
+    export_embed_tokens(weights, config, onnx_dir)  # For web inference
     export_decoder(weights, config, onnx_dir)
     export_audio_encoder_builder(model_path, config, onnx_dir)
     export_vocoder_depthformer(model_path, onnx_dir)
@@ -579,7 +634,7 @@ def main():
 
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+    logging.basicConfig(level=logging.INFO)
 
     model_name = get_model_name(args.model)
     output_name = args.output_name or f"{model_name}-ONNX"

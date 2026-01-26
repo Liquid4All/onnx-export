@@ -46,6 +46,12 @@ DEFAULT_SYSTEM_PROMPT_ASR = "Perform ASR."
 DEFAULT_SYSTEM_PROMPT_TTS = "Perform TTS. Use the UK female voice."
 DEFAULT_SYSTEM_PROMPT_INTERLEAVED = "Respond with interleaved text and audio."
 
+# Max tokens defaults (matching liquid-audio)
+# Each audio frame = 80ms (6x upsampling in detokenizer, 320 hop, 24kHz)
+# 1024 frames ≈ 82 seconds of audio
+DEFAULT_MAX_TOKENS_AUDIO = 1024  # TTS and interleaved modes
+DEFAULT_MAX_TOKENS_TEXT = 100   # ASR and text modes
+
 
 def resolve_precision_files(precision: str | None) -> dict[str, str | None]:
     """Resolve file names from precision shorthand.
@@ -86,22 +92,50 @@ def load_session(model_path: pathlib.Path) -> ort.InferenceSession:
     return ort.InferenceSession(str(model_path), sess_options, providers=providers)
 
 
-def extract_embed_tokens_weight(decoder_path: pathlib.Path) -> np.ndarray:
-    """Extract embed_tokens.weight from decoder ONNX model.
+def load_embed_tokens_weight(onnx_dir: pathlib.Path) -> np.ndarray:
+    """Load embed_tokens.weight from exported binary file.
 
-    The embed_tokens weight is stored in the decoder for the tied LM head.
-    We extract it here for text embedding lookup, avoiding a separate ONNX file.
+    Why load from binary instead of extracting from decoder.onnx?
+
+    While Python CAN extract weights via `onnx.load()` + graph.initializer,
+    JavaScript CANNOT - ONNX Runtime Web only exposes inference APIs.
+
+    By loading from the same binary file, both Python and JS use identical
+    artifacts and code paths, ensuring consistent behavior across platforms.
+
+    Files:
+        embed_tokens.bin - raw float32 binary [vocab_size * hidden_size]
+        embed_tokens.json - metadata {vocab_size, hidden_size, dtype}
+
+    Falls back to extracting from decoder.onnx for backwards compatibility.
     """
+    import json
+
+    bin_path = onnx_dir / "embed_tokens.bin"
+    meta_path = onnx_dir / "embed_tokens.json"
+
+    if bin_path.exists() and meta_path.exists():
+        # Load from binary (same as JavaScript)
+        with open(meta_path) as f:
+            meta = json.load(f)
+
+        weight = np.fromfile(bin_path, dtype=np.float32)
+        weight = weight.reshape(meta["vocab_size"], meta["hidden_size"])
+        logger.info(f"Loaded embed_tokens from {bin_path.name}: {weight.shape}")
+        return weight
+
+    # Fallback: extract from decoder.onnx (for backwards compatibility)
+    logger.warning("embed_tokens.bin not found, extracting from decoder.onnx")
     import onnx
 
-    # Handle external data (decoder uses external data files)
+    decoder_path = onnx_dir / "decoder.onnx"
     model = onnx.load(str(decoder_path), load_external_data=True)
 
     for initializer in model.graph.initializer:
         if initializer.name == "model.embed_tokens.weight":
             return onnx.numpy_helper.to_array(initializer)
 
-    raise ValueError(f"embed_tokens.weight not found in {decoder_path}")
+    raise ValueError(f"embed_tokens.weight not found")
 
 
 class LFM2AudioInference:
@@ -145,10 +179,9 @@ class LFM2AudioInference:
         logger.info(f"Loading decoder from {decoder_path.name}...")
         self.decoder_session = load_session(decoder_path)
 
-        # Extract embed_tokens.weight from decoder for text embedding lookup
-        # (The weight is already in decoder for the tied LM head)
-        logger.info("Extracting embed_tokens.weight from decoder...")
-        self.embed_tokens_weight = extract_embed_tokens_weight(decoder_path)
+        # Load embed_tokens.weight for text embedding lookup
+        logger.info("Loading embed_tokens.weight...")
+        self.embed_tokens_weight = load_embed_tokens_weight(self.onnx_dir)
 
         logger.info(f"Loading audio_embedding from {audio_embedding_path.name}...")
         self.audio_embed_session = load_session(audio_embedding_path)
@@ -740,8 +773,8 @@ class LFM2AudioInference:
                 last_hidden, audio_temperature, top_k=audio_top_k
             )  # [1, 8]
 
-            # Check for end-of-audio (any codebook outputs 2048)
-            if self._is_end_of_audio(frame_codes[0]):
+            # Check for end-of-audio (first codebook only, matching liquid-audio)
+            if self._is_end_of_audio(frame_codes[0], first_codebook_only=True):
                 logger.info(f"End of audio detected at frame {len(audio_codes)}")
                 break
 
@@ -1484,10 +1517,11 @@ def _decode_audio_onnx_numpy(
     # Load ONNX detokenizer
     detok_session = load_session(detok_path)
 
-    # Run detokenizer: [1, 8, T] → [1, T, 1282]
+    # Run detokenizer: [1, 8, T] → [1, T*6, 1282] (6x upsampling)
+    # Input codes are already [8, T] from audio_codes_to_wav
     codes_batch = codes[np.newaxis, :, :].astype(np.int64)  # [1, 8, T]
     stft_features = detok_session.run(["stft_features"], {"audio_codes": codes_batch})[0]
-    stft_features = stft_features[0]  # [T, 1282]
+    stft_features = stft_features[0]  # [T*6, 1282]
 
     # Convert to complex STFT: [log_magnitude | angle] → complex
     log_magnitude = stft_features[:, :n_fft_bins]
@@ -1580,7 +1614,7 @@ def main():
         "--max-tokens",
         type=int,
         default=None,
-        help="Maximum tokens/frames to generate (default: 100 for text/asr/tts, 300 for interleaved)",
+        help=f"Maximum tokens/frames to generate (default: {DEFAULT_MAX_TOKENS_AUDIO} for tts/interleaved, {DEFAULT_MAX_TOKENS_TEXT} for asr/text)",
     )
     parser.add_argument(
         "--temperature",
@@ -1662,12 +1696,12 @@ def main():
 
     # Apply mode-specific max_tokens defaults
     if args.max_tokens is None:
-        if args.mode == "interleaved":
-            args.max_tokens = 300
+        if args.mode in ("interleaved", "tts"):
+            args.max_tokens = DEFAULT_MAX_TOKENS_AUDIO
         else:
-            args.max_tokens = 100
+            args.max_tokens = DEFAULT_MAX_TOKENS_TEXT
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+    logging.basicConfig(level=logging.INFO)
 
     # Set random seed for reproducibility
     np.random.seed(args.seed)

@@ -593,7 +593,7 @@ def main():
 
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+    logging.basicConfig(level=logging.INFO)
 
     # Parse output precisions
     quant_bits = []
