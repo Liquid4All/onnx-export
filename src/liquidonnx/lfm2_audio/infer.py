@@ -50,7 +50,7 @@ DEFAULT_SYSTEM_PROMPT_INTERLEAVED = "Respond with interleaved text and audio."
 # Each audio frame = 80ms (6x upsampling in detokenizer, 320 hop, 24kHz)
 # 1024 frames ≈ 82 seconds of audio
 DEFAULT_MAX_TOKENS_AUDIO = 1024  # TTS and interleaved modes
-DEFAULT_MAX_TOKENS_TEXT = 100   # ASR and text modes
+DEFAULT_MAX_TOKENS_TEXT = 100  # ASR and text modes
 
 
 def resolve_precision_files(precision: str | None) -> dict[str, str | None]:
