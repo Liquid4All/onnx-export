@@ -10,7 +10,6 @@ from liquid_audio import ChatState, LFM2AudioModel, LFM2AudioProcessor
 from scipy.io import wavfile
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
 
 def main():
@@ -32,6 +31,8 @@ def main():
         help="System prompt for TTS",
     )
     args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}")

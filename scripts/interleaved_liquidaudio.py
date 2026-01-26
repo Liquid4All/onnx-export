@@ -15,7 +15,6 @@ from liquid_audio import ChatState, LFM2AudioModel, LFM2AudioProcessor
 from scipy.io import wavfile
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
 
 def main():
@@ -43,15 +42,28 @@ def main():
     )
     args = parser.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info(f"Using device: {device}")
+    logging.basicConfig(level=logging.INFO)
+
+    # Select best available device: CUDA > MPS > CPU
+    if torch.cuda.is_available():
+        device = "cuda"
+        gpu_name = torch.cuda.get_device_name(0)
+        logger.info(f"Using device: {device} ({gpu_name})")
+    elif torch.backends.mps.is_available():
+        device = "mps"
+        logger.info(f"Using device: {device} (Apple Silicon GPU)")
+    else:
+        device = "cpu"
+        logger.info(f"Using device: {device} (no GPU available)")
     logger.info(f"Decoder: {args.decoder}")
 
     # Load model and processor
-    logger.info("Loading liquid-audio model...")
+    # Use bfloat16 on CUDA for speed, float32 on MPS/CPU (MPS bfloat16 support is limited)
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    logger.info(f"Loading liquid-audio model (dtype={dtype})...")
     model = LFM2AudioModel.from_pretrained(
         "LiquidAI/LFM2.5-Audio-1.5B",
-        dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+        dtype=dtype,
         device=device,
     )
     model.eval()  # Disable dropout for inference
@@ -91,8 +103,7 @@ def main():
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-    # Create chat state for interleaved dialogue
-    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    # Create chat state for interleaved dialogue (reuses dtype from model loading)
     state = ChatState(processor, dtype=dtype)
 
     # System instruction for interleaved dialogue (matching official demo)
