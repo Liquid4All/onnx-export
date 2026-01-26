@@ -832,8 +832,12 @@ class LFM2AudioInference:
             # token = codebook_idx * 2049 + code_value
             # Reference: in_emb = self.audio_embedding(next_token + self.codebook_offsets).sum(0)
             # We get embeddings for all 8 codebooks and SUM them into a single embedding
-            # Clamp codes to valid range for embedding lookup (0-2047)
-            clamped_codes = np.minimum(frame_codes[0], 2047)
+            # Preserve 2048 (end-of-audio) for embedding lookup, clamp others to 0-2047
+            clamped_codes = np.where(
+                frame_codes[0] == self.END_OF_AUDIO_TOKEN,
+                self.END_OF_AUDIO_TOKEN,
+                np.minimum(frame_codes[0], 2047),
+            )
             audio_tokens = np.array(
                 [
                     [

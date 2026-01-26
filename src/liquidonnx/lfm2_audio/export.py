@@ -204,9 +204,7 @@ def export_audio_embedding_binary(
     codebook_vocab = 2049
     expected_vocab = num_codebooks * codebook_vocab
     if vocab_size != expected_vocab:
-        logger.warning(
-            f"audio_embedding vocab_size={vocab_size}, expected {expected_vocab}"
-        )
+        logger.warning(f"audio_embedding vocab_size={vocab_size}, expected {expected_vocab}")
 
     logger.info(f"audio_embedding weight shape: {embed_weight.shape}")
 
@@ -285,7 +283,7 @@ def export_embed_tokens(
             f,
             indent=2,
         )
-    logger.info(f"embed_tokens.json saved")
+    logger.info("embed_tokens.json saved")
 
     return bin_path
 
