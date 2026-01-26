@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--cpu", action="store_true", help="Force CPU execution (skip CUDA)")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+    logging.basicConfig(level=logging.INFO)
 
     model = ONNXTextModel(args.model, force_cpu=args.cpu)
     model.load()

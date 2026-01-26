@@ -477,7 +477,7 @@ def main():
     parser.add_argument("--compare", help="Path to community model for comparison")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+    logging.basicConfig(level=logging.INFO)
 
     image = None
     if args.image:

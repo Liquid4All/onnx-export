@@ -36,9 +36,27 @@ def get_model_size(path: pathlib.Path) -> tuple[float, float]:
 
 
 def get_total_model_size_mb(path: pathlib.Path) -> float:
-    """Return total model size in MB (model + external data)."""
-    model_mb, data_mb = get_model_size(path)
-    return model_mb + data_mb
+    """Return total model size in MB (model + all external data files).
+
+    Handles split external data files (e.g., model.onnx_data, model.onnx_data_1).
+    """
+    total = path.stat().st_size / 1e6 if path.exists() else 0
+
+    # Check for external data files (model.onnx_data, model.onnx_data_1, etc.)
+    base_data = path.with_suffix(".onnx_data")
+    if base_data.exists():
+        total += base_data.stat().st_size / 1e6
+
+    # Check for split data files
+    i = 1
+    while True:
+        split_data = path.parent / f"{path.stem}.onnx_data_{i}"
+        if not split_data.exists():
+            break
+        total += split_data.stat().st_size / 1e6
+        i += 1
+
+    return total
 
 
 def _rename_quantized_weights(model: onnx.ModelProto):

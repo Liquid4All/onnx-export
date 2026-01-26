@@ -2,17 +2,19 @@
 name = "liquidonnx"
 version = "0.1.0"
 description = "LFM2 ONNX export and inference tools"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 
 dependencies = [
     "onnx",
     "onnxruntime>=1.24.0.dev",  # Nightly for QMoE 14-input support
     "transformers>=5.0.0.dev0",
-    "numpy>=2.2.0",
+    "numpy>=2.2.0,<2.4",  # numba requires numpy < 2.4
     "torch>=2.0.0",
     "pillow",
     "torchvision>=0.24.1",
     "onnx-ir>=0.1.13",
+    "scipy>=1.12.0",  # For ISTFT in audio decoding
+    "onnxscript>=0.5.7",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +24,7 @@ gpu = [
 dev = [
     "pytest",
     "ruff",
+    "liquid-audio>=1.1.0",  # Reference model for audio export/tests
 ]
 
 [project.scripts]
@@ -38,6 +41,10 @@ lfm2-vl-infer = "liquidonnx.lfm2_vl.infer:main"
 lfm2-moe-export = "liquidonnx.lfm2_moe.export:main"
 lfm2-moe-infer = "liquidonnx.lfm2_moe.infer:main"
 
+# LFM2.5-Audio model tools
+lfm2-audio-export = "liquidonnx.lfm2_audio.export:main"
+lfm2-audio-infer = "liquidonnx.lfm2_audio.infer:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -53,7 +60,7 @@ log_cli_level = "INFO"
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = [
@@ -84,3 +91,10 @@ explicit = true
 transformers = { git = "https://github.com/huggingface/transformers.git", rev = "3c25177" }
 onnxruntime = { index = "ort-nightly" }
 onnxruntime-gpu = { index = "ort-nightly" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.14.10",
+    "liquid-audio>=1.1.0",
+]
