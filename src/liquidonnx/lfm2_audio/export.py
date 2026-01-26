@@ -174,7 +174,68 @@ def export_audio_embedding(
     return output_path
 
 
-# === 3b. Text Embedding Export ===
+# === 3b. Audio Embedding Binary Export ===
+#
+# Export audio_embedding.weight as raw binary for direct lookup.
+# This eliminates the ONNX model call overhead (352 calls per generation).
+
+
+def export_audio_embedding_binary(
+    weights: dict[str, np.ndarray], config: dict, onnx_dir: pathlib.Path
+) -> pathlib.Path:
+    """Export audio_embedding weight as raw binary.
+
+    The audio embedding table has shape [num_codebooks * codebook_vocab, hidden_size]
+    where num_codebooks=8 and codebook_vocab=2049 (including end-of-audio token).
+
+    Token index = codebook_idx * 2049 + code_value
+
+    Saves as:
+    1. audio_embedding.bin - raw float32 binary
+    2. audio_embedding.json - metadata (num_codebooks, codebook_vocab, hidden_size)
+
+    This enables direct numpy/JS indexing instead of ONNX model calls.
+    """
+    embed_weight = weights["audio_embedding.embedding.weight"]  # [16392, hidden_size]
+    vocab_size, hidden_size = embed_weight.shape
+
+    # Validate expected shape
+    num_codebooks = 8
+    codebook_vocab = 2049
+    expected_vocab = num_codebooks * codebook_vocab
+    if vocab_size != expected_vocab:
+        logger.warning(
+            f"audio_embedding vocab_size={vocab_size}, expected {expected_vocab}"
+        )
+
+    logger.info(f"audio_embedding weight shape: {embed_weight.shape}")
+
+    # Save as raw binary (float32, little-endian)
+    bin_path = onnx_dir / "audio_embedding.bin"
+    embed_weight.astype(np.float32).tofile(bin_path)
+    logger.info(f"audio_embedding.bin saved ({bin_path.stat().st_size / 1e6:.1f} MB)")
+
+    # Save metadata
+    meta_path = onnx_dir / "audio_embedding.json"
+    with open(meta_path, "w") as f:
+        json.dump(
+            {
+                "vocab_size": int(vocab_size),
+                "hidden_size": int(hidden_size),
+                "num_codebooks": num_codebooks,
+                "codebook_vocab": codebook_vocab,
+                "dtype": "float32",
+                "byte_order": "little",
+            },
+            f,
+            indent=2,
+        )
+    logger.info("audio_embedding.json saved")
+
+    return bin_path
+
+
+# === 3c. Text Embedding Export ===
 #
 # Why export embed_tokens separately?
 #
@@ -554,6 +615,7 @@ def export_full_model(model_path: str, output_dir: pathlib.Path):
 
     # === Builder-based exports (no PyTorch model needed) ===
     export_audio_embedding(weights, config, onnx_dir)
+    export_audio_embedding_binary(weights, config, onnx_dir)  # For direct lookup
     export_embed_tokens(weights, config, onnx_dir)  # For web inference
     export_decoder(weights, config, onnx_dir)
     export_audio_encoder_builder(model_path, config, onnx_dir)

@@ -135,7 +135,33 @@ def load_embed_tokens_weight(onnx_dir: pathlib.Path) -> np.ndarray:
         if initializer.name == "model.embed_tokens.weight":
             return onnx.numpy_helper.to_array(initializer)
 
-    raise ValueError(f"embed_tokens.weight not found")
+    raise ValueError("embed_tokens.weight not found")
+
+
+def load_audio_embedding_weight(onnx_dir: pathlib.Path) -> np.ndarray | None:
+    """Load audio_embedding.weight from exported binary file.
+
+    Returns None if binary file not found (falls back to ONNX model).
+
+    Files:
+        audio_embedding.bin - raw float32 binary [vocab_size * hidden_size]
+        audio_embedding.json - metadata {vocab_size, hidden_size, num_codebooks, ...}
+    """
+    import json
+
+    bin_path = onnx_dir / "audio_embedding.bin"
+    meta_path = onnx_dir / "audio_embedding.json"
+
+    if not (bin_path.exists() and meta_path.exists()):
+        return None
+
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    weight = np.fromfile(bin_path, dtype=np.float32)
+    weight = weight.reshape(meta["vocab_size"], meta["hidden_size"])
+    logger.info(f"Loaded audio_embedding from {bin_path.name}: {weight.shape}")
+    return weight
 
 
 class LFM2AudioInference:
@@ -183,8 +209,13 @@ class LFM2AudioInference:
         logger.info("Loading embed_tokens.weight...")
         self.embed_tokens_weight = load_embed_tokens_weight(self.onnx_dir)
 
-        logger.info(f"Loading audio_embedding from {audio_embedding_path.name}...")
-        self.audio_embed_session = load_session(audio_embedding_path)
+        # Try loading audio embedding from binary (faster), fallback to ONNX
+        self.audio_embedding_weight = load_audio_embedding_weight(self.onnx_dir)
+        if self.audio_embedding_weight is not None:
+            self.audio_embed_session = None  # Not needed when using binary
+        else:
+            logger.info(f"Loading audio_embedding from {audio_embedding_path.name}...")
+            self.audio_embed_session = load_session(audio_embedding_path)
 
         if audio_encoder_path.exists():
             logger.info(f"Loading audio_encoder from {audio_encoder_path.name}...")
@@ -334,8 +365,23 @@ class LFM2AudioInference:
         return self.embed_tokens_weight[input_ids].astype(np.float32)
 
     def _get_audio_embeds(self, audio_codes: np.ndarray) -> np.ndarray:
-        """Get audio code embeddings."""
-        return self.audio_embed_session.run(["audio_embeds"], {"audio_codes": audio_codes})[0]
+        """Get audio code embeddings.
+
+        Uses direct numpy indexing if audio_embedding.bin is available,
+        otherwise falls back to ONNX model call.
+
+        Args:
+            audio_codes: [batch, num_codebooks] token indices
+
+        Returns:
+            embeddings: [batch, num_codebooks, hidden_size]
+        """
+        if self.audio_embedding_weight is not None:
+            # Direct numpy indexing (much faster than ONNX call)
+            return self.audio_embedding_weight[audio_codes].astype(np.float32)
+        else:
+            # Fallback to ONNX model
+            return self.audio_embed_session.run(["audio_embeds"], {"audio_codes": audio_codes})[0]
 
     def _run_decoder(
         self, embeds: np.ndarray, attention_mask: np.ndarray, cache: dict
