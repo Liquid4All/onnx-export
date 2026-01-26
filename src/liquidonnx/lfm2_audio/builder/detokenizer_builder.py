@@ -63,7 +63,6 @@ class AudioDetokenizerBuilder(ONNXBuilderBase):
         self.sliding_window = config.get("sliding_window", 30)
 
     def build_inputs(self):
-        """Build graph inputs."""
         self.inputs.append(
             helper.make_tensor_value_info(
                 "audio_codes", TensorProto.INT64, ["batch_size", self.num_codebooks, "time"]
@@ -71,7 +70,6 @@ class AudioDetokenizerBuilder(ONNXBuilderBase):
         )
 
     def build_outputs(self):
-        """Build graph outputs."""
         self.outputs.append(
             helper.make_tensor_value_info(
                 "stft_features",

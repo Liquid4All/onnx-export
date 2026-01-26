@@ -297,7 +297,6 @@ class LFM2AudioInference:
         return cache
 
     def _update_cache(self, cache: dict, outputs: dict) -> dict:
-        """Update cache with decoder outputs."""
         for key in cache:
             if key.startswith("past_conv."):
                 idx = int(key.split(".")[1])
@@ -356,12 +355,7 @@ class LFM2AudioInference:
             return int(np.random.choice(len(probs), p=probs))
 
     def _get_text_embeds(self, input_ids: np.ndarray) -> np.ndarray:
-        """Get text embeddings via numpy indexing on embed_tokens.weight.
-
-        This is equivalent to a Gather operation but done in numpy,
-        using the weight extracted from decoder.onnx at load time.
-        """
-        # input_ids: [batch, seq_len] -> embeds: [batch, seq_len, hidden]
+        # [batch, seq_len] → [batch, seq_len, hidden]
         return self.embed_tokens_weight[input_ids].astype(np.float32)
 
     def _get_audio_embeds(self, audio_codes: np.ndarray) -> np.ndarray:
@@ -386,7 +380,6 @@ class LFM2AudioInference:
     def _run_decoder(
         self, embeds: np.ndarray, attention_mask: np.ndarray, cache: dict
     ) -> tuple[np.ndarray, np.ndarray, dict]:
-        """Run decoder and return logits, hidden_states, and updated cache."""
         inputs = {
             "inputs_embeds": embeds.astype(np.float32),
             "attention_mask": attention_mask,
@@ -511,13 +504,10 @@ class LFM2AudioInference:
         if self.audio_detokenizer_session is None:
             raise RuntimeError("Audio detokenizer not loaded")
 
-        # ISTFT parameters (fixed for this model)
         n_fft = 1280
         hop_length = 320
         win_length = 1280
         n_fft_bins = n_fft // 2 + 1
-
-        # Generate Hann window
         window = np.hanning(n_fft).astype(np.float32)
 
         # Transpose: [T, 8] → [8, T] and add batch dimension → [1, 8, T]

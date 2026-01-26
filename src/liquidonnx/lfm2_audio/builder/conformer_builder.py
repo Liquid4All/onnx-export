@@ -41,8 +41,6 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         self.adapter_output_dim = adapter_output_dim
 
     def build_inputs(self):
-        """Build graph inputs for mel-spectrogram."""
-        # Input: mel-spectrogram [batch, time, features]
         self.inputs.append(
             helper.make_tensor_value_info(
                 "mel_spectrogram",
@@ -50,14 +48,11 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
                 ["batch_size", "time_steps", self.config.feat_in],
             )
         )
-        # Length of each sequence in the batch
         self.inputs.append(
             helper.make_tensor_value_info("mel_lengths", TensorProto.INT64, ["batch_size"])
         )
 
     def build_outputs(self):
-        """Build graph outputs for audio embeddings."""
-        # Output: audio embeddings [batch, reduced_time, hidden]
         self.outputs.append(
             helper.make_tensor_value_info(
                 "audio_embeddings",
@@ -65,7 +60,6 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
                 ["batch_size", "reduced_time", self.adapter_output_dim],
             )
         )
-        # Output lengths after subsampling
         self.outputs.append(
             helper.make_tensor_value_info("audio_lengths", TensorProto.INT64, ["batch_size"])
         )

@@ -53,7 +53,6 @@ def get_model_name(model_path: str) -> str:
 
 
 def load_audio_model_weights(model_path: str) -> dict[str, np.ndarray]:
-    """Load all weights from HuggingFace audio model."""
     from huggingface_hub import hf_hub_download
     from safetensors import safe_open
 
@@ -70,7 +69,6 @@ def load_audio_model_weights(model_path: str) -> dict[str, np.ndarray]:
 
 
 def load_audio_config(model_path: str) -> dict:
-    """Load config.json from HuggingFace model."""
     from huggingface_hub import hf_hub_download
 
     config_path = hf_hub_download(model_path, "config.json")
