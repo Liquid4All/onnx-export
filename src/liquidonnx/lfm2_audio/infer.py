@@ -168,6 +168,7 @@ class LFM2AudioInference:
     """ONNX inference for LFM2.5-Audio supporting all modes."""
 
     # Special tokens (from tokenizer)
+    IM_END_TOKEN = 7  # <|im_end|>
     AUDIO_START_TOKEN = 128  # <|audio_start|>
     TEXT_START_TOKEN = 129  # <|text_start|>
     TEXT_END_TOKEN = 130  # <|text_end|>
@@ -371,10 +372,8 @@ class LFM2AudioInference:
             embeddings: [batch, num_codebooks, hidden_size]
         """
         if self.audio_embedding_weight is not None:
-            # Direct numpy indexing (much faster than ONNX call)
             return self.audio_embedding_weight[audio_codes].astype(np.float32)
         else:
-            # Fallback to ONNX model
             return self.audio_embed_session.run(["audio_embeds"], {"audio_codes": audio_codes})[0]
 
     def _run_decoder(
@@ -680,8 +679,7 @@ class LFM2AudioInference:
         for _ in range(max_new_tokens - 1):
             if next_token == self.tokenizer.eos_token_id:
                 break
-            # Also stop on <|im_end|> token (token 7)
-            if next_token == 7:
+            if next_token == self.IM_END_TOKEN:
                 break
 
             next_ids = np.array([[next_token]], dtype=np.int64)
@@ -818,10 +816,6 @@ class LFM2AudioInference:
             tokens_generated += 1
 
             # Feed back audio codes to continue generation
-            # Audio embedding expects tokens in range [0, 16392) where:
-            # token = codebook_idx * 2049 + code_value
-            # Reference: in_emb = self.audio_embedding(next_token + self.codebook_offsets).sum(0)
-            # We get embeddings for all 8 codebooks and SUM them into a single embedding
             # Preserve 2048 (end-of-audio) for embedding lookup, clamp others to 0-2047
             clamped_codes = np.where(
                 frame_codes[0] == self.END_OF_AUDIO_TOKEN,
@@ -831,15 +825,13 @@ class LFM2AudioInference:
             audio_tokens = np.array(
                 [
                     [
-                        cb_idx * self.codebook_vocab + int(clamped_codes[cb_idx])
-                        for cb_idx in range(self.num_codebooks)
+                        cb * self.codebook_vocab + int(clamped_codes[cb])
+                        for cb in range(self.num_codebooks)
                     ]
                 ],
                 dtype=np.int64,
-            )  # [1, 8]
-            all_embeds = self._get_audio_embeds(audio_tokens)  # [1, 8, 2048]
-            # Sum embeddings across codebooks (axis=1), keep as [1, 1, 2048]
-            next_embeds = all_embeds.sum(axis=1, keepdims=True)  # [1, 1, 2048]
+            )
+            next_embeds = self._get_audio_embeds(audio_tokens).sum(axis=1, keepdims=True)
 
             attention_mask = np.ones((batch_size, total_len + 1), dtype=np.int64)
             logits, hidden_states, cache = self._run_decoder(next_embeds, attention_mask, cache)
@@ -931,14 +923,13 @@ class LFM2AudioInference:
                     audio_tokens = np.array(
                         [
                             [
-                                cb_idx * self.codebook_vocab + self.END_OF_AUDIO_TOKEN
-                                for cb_idx in range(self.num_codebooks)
+                                cb * self.codebook_vocab + self.END_OF_AUDIO_TOKEN
+                                for cb in range(self.num_codebooks)
                             ]
                         ],
                         dtype=np.int64,
                     )
-                    all_embeds = self._get_audio_embeds(audio_tokens)
-                    next_embeds = all_embeds.sum(axis=1, keepdims=True)
+                    next_embeds = self._get_audio_embeds(audio_tokens).sum(axis=1, keepdims=True)
                     attention_mask = np.ones((batch_size, total_len + 1), dtype=np.int64)
                     logits, hidden_states, cache = self._run_decoder(
                         next_embeds, attention_mask, cache
@@ -948,20 +939,17 @@ class LFM2AudioInference:
 
                 audio_codes.append(frame_codes[0])
 
-                # Feed all 8 codebook tokens as a summed embedding (like PyTorch reference)
-                # Token 2048 is valid in the embedding table (2049 entries per codebook)
+                # Feed all 8 codebook tokens as a summed embedding
                 audio_tokens = np.array(
                     [
                         [
-                            cb_idx * self.codebook_vocab + int(frame_codes[0][cb_idx])
-                            for cb_idx in range(self.num_codebooks)
+                            cb * self.codebook_vocab + int(frame_codes[0][cb])
+                            for cb in range(self.num_codebooks)
                         ]
                     ],
                     dtype=np.int64,
-                )  # [1, 8]
-                all_embeds = self._get_audio_embeds(audio_tokens)  # [1, 8, 2048]
-                # Sum embeddings across codebooks (axis=1), keep as [1, 1, 2048]
-                next_embeds = all_embeds.sum(axis=1, keepdims=True)  # [1, 1, 2048]
+                )
+                next_embeds = self._get_audio_embeds(audio_tokens).sum(axis=1, keepdims=True)
 
                 attention_mask = np.ones((batch_size, total_len + 1), dtype=np.int64)
                 logits, hidden_states, cache = self._run_decoder(next_embeds, attention_mask, cache)
@@ -1116,25 +1104,24 @@ class LFM2AudioInference:
                 audio_tokens = np.array(
                     [
                         [
-                            cb_idx * self.codebook_vocab + int(feed_codes[cb_idx])
-                            for cb_idx in range(self.num_codebooks)
+                            cb * self.codebook_vocab + int(feed_codes[cb])
+                            for cb in range(self.num_codebooks)
                         ]
                     ],
                     dtype=np.int64,
                 )
-                audio_embed = self._get_audio_embeds(audio_tokens)
-                next_embeds = audio_embed.sum(axis=1, keepdims=True)
+                next_embeds = self._get_audio_embeds(audio_tokens).sum(axis=1, keepdims=True)
             else:
                 # Generate text token
                 last_logits = logits[0, -1, :]
                 text_logits = last_logits[: self.vocab_size]
                 token = self._sample(text_logits, text_temperature, top_p=None)
 
-                if token == self.tokenizer.eos_token_id or token == 7:  # EOS or <|im_end|>
+                if token == self.tokenizer.eos_token_id or token == self.IM_END_TOKEN:
                     logger.info(f"End of turn at step {step}")
                     break
 
-                if token == 130:  # <|text_end|>
+                if token == self.TEXT_END_TOKEN:
                     logger.info(f"Text end at step {step}")
                     text_done = True
 
