@@ -160,8 +160,12 @@ def test_tts_deterministic(exports_dir: pathlib.Path, precision: str | None):
     prompt = "Hello"
 
     # Generate twice with same settings
-    codes1 = model.synthesize(text=prompt, max_new_tokens=30, audio_temperature=0, text_temperature=0)
-    codes2 = model.synthesize(text=prompt, max_new_tokens=30, audio_temperature=0, text_temperature=0)
+    codes1 = model.synthesize(
+        text=prompt, max_new_tokens=30, audio_temperature=0, text_temperature=0
+    )
+    codes2 = model.synthesize(
+        text=prompt, max_new_tokens=30, audio_temperature=0, text_temperature=0
+    )
 
     assert len(codes1) == len(codes2), f"Frame count differs: {len(codes1)} vs {len(codes2)}"
 
@@ -331,10 +335,7 @@ def test_tts_reference_multi_turn(reference_model, onnx_model):
 
     onnx_all_codes = []
     for turn_idx, user_text in enumerate(turns):
-        turn_prompt = (
-            f"<|im_start|>user\n{user_text}<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
+        turn_prompt = f"<|im_start|>user\n{user_text}<|im_end|>\n<|im_start|>assistant\n"
 
         if turn_idx == 0:
             full_prompt = "".join(prompt_parts) + turn_prompt
@@ -354,7 +355,7 @@ def test_tts_reference_multi_turn(reference_model, onnx_model):
         # Generate text until audio_start
         in_audio_mode = False
         for _ in range(10):
-            last_logits = logits[0, -1, :onnx_model.vocab_size]
+            last_logits = logits[0, -1, : onnx_model.vocab_size]
             token = int(np.argmax(last_logits))
 
             if token == onnx_model.AUDIO_START_TOKEN:
@@ -382,9 +383,7 @@ def test_tts_reference_multi_turn(reference_model, onnx_model):
         audio_codes = []
         for _ in range(50):
             last_hidden = hidden_states[0, -1:, :]
-            frame_codes = onnx_model._sample_audio_codes(
-                last_hidden, temperature=0
-            )
+            frame_codes = onnx_model._sample_audio_codes(last_hidden, temperature=0)
 
             if onnx_model._is_end_of_audio(frame_codes[0]):
                 break
@@ -393,8 +392,12 @@ def test_tts_reference_multi_turn(reference_model, onnx_model):
 
             clamped_codes = np.minimum(frame_codes[0], 2047)
             audio_tokens = np.array(
-                [[cb_idx * onnx_model.codebook_vocab + int(clamped_codes[cb_idx])
-                  for cb_idx in range(onnx_model.num_codebooks)]],
+                [
+                    [
+                        cb_idx * onnx_model.codebook_vocab + int(clamped_codes[cb_idx])
+                        for cb_idx in range(onnx_model.num_codebooks)
+                    ]
+                ],
                 dtype=np.int64,
             )
             all_embeds = onnx_model._get_audio_embeds(audio_tokens)
@@ -424,7 +427,9 @@ def test_tts_reference_multi_turn(reference_model, onnx_model):
         ref_codes = ref_all_codes[turn_idx]
         onnx_codes = onnx_all_codes[turn_idx]
 
-        logger.info(f"  Turn {turn_idx + 1} '{turns[turn_idx]}': ref={len(ref_codes)}, onnx={len(onnx_codes)}")
+        logger.info(
+            f"  Turn {turn_idx + 1} '{turns[turn_idx]}': ref={len(ref_codes)}, onnx={len(onnx_codes)}"
+        )
 
         # Both should produce some audio (allow empty for very short inputs)
         # Just validate code ranges

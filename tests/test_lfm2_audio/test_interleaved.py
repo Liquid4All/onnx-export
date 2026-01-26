@@ -396,8 +396,16 @@ def test_interleaved_reference_text_similarity(
         audio_temperature=0,
     )
 
-    logger.info(f"  Reference text: {ref_text[:100]}..." if len(ref_text) > 100 else f"  Reference text: {ref_text}")
-    logger.info(f"  ONNX text: {onnx_text[:100]}..." if len(onnx_text) > 100 else f"  ONNX text: {onnx_text}")
+    logger.info(
+        f"  Reference text: {ref_text[:100]}..."
+        if len(ref_text) > 100
+        else f"  Reference text: {ref_text}"
+    )
+    logger.info(
+        f"  ONNX text: {onnx_text[:100]}..."
+        if len(onnx_text) > 100
+        else f"  ONNX text: {onnx_text}"
+    )
 
     # Both should produce some text
     assert len(ref_text) > 0, "Reference produced no text"
