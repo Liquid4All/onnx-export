@@ -329,7 +329,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "torch", specifier = ">=2.0.0" },
     { name = "torchvision", specifier = ">=0.24.1" },
-    { name = "transformers", git = "ssh://git@github.com/Liquid4All/transformers_private.git?branch=lfm2-config" },
+    { name = "transformers", git = "https://github.com/huggingface/transformers.git?rev=3c25177" },
 ]
 provides-extras = ["gpu", "dev"]
 
@@ -1309,7 +1309,7 @@ wheels = [
 [[package]]
 name = "transformers"
 version = "5.0.0.dev0"
-source = { git = "ssh://git@github.com/Liquid4All/transformers_private.git?branch=lfm2-config#d6cb9404d7d0eb35f2e5dfbe1a248456222b3d4c" }
+source = { git = "https://github.com/huggingface/transformers.git?rev=3c25177#3c2517727ce28a30f5044e01663ee204deb1cdbe" }
 dependencies = [
     { name = "filelock" },
     { name = "huggingface-hub" },

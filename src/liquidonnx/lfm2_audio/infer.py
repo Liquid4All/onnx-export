@@ -187,6 +187,10 @@ class LFM2AudioInference:
     MIXED_START_TOKEN = 131  # <|mixed_start|>
     MIXED_END_TOKEN = 132  # <|mixed_end|>
 
+    # Interleaved mode switching thresholds (matching liquid-audio)
+    INTERLEAVED_N_TEXT = 6  # Text tokens before switching to audio
+    INTERLEAVED_N_AUDIO = 12  # Audio frames before switching to text
+
     def __init__(
         self,
         model_dir: pathlib.Path,
@@ -1016,107 +1020,39 @@ class LFM2AudioInference:
 
         return text_output, audio_codes
 
-    def generate_interleaved_from_audio(
+    def _generate_interleaved_response(
         self,
-        audio_path: str,
-        max_new_tokens: int = 300,
-        text_temperature: float = 1.0,
-        audio_temperature: float = 1.0,
-        audio_top_k: int = 4,
-        system_prompt: str = DEFAULT_SYSTEM_PROMPT_INTERLEAVED,
-        text_prompt: str | None = None,
+        logits: np.ndarray,
+        hidden_states: np.ndarray,
+        max_new_tokens: int,
+        text_temperature: float,
+        audio_temperature: float,
+        audio_top_k: int,
     ) -> tuple[str, list[np.ndarray]]:
-        """Generate interleaved text+audio response from audio input.
+        """Shared generation loop for stateful interleaved mode.
 
-        Stateful: KV cache is preserved across calls for multi-turn conversation.
-        Call reset() to start a new conversation.
-
-        Defaults match official liquid-audio demo (not library defaults).
-        Uses counter-based mode switching:
-        - interleaved_n_text = 6 (text tokens before switching to audio)
-        - interleaved_n_audio = 12 (audio frames before switching to text)
+        Uses counter-based mode switching matching liquid-audio:
+        - INTERLEAVED_N_TEXT tokens of text, then switch to audio
+        - INTERLEAVED_N_AUDIO frames of audio, then switch to text
+        - TEXT_END_TOKEN forces switch to audio mode
 
         Args:
-            audio_path: Path to input audio file
+            logits: Initial logits from decoder [1, seq_len, vocab_size]
+            hidden_states: Initial hidden states [1, seq_len, hidden_size]
             max_new_tokens: Maximum tokens to generate
-            text_temperature: Sampling temperature for text (1.0 matches liquid-audio)
-            audio_temperature: Sampling temperature for audio (1.0 matches liquid-audio)
-            audio_top_k: Top-k sampling for audio (4 matches liquid-audio)
-            system_prompt: System prompt for interleaved mode (only used on first turn).
-            text_prompt: Optional text to include in user turn alongside audio.
+            text_temperature: Sampling temperature for text
+            audio_temperature: Sampling temperature for audio
+            audio_top_k: Top-k sampling for audio
 
         Returns:
             Tuple of (text_response, audio_codes)
         """
         batch_size = 1
-
-        # Encode audio
-        mel_features, mel_lengths = self._compute_mel_features(audio_path)
-        audio_embeds, _ = self.audio_encoder_session.run(
-            ["audio_embeddings", "audio_lengths"],
-            {"mel_spectrogram": mel_features.astype(np.float32), "mel_lengths": mel_lengths},
-        )
-
-        # === Build prompt based on conversation state ===
-        if self.cache is None:
-            # First turn: include system prompt
-            prefix_text = (
-                f"<|startoftext|><|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n"
-            )
-            self.cache = self._init_cache(batch_size)
-            self.cache_seq_len = 0
-            logger.info("Starting new conversation")
-        else:
-            # Continuation: just user turn (system already in cache)
-            prefix_text = "<|im_start|>user\n"
-            logger.info(f"Continuing conversation (cache seq_len={self.cache_seq_len})")
-
-        suffix_text = "<|im_end|>\n<|im_start|>assistant\n"
-
-        prefix_ids = self.tokenizer.encode(
-            prefix_text, return_tensors="np", add_special_tokens=False
-        )
-        suffix_ids = self.tokenizer.encode(
-            suffix_text, return_tensors="np", add_special_tokens=False
-        )
-
-        prefix_embeds = self._get_text_embeds(prefix_ids)
-        suffix_embeds = self._get_text_embeds(suffix_ids)
-
-        # Optional text prompt embeddings (added after audio in user turn)
-        if text_prompt:
-            text_prompt_ids = self.tokenizer.encode(
-                text_prompt, return_tensors="np", add_special_tokens=False
-            )
-            text_prompt_embeds = self._get_text_embeds(text_prompt_ids)
-            logger.info(f"Text prompt: {text_prompt} ({text_prompt_ids.shape[1]} tokens)")
-            # Concatenate: prefix + audio + text_prompt + suffix
-            all_embeds = np.concatenate(
-                [prefix_embeds, audio_embeds, text_prompt_embeds, suffix_embeds], axis=1
-            )
-        else:
-            # Concatenate: prefix + audio + suffix (only NEW tokens for this turn)
-            all_embeds = np.concatenate([prefix_embeds, audio_embeds, suffix_embeds], axis=1)
-
-        new_seq_len = all_embeds.shape[1]
-        total_len = self.cache_seq_len + new_seq_len
-
-        # Attention mask covers full sequence (cached + new)
-        attention_mask = np.ones((batch_size, total_len), dtype=np.int64)
-        logits, hidden_states, self.cache = self._run_decoder(
-            all_embeds, attention_mask, self.cache
-        )
-        self.cache_seq_len = total_len
-
-        # Generate with counter-based mode switching (matching liquid-audio)
-        INTERLEAVED_N_TEXT = 6
-        INTERLEAVED_N_AUDIO = 12
-
         text_tokens = []
         audio_codes = []
         total_len = self.cache_seq_len
         in_audio_mode = False
-        modality_left = INTERLEAVED_N_TEXT
+        modality_left = self.INTERLEAVED_N_TEXT
         text_done = False
 
         for step in range(max_new_tokens):
@@ -1126,7 +1062,7 @@ class LFM2AudioInference:
                 if self.onnx_depthformer is None or hidden_states is None:
                     logger.warning("Depthformer unavailable, exiting audio mode")
                     in_audio_mode = False
-                    modality_left = INTERLEAVED_N_TEXT
+                    modality_left = self.INTERLEAVED_N_TEXT
                     continue
 
                 last_hidden = hidden_states[0, -1:, :]
@@ -1138,28 +1074,26 @@ class LFM2AudioInference:
                 # Switch back to text after N audio frames (if text not done)
                 if modality_left <= 0 and not text_done:
                     in_audio_mode = False
-                    modality_left = INTERLEAVED_N_TEXT
+                    modality_left = self.INTERLEAVED_N_TEXT
 
                 # Check for end of audio - first codebook == 2048 (matching liquid-audio)
-                # liquid-audio: if next_token[0] == 2048: next_token[:] = 2048; current_modality = TEXT
-                # NOTE: liquid-audio does NOT reset modality_left, just switches mode
-                if frame[0] == 2048:
+                if frame[0] == self.END_OF_AUDIO_TOKEN:
                     logger.info(f"End of audio token at step {step}")
-                    frame[:] = 2048  # Set all codes to 2048 (matching liquid-audio)
+                    frame[:] = self.END_OF_AUDIO_TOKEN
                     in_audio_mode = False
-                    # NOTE: Don't reset modality_left - it continues from where it was
-                    # Don't save this frame, but still feed it back (matching liquid-audio)
                 else:
-                    # Save valid frame
                     clamped_frame = np.minimum(frame, 2047)
                     audio_codes.append(clamped_frame.copy())
 
                     if len(audio_codes) % 20 == 0:
                         logger.info(f"Generated {len(audio_codes)} audio frames...")
 
-                # Get embeddings for next step (always feed back, even for 2048 frames)
-                # Use 2048 directly for end-of-audio, clamp others
-                feed_codes = np.where(frame == 2048, 2048, np.minimum(frame, 2047))
+                # Get embeddings for next step (always feed back, even for end-of-audio)
+                feed_codes = np.where(
+                    frame == self.END_OF_AUDIO_TOKEN,
+                    self.END_OF_AUDIO_TOKEN,
+                    np.minimum(frame, 2047),
+                )
                 audio_tokens = np.array(
                     [
                         [
@@ -1187,7 +1121,7 @@ class LFM2AudioInference:
                 # Switch to audio after N text tokens OR text_end
                 if modality_left <= 0 or text_done:
                     in_audio_mode = True
-                    modality_left = INTERLEAVED_N_AUDIO
+                    modality_left = self.INTERLEAVED_N_AUDIO
 
                 text_tokens.append(token)
                 next_ids = np.array([[token]], dtype=np.int64)
@@ -1201,7 +1135,6 @@ class LFM2AudioInference:
             total_len += 1
 
         # Feed im_end token to finalize this turn in the cache
-        # This ensures proper context for the next turn
         im_end_embeds = self._get_text_embeds(np.array([[self.IM_END_TOKEN]], dtype=np.int64))
         attention_mask = np.ones((batch_size, total_len + 1), dtype=np.int64)
         _, _, self.cache = self._run_decoder(im_end_embeds, attention_mask, self.cache)
@@ -1215,6 +1148,91 @@ class LFM2AudioInference:
         logger.info(f"Cache seq_len: {self.cache_seq_len}")
 
         return text_output, audio_codes
+
+    def generate_interleaved_from_audio(
+        self,
+        audio_path: str,
+        max_new_tokens: int = 300,
+        text_temperature: float = 1.0,
+        audio_temperature: float = 1.0,
+        audio_top_k: int = 4,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT_INTERLEAVED,
+        text_prompt: str | None = None,
+    ) -> tuple[str, list[np.ndarray]]:
+        """Generate interleaved text+audio response from audio input.
+
+        Stateful: KV cache is preserved across calls for multi-turn conversation.
+        Call reset() to start a new conversation.
+
+        Args:
+            audio_path: Path to input audio file
+            max_new_tokens: Maximum tokens to generate
+            text_temperature: Sampling temperature for text (1.0 matches liquid-audio)
+            audio_temperature: Sampling temperature for audio (1.0 matches liquid-audio)
+            audio_top_k: Top-k sampling for audio (4 matches liquid-audio)
+            system_prompt: System prompt for interleaved mode (only used on first turn).
+            text_prompt: Optional text to include in user turn alongside audio.
+
+        Returns:
+            Tuple of (text_response, audio_codes)
+        """
+        batch_size = 1
+
+        # Encode audio
+        mel_features, mel_lengths = self._compute_mel_features(audio_path)
+        audio_embeds, _ = self.audio_encoder_session.run(
+            ["audio_embeddings", "audio_lengths"],
+            {"mel_spectrogram": mel_features.astype(np.float32), "mel_lengths": mel_lengths},
+        )
+
+        # === Build prompt based on conversation state ===
+        if self.cache is None:
+            prefix_text = (
+                f"<|startoftext|><|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n"
+            )
+            self.cache = self._init_cache(batch_size)
+            self.cache_seq_len = 0
+            logger.info("Starting new conversation")
+        else:
+            prefix_text = "<|im_start|>user\n"
+            logger.info(f"Continuing conversation (cache seq_len={self.cache_seq_len})")
+
+        suffix_text = "<|im_end|>\n<|im_start|>assistant\n"
+
+        prefix_ids = self.tokenizer.encode(
+            prefix_text, return_tensors="np", add_special_tokens=False
+        )
+        suffix_ids = self.tokenizer.encode(
+            suffix_text, return_tensors="np", add_special_tokens=False
+        )
+        prefix_embeds = self._get_text_embeds(prefix_ids)
+        suffix_embeds = self._get_text_embeds(suffix_ids)
+
+        # Build embeddings: prefix + audio + [text_prompt] + suffix
+        if text_prompt:
+            text_prompt_ids = self.tokenizer.encode(
+                text_prompt, return_tensors="np", add_special_tokens=False
+            )
+            text_prompt_embeds = self._get_text_embeds(text_prompt_ids)
+            logger.info(f"Text prompt: {text_prompt} ({text_prompt_ids.shape[1]} tokens)")
+            all_embeds = np.concatenate(
+                [prefix_embeds, audio_embeds, text_prompt_embeds, suffix_embeds], axis=1
+            )
+        else:
+            all_embeds = np.concatenate([prefix_embeds, audio_embeds, suffix_embeds], axis=1)
+
+        # Run initial prefill
+        new_seq_len = all_embeds.shape[1]
+        total_len = self.cache_seq_len + new_seq_len
+        attention_mask = np.ones((batch_size, total_len), dtype=np.int64)
+        logits, hidden_states, self.cache = self._run_decoder(
+            all_embeds, attention_mask, self.cache
+        )
+        self.cache_seq_len = total_len
+
+        return self._generate_interleaved_response(
+            logits, hidden_states, max_new_tokens, text_temperature, audio_temperature, audio_top_k
+        )
 
     def generate_interleaved_from_text(
         self,
@@ -1245,13 +1263,11 @@ class LFM2AudioInference:
 
         # === Build prompt based on conversation state ===
         if self.cache is None:
-            # First turn: include system prompt
             prefix_text = f"<|startoftext|><|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_text}<|im_end|>\n<|im_start|>assistant\n"
             self.cache = self._init_cache(batch_size)
             self.cache_seq_len = 0
             logger.info("Starting new conversation")
         else:
-            # Continuation: just user turn
             prefix_text = f"<|im_start|>user\n{user_text}<|im_end|>\n<|im_start|>assistant\n"
             logger.info(f"Continuing conversation (cache seq_len={self.cache_seq_len})")
 
@@ -1260,106 +1276,18 @@ class LFM2AudioInference:
         )
         prefix_embeds = self._get_text_embeds(prefix_ids)
 
+        # Run initial prefill
         new_seq_len = prefix_embeds.shape[1]
         total_len = self.cache_seq_len + new_seq_len
-
-        # Attention mask covers full sequence (cached + new)
         attention_mask = np.ones((batch_size, total_len), dtype=np.int64)
         logits, hidden_states, self.cache = self._run_decoder(
             prefix_embeds, attention_mask, self.cache
         )
         self.cache_seq_len = total_len
 
-        # Generate with counter-based mode switching (matching liquid-audio)
-        INTERLEAVED_N_TEXT = 6
-        INTERLEAVED_N_AUDIO = 12
-
-        text_tokens = []
-        audio_codes = []
-        total_len = self.cache_seq_len
-        in_audio_mode = False
-        modality_left = INTERLEAVED_N_TEXT
-        text_done = False
-
-        for step in range(max_new_tokens):
-            modality_left -= 1
-
-            if in_audio_mode:
-                if self.onnx_depthformer is None or hidden_states is None:
-                    logger.warning("Depthformer unavailable, exiting audio mode")
-                    in_audio_mode = False
-                    modality_left = INTERLEAVED_N_TEXT
-                    continue
-
-                last_hidden = hidden_states[0, -1:, :]
-                frame_codes = self._sample_audio_codes(
-                    last_hidden, temperature=audio_temperature, top_k=audio_top_k
-                )
-                frame = frame_codes[0]
-
-                if modality_left <= 0 and not text_done:
-                    in_audio_mode = False
-                    modality_left = INTERLEAVED_N_TEXT
-
-                if frame[0] == 2048:
-                    logger.info(f"End of audio token at step {step}")
-                    frame[:] = 2048
-                    in_audio_mode = False
-                else:
-                    clamped_frame = np.minimum(frame, 2047)
-                    audio_codes.append(clamped_frame.copy())
-
-                feed_codes = np.where(frame == 2048, 2048, np.minimum(frame, 2047))
-                audio_tokens = np.array(
-                    [
-                        [
-                            cb * self.codebook_vocab + int(feed_codes[cb])
-                            for cb in range(self.num_codebooks)
-                        ]
-                    ],
-                    dtype=np.int64,
-                )
-                next_embeds = self._get_audio_embeds(audio_tokens).sum(axis=1, keepdims=True)
-            else:
-                last_logits = logits[0, -1, :]
-                text_logits = last_logits[: self.vocab_size]
-                token = self._sample(text_logits, text_temperature, top_p=None)
-
-                if token == self.tokenizer.eos_token_id or token == self.IM_END_TOKEN:
-                    logger.info(f"End of turn at step {step}")
-                    break
-
-                if token == self.TEXT_END_TOKEN:
-                    logger.info(f"Text end at step {step}")
-                    text_done = True
-
-                if modality_left <= 0 or text_done:
-                    in_audio_mode = True
-                    modality_left = INTERLEAVED_N_AUDIO
-
-                text_tokens.append(token)
-                next_ids = np.array([[token]], dtype=np.int64)
-                next_embeds = self._get_text_embeds(next_ids)
-
-            attention_mask = np.ones((batch_size, total_len + 1), dtype=np.int64)
-            logits, hidden_states, self.cache = self._run_decoder(
-                next_embeds, attention_mask, self.cache
-            )
-            total_len += 1
-
-        # Feed im_end token to finalize this turn
-        im_end_embeds = self._get_text_embeds(np.array([[self.IM_END_TOKEN]], dtype=np.int64))
-        attention_mask = np.ones((batch_size, total_len + 1), dtype=np.int64)
-        _, _, self.cache = self._run_decoder(im_end_embeds, attention_mask, self.cache)
-        total_len += 1
-
-        self.cache_seq_len = total_len
-
-        text_output = self.tokenizer.decode(text_tokens, skip_special_tokens=True)
-        logger.info(f"Generated {len(text_tokens)} text tokens, {len(audio_codes)} audio frames")
-        logger.info(f"Cache seq_len: {self.cache_seq_len}")
-
-        return text_output, audio_codes
+        return self._generate_interleaved_response(
+            logits, hidden_states, max_new_tokens, text_temperature, audio_temperature, audio_top_k
+        )
 
 
 # === Numpy Mel Spectrogram ===
