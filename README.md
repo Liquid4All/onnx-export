@@ -71,31 +71,31 @@ All inference commands provide interactive multi-turn chat with streaming output
 
 ```bash
 # Interactive chat (starts conversation loop)
-uv run lfm2-infer --model LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx
+uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx
 
 # Single prompt (non-interactive)
-uv run lfm2-infer --model LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx \
+uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx \
     --prompt "Explain quantum computing"
 
 # Force CPU execution
-uv run lfm2-infer --model LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx --cpu
+uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx --cpu
 ```
 
 ### 4.2 Vision-Language
 
 ```bash
 # Single image analysis
-uv run lfm2-vl-infer --model LFM2.5-VL-1.6B-ONNX \
+uv run lfm2-vl-infer --model ./exports/LFM2.5-VL-1.6B-ONNX \
     --images photo.jpg \
     --prompt "What do you see in this image?"
 
 # Multi-image comparison (up to 2 images)
-uv run lfm2-vl-infer --model LFM2.5-VL-1.6B-ONNX \
+uv run lfm2-vl-infer --model ./exports/LFM2.5-VL-1.6B-ONNX \
     --images image1.jpg image2.jpg \
     --prompt "Compare these two images"
 
 # Text-only (no images)
-uv run lfm2-vl-infer --model LFM2.5-VL-1.6B-ONNX \
+uv run lfm2-vl-infer --model ./exports/LFM2.5-VL-1.6B-ONNX \
     --prompt "Hello, how are you?"
 ```
 
@@ -105,10 +105,10 @@ uv run lfm2-vl-infer --model LFM2.5-VL-1.6B-ONNX \
 
 ```bash
 # Interactive chat
-uv run lfm2-moe-infer --model LFM2-MoE-8B-A1B-ONNX/onnx/model_q4.onnx
+uv run lfm2-moe-infer --model ./exports/LFM2-MoE-8B-A1B-ONNX/onnx/model_q4.onnx
 
 # Force CPU (when model does not fit VRAM)
-uv run lfm2-moe-infer --model LFM2-MoE-8B-A1B-ONNX/onnx/model_q4.onnx --cpu
+uv run lfm2-moe-infer --model ./exports/LFM2-MoE-8B-A1B-ONNX/onnx/model_q4.onnx --cpu
 ```
 
 ### 4.4 Audio (ASR, TTS, Interleaved)
@@ -175,7 +175,7 @@ Benchmarking, compare the CPU
 ```bash
 # Text model benchmark
 uv run lfm2-bench --model LiquidAI/LFM2.5-1.2B-Instruct \
-    --onnx LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx
+    --onnx ./exports/LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx
 ```
 
 ## 6. Pre-exported Models

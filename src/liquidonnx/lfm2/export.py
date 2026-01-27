@@ -319,7 +319,7 @@ def main():
 
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+    logging.basicConfig(level=logging.INFO)
 
     # Derive output name from model path
     model_name = get_model_name(args.model)

@@ -195,7 +195,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=20, help="Max tokens to generate")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+    logging.basicConfig(level=logging.INFO)
 
     benchmark = ONNXBenchmark(args.model)
     result = benchmark.benchmark(args.onnx, args.prompt, args.max_tokens)
