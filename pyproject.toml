@@ -38,6 +38,9 @@ lfm2-vl-infer = "liquidonnx.lfm2_vl.infer:main"
 lfm2-moe-export = "liquidonnx.lfm2_moe.export:main"
 lfm2-moe-infer = "liquidonnx.lfm2_moe.infer:main"
 
+# LFM2.5-Audio multimodal audio model tools
+lfm2-audio-infer = "liquidonnx.lfm2_audio.infer:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
