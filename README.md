@@ -20,6 +20,7 @@ ONNX export and inference tools for [LFM2](https://www.liquid.ai/liquid-foundati
 | **LFM2.5**, **LFM2** | fp32, fp16, q4, q8 |
 | **LFM2.5-VL**, **LFM2-VL** | fp32, fp16, q4, q8 |
 | **LFM2-MoE** | fp32, fp16, q4, q4f16 |
+| **LFM2.5-Audio** | fp32, fp16, q4, q8 |
 
 
 ## 2. Installation
@@ -110,6 +111,47 @@ uv run lfm2-moe-infer --model ./exports/LFM2-MoE-8B-A1B-ONNX/onnx/model_q4.onnx
 uv run lfm2-moe-infer --model ./exports/LFM2-MoE-8B-A1B-ONNX/onnx/model_q4.onnx --cpu
 ```
 
+### 4.4 Audio (ASR, TTS, Interleaved)
+
+LFM2.5-Audio is a multimodal audio-language model supporting three modes:
+- **ASR** (Automatic Speech Recognition): Transcribe audio to text
+- **TTS** (Text-to-Speech): Generate audio from text
+- **Interleaved**: Mixed text and audio input/output for conversational audio
+
+The model uses 5 ONNX components:
+- `decoder.onnx` - LFM2 language model backbone
+- `audio_encoder.onnx` - Conformer encoder for ASR input
+- `audio_embedding.onnx` - Audio code embeddings for TTS/interleaved
+- `audio_detokenizer.onnx` - Converts audio codes to STFT features
+- `vocoder_depthformer.onnx` - Autoregressive audio codebook prediction
+
+```bash
+# ASR: Transcribe audio to text
+uv run lfm2-audio-infer LFM2.5-Audio-1.5B-ONNX --mode asr \
+    --audio input.wav --precision q4
+
+# TTS: Generate speech from text
+uv run lfm2-audio-infer LFM2.5-Audio-1.5B-ONNX --mode tts \
+    --prompt "Hello, how are you today?" \
+    --system "Perform TTS. Use the UK female voice." \
+    --output output.wav --precision q4
+
+# Interleaved: Audio input with text+audio response
+uv run lfm2-audio-infer LFM2.5-Audio-1.5B-ONNX --mode interleaved \
+    --audio question.wav --output response.wav --precision q4
+
+# Interactive chat mode (multi-turn with stateful KV cache)
+uv run lfm2-audio-infer LFM2.5-Audio-1.5B-ONNX --mode interleaved --chat \
+    --output output.wav --precision q4
+# Commands in chat mode:
+#   /audio <file> [text] - Send audio with optional text
+#   <text>               - Send text message
+#   reset                - Clear conversation state
+#   quit                 - Exit
+```
+
+> **Note:** Audio inference requires the model directory path (not a single .onnx file) since it loads multiple components. Use `--precision` to select quantization level (fp16, q4, q8).
+
 ## 5. Testing
 
 Tests verify ONNX exports against PyTorch reference models.
@@ -148,6 +190,9 @@ uv run lfm2-bench --model LiquidAI/LFM2.5-1.2B-Instruct \
 
 **Vision-Language:**
 - [LiquidAI/LFM2.5-VL-1.6B-ONNX](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-ONNX)
+
+**Audio:**
+- [LiquidAI/LFM2.5-Audio-1.5B-ONNX](https://huggingface.co/LiquidAI/LFM2.5-Audio-1.5B-ONNX)
 
 ### 6.2 onnx-community
 

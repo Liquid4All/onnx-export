@@ -41,7 +41,7 @@ lfm2-vl-infer = "liquidonnx.lfm2_vl.infer:main"
 lfm2-moe-export = "liquidonnx.lfm2_moe.export:main"
 lfm2-moe-infer = "liquidonnx.lfm2_moe.infer:main"
 
-# LFM2.5-Audio model tools
+# LFM2.5-Audio multimodal audio model tools
 lfm2-audio-export = "liquidonnx.lfm2_audio.export:main"
 lfm2-audio-infer = "liquidonnx.lfm2_audio.infer:main"
 
