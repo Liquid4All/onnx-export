@@ -35,9 +35,7 @@ from liquidonnx.external_data import split_external_data
 from liquidonnx.lfm2.builder import LFM2Builder, LFM2Config
 from liquidonnx.lfm2_audio.builder.config import ConformerConfig
 from liquidonnx.lfm2_audio.builder.conformer_builder import ConformerEncoderBuilder
-from liquidonnx.lfm2_audio.builder.depthformer_builder import (
-    export_vocoder_depthformer,
-)
+from liquidonnx.lfm2_audio.builder.depthformer_builder import export_vocoder_depthformer
 from liquidonnx.lfm2_audio.builder.detokenizer_builder import (
     export_audio_detokenizer_builder,
 )

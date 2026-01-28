@@ -1,16 +1,11 @@
 """
 Depthformer ONNX builder for autoregressive audio codebook prediction.
 
-The depthformer predicts 8 audio codebook tokens autoregressively:
-1. depth_linear: [B, 2048] → [B, 8, 1024] (integrated into this model)
-2. depthformer transformer with KV cache (called 8× per frame)
-
 Architecture:
-    decoder hidden_states [B, 2048]
+    step 0: depth_linear(hidden_states) → depth_slices [B, 8, 1024]
+    step 1-7: reuse cached depth_slices
             ↓
-    depth_linear → [B, 8, 1024] (8 slices)
-            ↓
-    depthformer_unified (8 iterations) → 8 tokens
+    depthformer transformer (8 iterations) → 8 codebook tokens
 """
 
 import logging
@@ -33,7 +28,8 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
     select appropriate weights.
 
     Architecture (per step):
-        1. (First call only) Apply depth_linear: [B, 2048] → [B, 8, 1024]
+        1. If step_idx == 0: depth_linear(hidden_states) → depth_slices [B, 8, 1024]
+           If step_idx > 0: use depth_slices_in directly (skip depth_linear)
         2. Gather current depth slice by step_idx
         3. Lookup prev_token embedding (zero for step 0)
         4. Add slice + embedding → transformer input [B, 1, 1024]
@@ -41,17 +37,20 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         6. Step-indexed RMSNorm and logits projection
 
     Inputs:
-        hidden_states: [B, 2048] - Decoder hidden states (depth_linear applied internally)
+        hidden_states: [B, 2048] - Decoder hidden states (used only at step 0)
+        depth_slices_in: [B, 8, 1024] - Cached depth slices (used when step_idx > 0)
         step_idx: scalar int64 - Which codebook step (0-7)
         prev_token: [B] int64 - Previous step's sampled token
-        past_keys: [6, B, past_len, 8, 32] - KV cache keys
-        past_values: [6, B, past_len, 8, 32] - KV cache values
+        past_keys: [6, B, 8, past_len, 32] - KV cache keys (BNSH)
+        past_values: [6, B, 8, past_len, 32] - KV cache values (BNSH)
+        seqlens_k: [B] int32 - Past sequence length per batch item
+        total_seq_len: scalar int32 - past_len + 1
 
     Outputs:
         logits: [B, 2049] - Codebook logits
-        depth_slices: [B, 8, 1024] - Depth slices (for subsequent steps)
-        new_keys: [6, B, new_len, 8, 32] - Updated KV cache keys
-        new_values: [6, B, new_len, 8, 32] - Updated KV cache values
+        depth_slices: [B, 8, 1024] - Computed (step 0) or passed-through (step 1-7)
+        new_keys: [6, B, 8, new_len, 32] - Updated KV cache keys (BNSH)
+        new_values: [6, B, 8, new_len, 32] - Updated KV cache values (BNSH)
     """
 
     def __init__(self):
@@ -72,10 +71,18 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
 
     def build_inputs(self):
         """Build graph inputs."""
-        # hidden_states: [B, 2048] - decoder output
+        # hidden_states: [B, 2048] - decoder output (used only at step 0)
         self.inputs.append(
             helper.make_tensor_value_info(
                 "hidden_states", TensorProto.FLOAT, ["batch", self.input_hidden_size]
+            )
+        )
+        # depth_slices_in: [B, 8, 1024] - cached depth slices (used when step_idx > 0)
+        self.inputs.append(
+            helper.make_tensor_value_info(
+                "depth_slices_in",
+                TensorProto.FLOAT,
+                ["batch", self.num_codebooks, self.dim],
             )
         )
         # step_idx: scalar
@@ -84,22 +91,26 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         self.inputs.append(
             helper.make_tensor_value_info("prev_token", TensorProto.INT64, ["batch"])
         )
-        # past_keys: [6, B, past_len, 8, 32]
+        # past_keys: [6, B, 8, past_len, 32] (BNSH for GQA op)
         self.inputs.append(
             helper.make_tensor_value_info(
                 "past_keys",
                 TensorProto.FLOAT,
-                [self.num_layers, "batch", "past_len", self.num_kv_heads, self.head_dim],
+                [self.num_layers, "batch", self.num_kv_heads, "past_len", self.head_dim],
             )
         )
-        # past_values: [6, B, past_len, 8, 32]
+        # past_values: [6, B, 8, past_len, 32] (BNSH for GQA op)
         self.inputs.append(
             helper.make_tensor_value_info(
                 "past_values",
                 TensorProto.FLOAT,
-                [self.num_layers, "batch", "past_len", self.num_kv_heads, self.head_dim],
+                [self.num_layers, "batch", self.num_kv_heads, "past_len", self.head_dim],
             )
         )
+        # seqlens_k: [B] int32 - past sequence length per batch element
+        self.inputs.append(helper.make_tensor_value_info("seqlens_k", TensorProto.INT32, ["batch"]))
+        # total_seq_len: scalar int32 - past_len + 1
+        self.inputs.append(helper.make_tensor_value_info("total_seq_len", TensorProto.INT32, []))
 
     def build_outputs(self):
         """Build graph outputs."""
@@ -113,20 +124,20 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
                 "depth_slices", TensorProto.FLOAT, ["batch", self.num_codebooks, self.dim]
             )
         )
-        # new_keys: [6, B, new_len, 8, 32]
+        # new_keys: [6, B, 8, new_len, 32] (BNSH)
         self.outputs.append(
             helper.make_tensor_value_info(
                 "new_keys",
                 TensorProto.FLOAT,
-                [self.num_layers, "batch", "new_len", self.num_kv_heads, self.head_dim],
+                [self.num_layers, "batch", self.num_kv_heads, "new_len", self.head_dim],
             )
         )
-        # new_values: [6, B, new_len, 8, 32]
+        # new_values: [6, B, 8, new_len, 32] (BNSH)
         self.outputs.append(
             helper.make_tensor_value_info(
                 "new_values",
                 TensorProto.FLOAT,
-                [self.num_layers, "batch", "new_len", self.num_kv_heads, self.head_dim],
+                [self.num_layers, "batch", self.num_kv_heads, "new_len", self.head_dim],
             )
         )
 
@@ -144,33 +155,93 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         freqs_sin = np.sin(freqs).astype(np.float32)
         return freqs_cos, freqs_sin
 
-    def build_depth_linear(self) -> str:
-        """Build depth_linear projection: [B, 2048] → [B, 8, 1024].
+    def build_conditional_depth_linear(self) -> str:
+        """Build depth_linear with conditional execution via ONNX If node.
 
-        Operations:
-            1. MatMul: [B, 2048] × [2048, 8192] → [B, 8192]
-            2. Add: [B, 8192] + [8192] → [B, 8192]
-            3. Reshape: [B, 8192] → [B, 8, 1024]
+        step_idx == 0: compute depth_linear(hidden_states) → [B, 8, 1024]
+        step_idx > 0: pass through depth_slices_in (skip depth_linear MatMul)
 
         Returns:
             Output tensor name for depth_slices [B, 8, 1024]
         """
-        prefix = "/depth_linear"
-
-        # MatMul: hidden_states @ weight
-        matmul_out = self.make_matmul(
-            "hidden_states", "depth_linear.weight", f"{prefix}/MatMul/output_0"
+        # === Condition: step_idx == 0 ===
+        is_first = self.make_node(
+            "Equal",
+            ["step_idx", self.get_constant(0)],
+            ["/cond_depth/is_first/output_0"],
         )
 
-        # Add: + bias
-        add_out = self.make_add(matmul_out, "depth_linear.bias", f"{prefix}/Add/output_0")
-
-        # Reshape: [B, 8192] → [B, 8, 1024]
-        return self.make_reshape(
-            add_out,
-            self.get_constant([-1, self.num_codebooks, self.dim]),
-            "depth_slices",
+        # === Then branch: compute depth_linear(hidden_states) ===
+        reshape_shape_init = helper.make_tensor(
+            "dl_reshape_shape",
+            TensorProto.INT64,
+            [3],
+            [-1, self.num_codebooks, self.dim],
         )
+        then_nodes = [
+            helper.make_node(
+                "MatMul",
+                ["hidden_states", "depth_linear.weight"],
+                ["dl_matmul"],
+                name="dl_matmul",
+            ),
+            helper.make_node(
+                "Add",
+                ["dl_matmul", "depth_linear.bias"],
+                ["dl_add"],
+                name="dl_add",
+            ),
+            helper.make_node(
+                "Reshape",
+                ["dl_add", "dl_reshape_shape"],
+                ["dl_out"],
+                name="dl_reshape",
+            ),
+        ]
+        then_out = helper.make_tensor_value_info(
+            "dl_out",
+            TensorProto.FLOAT,
+            ["batch", self.num_codebooks, self.dim],
+        )
+        then_graph = helper.make_graph(
+            then_nodes,
+            "compute_depth_linear",
+            inputs=[],
+            outputs=[then_out],
+            initializer=[reshape_shape_init],
+        )
+
+        # === Else branch: pass through depth_slices_in ===
+        else_nodes = [
+            helper.make_node(
+                "Identity",
+                ["depth_slices_in"],
+                ["ds_passthrough"],
+                name="ds_identity",
+            ),
+        ]
+        else_out = helper.make_tensor_value_info(
+            "ds_passthrough",
+            TensorProto.FLOAT,
+            ["batch", self.num_codebooks, self.dim],
+        )
+        else_graph = helper.make_graph(
+            else_nodes,
+            "use_cached_slices",
+            inputs=[],
+            outputs=[else_out],
+        )
+
+        # === If node ===
+        self.make_node(
+            "If",
+            [is_first],
+            ["depth_slices"],
+            then_branch=then_graph,
+            else_branch=else_graph,
+        )
+
+        return "depth_slices"
 
     def build_get_current_slice(self, depth_slices: str) -> str:
         """Build gather operation to get current depth slice.
@@ -421,17 +492,45 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
 
         return q_out, k_out
 
+    def rearrange_interleaved_to_split(self, tensor: str, num_heads: int, prefix: str) -> str:
+        """Rearrange Q or K from interleaved (GPT-J) to non-interleaved (GPT-NeoX) RoPE layout.
+
+        GPT-J interleaved: [r0, i0, r1, i1, ..., r15, i15]
+        GPT-NeoX split:    [r0, r1, ..., r15, i0, i1, ..., i15]
+
+        Input/output shape: [B, 1, num_heads, head_dim]
+        """
+        hd = self.head_dim
+        # [B, 1, H, D] → [B, 1, H, D//2, 2]
+        reshaped = self.make_reshape(
+            tensor,
+            self.get_constant([0, 1, num_heads, hd // 2, 2]),
+            f"{prefix}/reshape5d/output_0",
+        )
+        # [B, 1, H, D//2, 2] → [B, 1, H, 2, D//2]
+        transposed = self.make_transpose(
+            reshaped, f"{prefix}/transpose/output_0", perm=[0, 1, 2, 4, 3]
+        )
+        # [B, 1, H, 2, D//2] → [B, 1, H, D]
+        return self.make_reshape(
+            transposed,
+            self.get_constant([0, 1, num_heads, hd]),
+            f"{prefix}/reshape4d/output_0",
+        )
+
     def build_transformer_layer(
-        self, x: str, layer_idx: int, past_k: str, past_v: str, past_len_name: str
+        self, x: str, layer_idx: int, past_k: str, past_v: str
     ) -> tuple[str, str, str]:
-        """Build a single transformer layer.
+        """Build a single transformer layer using GroupQueryAttention contrib op.
+
+        The GQA op handles RoPE, KV cache, GQA expansion, and attention in one node.
+        KV cache is in BNSH format: [B, num_kv_heads, past_len, head_dim].
 
         Args:
             x: Input tensor [B, 1, 1024]
             layer_idx: Layer index
-            past_k: Past keys [B, past_len, num_kv_heads, head_dim]
-            past_v: Past values [B, past_len, num_kv_heads, head_dim]
-            past_len_name: Name of past_len scalar tensor
+            past_k: Past keys [B, 8, past_len, 32] (BNSH)
+            past_v: Past values [B, 8, past_len, 32] (BNSH)
 
         Returns:
             (output, new_k, new_v) tensor names
@@ -443,7 +542,7 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
 
         residual = x
 
-        # === LayerNorm (SimplifiedLayerNormalization = RMSNorm) ===
+        # === RMSNorm ===
         normed = self.make_layernorm(
             x, f"layer.{layer_idx}.operator_norm.weight", None, f"{prefix}/op_norm"
         )
@@ -456,9 +555,8 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
             f"{prefix}/qkv",
         )
 
-        # Split QKV
-        q_dim = nh * hd  # 1024
-        kv_dim = nkv * hd  # 256
+        q_dim = nh * hd
+        kv_dim = nkv * hd
         self.make_node(
             "Split",
             [qkv, self.get_constant([q_dim, kv_dim, kv_dim])],
@@ -477,7 +575,7 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
             f"{prefix}/v/output_0", self.get_constant([0, 1, nkv, hd]), f"{prefix}/v_4d/output_0"
         )
 
-        # === Q/K LayerNorm (per-head) ===
+        # === Per-head Q/K LayerNorm ===
         q_4d = self.make_per_head_layernorm(
             q_4d, f"layer.{layer_idx}.q_ln.weight", hd, [-1, 1, nh, hd], f"{prefix}/q_ln"
         )
@@ -485,36 +583,57 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
             k_4d, f"layer.{layer_idx}.k_ln.weight", hd, [-1, 1, nkv, hd], f"{prefix}/k_ln"
         )
 
-        # === Rotary Embeddings ===
-        q_rope, k_rope = self.build_rotary_embedding(q_4d, k_4d, layer_idx, past_len_name)
+        # === Rearrange Q/K from interleaved to non-interleaved RoPE layout ===
+        q_4d = self.rearrange_interleaved_to_split(q_4d, nh, f"{prefix}/q_rearr")
+        k_4d = self.rearrange_interleaved_to_split(k_4d, nkv, f"{prefix}/k_rearr")
 
-        # === KV Cache Concat ===
-        new_k = self.make_concat([past_k, k_rope], f"{prefix}/new_k/output_0", axis=1)
-        new_v = self.make_concat([past_v, v_4d], f"{prefix}/new_v/output_0", axis=1)
-
-        # === Attention ===
-        q_t = self.make_transpose(q_rope, f"{prefix}/q_t/output_0", perm=[0, 2, 1, 3])
-        k_t = self.make_transpose(new_k, f"{prefix}/k_t/output_0", perm=[0, 2, 1, 3])
-        v_t = self.make_transpose(new_v, f"{prefix}/v_t/output_0", perm=[0, 2, 1, 3])
-
-        # GQA: expand KV heads to match Q heads
-        k_gqa, v_gqa = self.expand_kv_for_gqa(k_t, v_t, nh, nkv, hd, prefix)
-
-        # Scaled dot-product attention
-        k_gqa_t = self.make_transpose(k_gqa, f"{prefix}/k_gqa_t/output_0", perm=[0, 1, 3, 2])
-        scores = self.make_matmul(q_t, k_gqa_t, f"{prefix}/scores/output_0")
-
-        scale = 1.0 / np.sqrt(hd)
-        scaled = self.make_mul(
-            scores, self.get_constant(scale, dtype=np.float32), f"{prefix}/scaled/output_0"
+        # === Flatten Q/K/V to 3D for GQA: [B, 1, H*D] ===
+        q_3d = self.make_reshape(
+            q_4d, self.get_constant([0, 1, nh * hd]), f"{prefix}/q_3d/output_0"
+        )
+        k_3d = self.make_reshape(
+            k_4d, self.get_constant([0, 1, nkv * hd]), f"{prefix}/k_3d/output_0"
+        )
+        v_3d = self.make_reshape(
+            v_4d, self.get_constant([0, 1, nkv * hd]), f"{prefix}/v_3d/output_0"
         )
 
-        attn_weights = self.make_node("Softmax", [scaled], [f"{prefix}/attn_w/output_0"], axis=-1)
-        attn_out = self.make_matmul(attn_weights, v_gqa, f"{prefix}/attn_out/output_0")
+        # === GroupQueryAttention (handles RoPE + KV cache + attention) ===
+        # Register cos/sin tables for this layer
+        cos_name = f"layer.{layer_idx}.gqa_cos"
+        sin_name = f"layer.{layer_idx}.gqa_sin"
+        freqs_cos, freqs_sin = self.compute_rope_freqs()
+        self.add_initializer(cos_name, freqs_cos)
+        self.add_initializer(sin_name, freqs_sin)
 
-        attn_t = self.make_transpose(attn_out, f"{prefix}/attn_t/output_0", perm=[0, 2, 1, 3])
+        gqa_out = f"{prefix}/gqa/output_0"
+        gqa_present_k = f"{prefix}/gqa/present_k"
+        gqa_present_v = f"{prefix}/gqa/present_v"
+
+        self.make_node(
+            "GroupQueryAttention",
+            [
+                q_3d,  # query [B, 1, num_heads * head_dim]
+                k_3d,  # key [B, 1, num_kv_heads * head_dim]
+                v_3d,  # value [B, 1, num_kv_heads * head_dim]
+                past_k,  # past_key [B, num_kv_heads, past_len, head_dim]
+                past_v,  # past_value [B, num_kv_heads, past_len, head_dim]
+                "seqlens_k",
+                "total_seq_len",
+                cos_name,
+                sin_name,
+            ],
+            [gqa_out, gqa_present_k, gqa_present_v],
+            domain="com.microsoft",
+            num_heads=nh,
+            kv_num_heads=nkv,
+            rotary_interleaved=0,
+            scale=float(1.0 / np.sqrt(hd)),
+        )
+
+        # GQA output is [B, 1, num_heads * head_dim], reshape to [B, 1, dim]
         attn_flat = self.make_reshape(
-            attn_t, self.get_constant([0, 1, -1]), f"{prefix}/attn_flat/output_0"
+            gqa_out, self.get_constant([0, 1, -1]), f"{prefix}/attn_flat/output_0"
         )
 
         # === Output Projection + Residual ===
@@ -526,12 +645,11 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         )
         h = self.make_add(out_proj, residual, f"{prefix}/res1/output_0")
 
-        # === FFN (SwiGLU) using shared helper ===
+        # === FFN (SwiGLU) ===
         ffn_normed = self.make_layernorm(
             h, f"layer.{layer_idx}.ffn_norm.weight", None, f"{prefix}/ffn_norm"
         )
 
-        # Register FFN weights
         w1_name = f"layer.{layer_idx}.w1.weight"
         w2_name = f"layer.{layer_idx}.w2.weight"
         w3_name = f"layer.{layer_idx}.w3.weight"
@@ -557,10 +675,9 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
 
         ffn_out = self.build_swiglu_ffn(ffn_normed, w1_name, w2_name, w3_name, f"{prefix}/ffn")
 
-        # Residual
         output = self.make_add(ffn_out, h, f"{prefix}/res2/output_0")
 
-        return output, new_k, new_v
+        return output, gqa_present_k, gqa_present_v
 
     def build_step_logits(self, x: str) -> str:
         """Build step-indexed RMSNorm + logits projection.
@@ -638,11 +755,6 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         self.add_initializer("stacked_logits_weights", np.stack(logits_list, axis=0))
         self.add_initializer("stacked_logits_norm_weights", np.stack(logits_norm_list, axis=0))
 
-        # === RoPE frequencies ===
-        freqs_cos, freqs_sin = self.compute_rope_freqs()
-        self.add_initializer("rope_freqs_cos", freqs_cos)
-        self.add_initializer("rope_freqs_sin", freqs_sin)
-
         # === Per-layer weights ===
         for i in range(self.num_layers):
             prefix = f"depthformer.layers.{i}"
@@ -669,7 +781,7 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
 
     def build(self, model_path: str) -> onnx.ModelProto:
         """Build the complete ONNX model for depthformer (with integrated depth_linear)."""
-        logger.info("Building vocoder_depthformer ONNX model (with integrated depth_linear)...")
+        logger.info("Building vocoder_depthformer ONNX model (conditional depth_linear)...")
 
         # Load weights
         self.load_weights(model_path)
@@ -683,8 +795,8 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
 
         # === Build computation graph ===
 
-        # 1. Apply depth_linear: [B, 2048] → [B, 8, 1024]
-        depth_slices = self.build_depth_linear()
+        # 1. Conditional depth_linear: compute at step 0, reuse cached at steps 1-7
+        depth_slices = self.build_conditional_depth_linear()
 
         # 2. Get current depth slice
         current_slice = self.build_get_current_slice(depth_slices)
@@ -696,17 +808,12 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         combined = self.make_add(current_slice, prev_embed, "/input/combined/output_0")
         x = self.make_unsqueeze(combined, self.get_constant([1]), "/input/unsqueeze/output_0")
 
-        # 5. Get past_len from past_keys shape
-        self.make_node("Shape", ["past_keys"], ["/past_len/shape/output_0"])
-        past_len = self.make_gather(
-            "/past_len/shape/output_0", self.get_constant(2), "/past_len/output_0"
-        )
-
-        # 6. Transformer layers
+        # 5. Transformer layers (GQA handles KV cache internally, BNSH format)
         new_keys_list = []
         new_values_list = []
 
         for i in range(self.num_layers):
+            # Gather per-layer past KV: [6, B, H, S, D] → [B, H, S, D]
             layer_past_k = self.make_gather(
                 "past_keys", self.get_constant(i), f"/layer_past_k_{i}/output_0", axis=0
             )
@@ -714,10 +821,9 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
                 "past_values", self.get_constant(i), f"/layer_past_v_{i}/output_0", axis=0
             )
 
-            x, new_k, new_v = self.build_transformer_layer(
-                x, i, layer_past_k, layer_past_v, past_len
-            )
+            x, new_k, new_v = self.build_transformer_layer(x, i, layer_past_k, layer_past_v)
 
+            # GQA present KV is [B, H, new_len, D] — unsqueeze to stack across layers
             new_k_unsq = self.make_unsqueeze(
                 new_k, self.get_constant([0]), f"/new_k_{i}_unsq/output_0"
             )
@@ -727,7 +833,7 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
             new_keys_list.append(new_k_unsq)
             new_values_list.append(new_v_unsq)
 
-        # Stack new KV caches
+        # Stack: [6, B, H, new_len, D]
         self.make_concat(new_keys_list, "new_keys", axis=0)
         self.make_concat(new_values_list, "new_values", axis=0)
 
