@@ -292,11 +292,7 @@ class LFM2AudioInference:
         self.codebook_vocab = 2049
 
     def _load_onnx_depthformer(self):
-        """Load ONNX vocoder model for autoregressive audio codebook prediction.
-
-        vocoder_depthformer.onnx takes hidden_states [B, 2048] and generates
-        audio codebook logits. Called 8× per audio frame (one per codebook).
-        """
+        """Load ONNX vocoder model for autoregressive audio codebook prediction."""
         depthformer_path = self.onnx_dir / (
             self._vocoder_depthformer_file or "vocoder_depthformer.onnx"
         )
@@ -435,15 +431,14 @@ class LFM2AudioInference:
         temperature: float = 0.9,
         top_k: int | None = None,
     ) -> np.ndarray:
-        """Sample audio codes using ONNX depthformer.
+        """Sample audio codes using ONNX depthformer (8 calls per frame).
 
-        Runs 8 autoregressive steps (one per codebook) to generate a full
-        audio frame. Token 2048 is the end-of-audio token.
+        Token 2048 is the end-of-audio token.
 
         Args:
             hidden_states: [batch, hidden_size] or [batch, 1, hidden_size]
             temperature: Sampling temperature
-            top_k: Optional top-k sampling (e.g., 4 for liquid-audio interleaved)
+            top_k: Optional top-k sampling
 
         Returns:
             codes: [batch, 8] audio codes for each codebook
@@ -465,27 +460,37 @@ class LFM2AudioInference:
         batch_size = hidden_states.shape[0]
 
         codes_list = []
+        empty_depth_slices = np.zeros((1, num_codebooks, 1024), dtype=np.float32)
+
         for b in range(batch_size):
             embedding = hidden_states[b : b + 1]  # [1, hidden_size]
 
-            # Initialize KV cache for depthformer (6 layers)
-            past_keys = np.zeros((num_layers, 1, 0, num_kv_heads, head_dim), dtype=np.float32)
-            past_values = np.zeros((num_layers, 1, 0, num_kv_heads, head_dim), dtype=np.float32)
+            # Initialize KV cache for depthformer (6 layers, BNSH format)
+            past_keys = np.zeros((num_layers, 1, num_kv_heads, 0, head_dim), dtype=np.float32)
+            past_values = np.zeros((num_layers, 1, num_kv_heads, 0, head_dim), dtype=np.float32)
 
             out_tokens = []
             prev_token = 0
+            cached_depth_slices = empty_depth_slices
 
             for i in range(num_codebooks):
-                logits, _, new_keys, new_values = self.onnx_depthformer.run(
+                logits, depth_slices, new_keys, new_values = self.onnx_depthformer.run(
                     ["logits", "depth_slices", "new_keys", "new_values"],
                     {
                         "hidden_states": embedding.astype(np.float32),
+                        "depth_slices_in": cached_depth_slices,
                         "step_idx": np.array(i, dtype=np.int64),
                         "prev_token": np.array([prev_token], dtype=np.int64),
                         "past_keys": past_keys,
                         "past_values": past_values,
+                        "seqlens_k": np.array([i], dtype=np.int32),
+                        "total_seq_len": np.array(i + 1, dtype=np.int32),
                     },
                 )
+
+                # Cache depth_slices from step 0 for reuse in steps 1-7
+                if i == 0:
+                    cached_depth_slices = depth_slices
 
                 past_keys = new_keys
                 past_values = new_values
