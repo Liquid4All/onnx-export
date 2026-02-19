@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # === Constants ===
 INT4_BITS = 4
 INT4_MAX = (1 << INT4_BITS) - 1  # 15, max value for unsigned 4-bit
-DEFAULT_BLOCK_SIZE = 32  # Default block size for INT4 quantization
+DEFAULT_BLOCK_SIZE = 32  # Default block size for quantization
 SCALE_EPS = 1e-10  # Threshold for clamping small quantization scales
 # Use FP32 min for masking in FP32 models (matches community); FP16 conversion will handle FP16 models
 MASK_VALUE = float(np.finfo(np.float32).min)  # -3.4028234663852886e+38
@@ -182,8 +182,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
     Q4 Mode (use_q4=True):
         Matches onnx-community Q4 structure with:
         - GatherBlockQuantized for embeddings
-        - MatMulNBits for all linear layers (attention, MLP, conv, router)
-        - QMoE for MoE expert weights
+        - MatMulNBits INT4 for linear layers (attention, MLP, conv)
+        - FP32 MatMul for MoE router (preserves routing quality, WebGPU compatible)
+        - QMoE INT4 for MoE expert weights
     """
 
     def __init__(
@@ -425,12 +426,12 @@ class LFM2MoEBuilder(ONNXBuilderBase):
 
         if self.is_moe_layer(layer_idx):
             # === MoE weights ===
-            if not self.use_q4:
-                # Router weights only needed for non-Q4 mode (Q4 quantizes on-the-fly)
-                self.add_initializer(
-                    f"{prefix}.moe.router.MatMul.weight",
-                    self.weights[f"{prefix}.feed_forward.gate.weight"].T,
-                )
+            # Router kept as FP32 MatMul even in Q4 mode (WebGPU compatible,
+            # preserves routing quality; q4f16 conversion handles FP32→FP16)
+            self.add_initializer(
+                f"{prefix}.moe.router.MatMul.weight",
+                self.weights[f"{prefix}.feed_forward.gate.weight"].T,
+            )
 
             if self.config.use_expert_bias:
                 self.add_initializer(
@@ -1235,20 +1236,13 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         )
 
         # === Router subgraph ===
-        if self.use_q4:
-            # Q4: Use MatMulNBits for router weights
-            router_logits = self.make_matmul_nbits(
-                normed,
-                self.weights[f"{weight_prefix}.feed_forward.gate.weight"].T,
-                f"model_layers_{layer_idx}_moe_router_MatMul_weight",
-                f"{prefix}/moe/router/MatMul/output_0",
-            )
-        else:
-            router_logits = self.make_matmul(
-                normed,
-                f"{weight_prefix}.moe.router.MatMul.weight",
-                f"{prefix}/moe/router/MatMul/output_0",
-            )
+        # Router kept as FP32 MatMul (not quantized) for WebGPU compatibility
+        # and to preserve routing quality; q4f16 conversion handles FP32→FP16
+        router_logits = self.make_matmul(
+            normed,
+            f"{weight_prefix}.moe.router.MatMul.weight",
+            f"{prefix}/moe/router/MatMul/output_0",
+        )
 
         routing_weights = self.make_sigmoid(router_logits, f"{prefix}/moe/router/Sigmoid/output_0")
 
