@@ -110,18 +110,21 @@ def convert_to_fp16(
                 if inp in renamed_constants:
                     node.input[i] = renamed_constants[inp]
 
-    # === 2. Convert KV cache inputs to FP16 (keep int64 inputs) ===
+    # === 2. Clear stale value_info (ONNX Runtime infers from actual data flow) ===
+    del graph.value_info[:]
+
+    # === 3. Convert KV cache inputs to FP16 (keep int64 inputs) ===
     for inp in graph.input:
         if inp.type.tensor_type.elem_type == TensorProto.FLOAT:
             inp.type.tensor_type.elem_type = TensorProto.FLOAT16
 
-    # === 3. Convert KV cache outputs to FP16 (except logits) ===
+    # === 4. Convert KV cache outputs to FP16 (except logits) ===
     for out in graph.output:
         if out.type.tensor_type.elem_type == TensorProto.FLOAT:
             if out.name != "logits":
                 out.type.tensor_type.elem_type = TensorProto.FLOAT16
 
-    # === 4. Add Cast node for logits (fp16 internal -> fp32 output) ===
+    # === 5. Add Cast node for logits (fp16 internal -> fp32 output) ===
     for output in graph.output:
         if output.name == "logits":
             cast_input = "logits_fp16"
@@ -169,13 +172,9 @@ def convert_q4_to_fp16(
     """Convert Q4 ONNX model to Q4F16 (FP16 non-quantized weights).
 
     Matches community Q4F16 convention:
-    - Quantization scales stay float32 (needed for precision)
+    - All float32 weights/scales become float16 (MatMulNBits T1 must match)
     - Zero points stay uint8
     - Quant weights stay uint8
-    - LayerNorm weights become float16
-    - RoPE caches become float16
-    - Conv weights become float16
-    - Expert biases become float16
     - KV cache inputs/outputs become float16
     - logits output stays float32 (added Cast node)
 
@@ -194,25 +193,19 @@ def convert_q4_to_fp16(
 
     graph = model.graph
 
-    # Convert float32 initializers to FP16, except quantization scales (keep FP32 for precision)
+    # Convert all float32 initializers to FP16 (including scales).
+    # MatMulNBits binds T1 across input, scales, and output — they must match.
     fp16_min = np.finfo(np.float16).min  # -65504.0
     fp16_max = np.finfo(np.float16).max  # 65504.0
     new_initializers = []
     for init in graph.initializer:
         if init.data_type == TensorProto.FLOAT:
-            name = init.name
-            # Keep quantization scales in FP32 for precision (matches community)
-            if "_scales" in name:
-                new_initializers.append(init)
-                continue
             arr = numpy_helper.to_array(init)
-            # Clamp to FP16 range before conversion to avoid -inf/+inf
             arr_clamped = np.clip(arr, fp16_min, fp16_max)
             arr_fp16 = arr_clamped.astype(np.float16)
-            new_init = numpy_helper.from_array(arr_fp16, name)
+            new_init = numpy_helper.from_array(arr_fp16, init.name)
             new_initializers.append(new_init)
         else:
-            # Keep int64, uint8 as-is
             new_initializers.append(init)
 
     # Replace initializers
@@ -233,6 +226,10 @@ def convert_q4_to_fp16(
                 for i, inp in enumerate(node.input):
                     if inp == old_name:
                         node.input[i] = new_name
+
+    # Clear value_info so ONNX Runtime infers intermediate types from actual data flow.
+    # Without this, stale FLOAT annotations conflict with FP16-converted initializers.
+    del graph.value_info[:]
 
     # Convert KV cache inputs to FP16
     for inp in graph.input:
@@ -516,26 +513,35 @@ def main():
     output_dir = args.output_dir / "exports" / output_name
     onnx_dir = output_dir / "onnx"
 
-    # === Parse --precision into a set of requested formats ===
-    precisions = set()
+    # === Parse --precision into flags ===
+    do_q4 = False
+    do_q4f16_conversion = False
+    do_fp16_conversion = False
+
     if args.precision is not None:
         if len(args.precision) == 0:
-            precisions = {"q4", "q4f16", "fp16"}
+            do_q4 = True
+            do_q4f16_conversion = True
+            do_fp16_conversion = True
         else:
             for p in args.precision:
                 p = p.lower()
-                if p in ("q4", "q4f16", "fp16"):
-                    precisions.add(p)
+                if p == "q4":
+                    do_q4 = True
+                elif p == "q4f16":
+                    do_q4f16_conversion = True
+                elif p == "fp16":
+                    do_fp16_conversion = True
                 else:
                     parser.error(f"Invalid precision: {p}. Use fp16, q4, or q4f16.")
 
-    if precisions:
-        # === Precision-aware export path ===
-        need_q4 = "q4" in precisions or "q4f16" in precisions
-        need_fp16 = "fp16" in precisions
+    need_q4_export = do_q4 or do_q4f16_conversion
+    has_precision = do_q4 or do_q4f16_conversion or do_fp16_conversion
 
-        if not args.skip_export:
-            if need_q4:
+    # === Export base models ===
+    if not args.skip_export:
+        if has_precision:
+            if need_q4_export:
                 logger.info("=" * 60)
                 logger.info("Exporting model (Q4 via inline builder)")
                 logger.info("=" * 60)
@@ -550,7 +556,7 @@ def main():
                 )
                 logger.info(f"  {model_name}: OK")
 
-            if need_fp16:
+            if do_fp16_conversion:
                 logger.info("=" * 60)
                 logger.info("Exporting model (FP32 base for FP16 conversion)")
                 logger.info("=" * 60)
@@ -564,36 +570,8 @@ def main():
                     use_q4=False,
                 )
                 logger.info(f"  {model_name}: OK")
-
-        if need_fp16:
-            logger.info("=" * 60)
-            logger.info("Converting to FP16")
-            logger.info("=" * 60)
-            do_fp16(onnx_dir)
-            logger.info(f"  {model_name}: OK")
-
-            # Delete intermediate FP32 model.onnx + model.onnx_data
-            for intermediate in [onnx_dir / "model.onnx", onnx_dir / "model.onnx_data"]:
-                if intermediate.exists():
-                    intermediate.unlink()
-                    logger.info(f"  Deleted intermediate {intermediate.name}")
-
-        if "q4f16" in precisions:
-            logger.info("=" * 60)
-            logger.info("Converting Q4 to Q4F16")
-            logger.info("=" * 60)
-            do_q4f16(onnx_dir)
-            logger.info(f"  {model_name}: OK")
-
-        if "q4" not in precisions and need_q4:
-            # q4f16 was requested but not q4 — delete the intermediate q4 model
-            for intermediate in [onnx_dir / "model_q4.onnx", onnx_dir / "model_q4.onnx_data"]:
-                if intermediate.exists():
-                    intermediate.unlink()
-                    logger.info(f"  Deleted intermediate {intermediate.name}")
-    else:
-        # === Single-model export: --q4 / --qmoe / FP32 (no conversions) ===
-        if not args.skip_export:
+        else:
+            # Single-model export: --q4 / --qmoe / FP32 (no conversions)
             logger.info("=" * 60)
             if args.q4:
                 precision_label = "Q4 (full INT4 quantization)"
@@ -613,6 +591,34 @@ def main():
                 use_q4=args.q4,
             )
             logger.info(f"  {model_name}: OK")
+
+    # === Precision conversions ===
+    if do_fp16_conversion:
+        logger.info("=" * 60)
+        logger.info("Converting to FP16")
+        logger.info("=" * 60)
+        do_fp16(onnx_dir)
+        logger.info(f"  {model_name}: OK")
+
+        # Delete intermediate FP32 model.onnx + model.onnx_data
+        for intermediate in [onnx_dir / "model.onnx", onnx_dir / "model.onnx_data"]:
+            if intermediate.exists():
+                intermediate.unlink()
+                logger.info(f"  Deleted intermediate {intermediate.name}")
+
+    if do_q4f16_conversion:
+        logger.info("=" * 60)
+        logger.info("Converting Q4 to Q4F16")
+        logger.info("=" * 60)
+        do_q4f16(onnx_dir)
+        logger.info(f"  {model_name}: OK")
+
+    if not do_q4 and need_q4_export:
+        # q4f16 was requested but not q4 — delete the intermediate q4 model
+        for intermediate in [onnx_dir / "model_q4.onnx", onnx_dir / "model_q4.onnx_data"]:
+            if intermediate.exists():
+                intermediate.unlink()
+                logger.info(f"  Deleted intermediate {intermediate.name}")
 
     if not args.no_split_data:
         chunk_size_bytes = int(args.split_data * 1024 * 1024 * 1024)
