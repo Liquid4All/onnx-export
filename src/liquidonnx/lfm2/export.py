@@ -8,13 +8,15 @@ Output Structure (Transformers.js compatible):
         ├── config.json
         ├── tokenizer.json
         └── onnx/
-            ├── model.onnx           # FP32
+            ├── model.onnx              # FP32
             ├── model.onnx_data
-            ├── model_fp16.onnx      # --precision fp16
+            ├── model_fp16.onnx         # --precision fp16
             ├── model_fp16.onnx_data
-            ├── model_q4.onnx        # --precision q4
+            ├── model_q4.onnx           # --precision q4 (GatherBlockQuantized)
             ├── model_q4.onnx_data
-            ├── model_q8.onnx        # --precision q8
+            ├── model_q4f32.onnx        # --precision q4f32 (FP32 embedding)
+            ├── model_q4f32.onnx_data
+            ├── model_q8.onnx           # --precision q8
             └── model_q8.onnx_data
 
 Usage:
@@ -31,14 +33,11 @@ Usage:
     # Export with specific precisions
     uv run lfm2-export LiquidAI/LFM2-350M --precision fp16 q4
 
-    # Export with all precisions (fp16, q4, q8)
+    # Export with all precisions
     uv run lfm2-export LiquidAI/LFM2-350M --precision
 
     # Convert existing export (skip FP32 export)
     uv run lfm2-export LiquidAI/LFM2-350M --precision --skip-export
-
-    # Quantize with lm_head included
-    uv run lfm2-export LiquidAI/LFM2-350M --precision q4 --no-exclude-lm-head
 """
 
 import argparse
@@ -195,36 +194,100 @@ def export_model(model_path: str, output_dir: pathlib.Path | str):
     return output_path
 
 
+def export_model_q4(
+    model_path: str,
+    output_dir: pathlib.Path | str,
+    block_size: int = 32,
+    symmetric: bool = True,
+):
+    """Export LFM2 model with Q4 quantization (GatherBlockQuantized + MatMulNBits).
+
+    Builds the model with INT4 embedding (GatherBlockQuantized) and lm_head
+    (MatMulNBits), then post-export quantizes remaining FP32 MatMul layers.
+    """
+    output_dir = pathlib.Path(output_dir)
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    lfm2_config = LFM2Config.from_hf_config(config)
+
+    builder = LFM2Builder(lfm2_config, use_q4=True, q4_block_size=block_size)
+    model = builder.build(model_path)
+
+    onnx_dir = output_dir / "onnx"
+    onnx_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save intermediate model (embedding+lm_head quantized, other layers FP32)
+    intermediate_path = onnx_dir / "model_q4_intermediate.onnx"
+    intermediate_data = onnx_dir / "model_q4_intermediate.onnx_data"
+    if intermediate_data.exists():
+        intermediate_data.unlink()
+
+    onnx.save_model(
+        model,
+        str(intermediate_path),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="model_q4_intermediate.onnx_data",
+    )
+
+    # Post-export quantization for remaining FP32 MatMul nodes
+    output_path = onnx_dir / "model_q4.onnx"
+    if output_path.exists():
+        logger.info("Skipping q4 (already exists)")
+        intermediate_path.unlink(missing_ok=True)
+        intermediate_data.unlink(missing_ok=True)
+        return
+
+    quantize_model(
+        intermediate_path,
+        output_path,
+        bits=4,
+        block_size=block_size,
+        exclude_lm_head=True,
+        symmetric=symmetric,
+    )
+
+    # Clean up intermediate
+    intermediate_path.unlink(missing_ok=True)
+    intermediate_data.unlink(missing_ok=True)
+
+    _, q4_mb = get_model_size(output_path)
+    logger.info(f"  Q4 model: {q4_mb:.1f} MB")
+
+
 def do_quantize(
     onnx_dir: pathlib.Path,
     bits: int,
     exclude_lm_head: bool,
     block_size: int,
     symmetric: bool = False,
+    output_name: str | None = None,
+    source: str = "model.onnx",
 ):
     """Quantize model to INT4 or INT8.
 
     Args:
-        onnx_dir: Directory containing model.onnx
+        onnx_dir: Directory containing source model
         bits: Quantization bits (4 or 8)
         exclude_lm_head: Keep lm_head in FP32
         block_size: Block size for quantization
         symmetric: Use symmetric quantization (no zero points, better JSEP compatibility)
+        output_name: Override output filename (default: model_q{bits}.onnx)
+        source: Source model filename to quantize from (default: model.onnx)
     """
-    input_model = onnx_dir / "model.onnx"
+    input_model = onnx_dir / source
     if not input_model.exists():
-        raise FileNotFoundError(f"model.onnx not found in {onnx_dir}")
+        raise FileNotFoundError(f"{source} not found in {onnx_dir}")
 
-    output_model = onnx_dir / f"model_q{bits}.onnx"
+    output_model = onnx_dir / (output_name or f"model_q{bits}.onnx")
 
     if output_model.exists():
-        logger.info(f"Skipping q{bits} (already exists)")
+        logger.info(f"Skipping {output_model.name} (already exists)")
         return
 
     _, orig_mb = get_model_size(input_model)
 
     quant_type = "symmetric" if symmetric else "asymmetric"
-    logger.info(f"Quantizing to Q{bits} ({quant_type})...")
+    logger.info(f"Quantizing {source} to Q{bits} ({quant_type})...")
     quantize_model(
         input_model,
         output_model,
@@ -280,18 +343,13 @@ def main():
     parser.add_argument(
         "--skip-export",
         action="store_true",
-        help="Skip FP32 export, only run precision conversion",
+        help="Skip FP32 base model export. Q4 always rebuilds from HF weights.",
     )
     parser.add_argument(
         "--precision",
         nargs="*",
         metavar="PRECISION",
-        help="Output precisions: fp16, q4, q8, or all (default if no args)",
-    )
-    parser.add_argument(
-        "--no-exclude-lm-head",
-        action="store_true",
-        help="Quantize lm_head layer (by default kept in FP32)",
+        help="Output precisions: fp16, q4, q4f32, q8, or all (default if no args)",
     )
     parser.add_argument(
         "--block-size",
@@ -326,23 +384,30 @@ def main():
     output_name = args.output_name or f"{model_name}-ONNX"
     output_dir = args.output_dir / "exports" / output_name
 
-    quant_bits = []
     do_fp16_conversion = False
+    do_q4 = False
+    do_q4f32 = False
+    do_q8 = False
     if args.precision is not None:
         if len(args.precision) == 0:
-            quant_bits = [4, 8]
             do_fp16_conversion = True
+            do_q4 = True
+            do_q4f32 = True
+            do_q8 = True
         else:
             for p in args.precision:
                 p = p.lower()
                 if p == "fp16":
                     do_fp16_conversion = True
-                elif p in ("q4", "q8"):
-                    quant_bits.append(int(p[1]))
+                elif p == "q4":
+                    do_q4 = True
+                elif p == "q4f32":
+                    do_q4f32 = True
+                elif p == "q8":
+                    do_q8 = True
                 else:
-                    parser.error(f"Invalid precision: {p}. Use fp16, q4, or q8.")
+                    parser.error(f"Invalid precision: {p}. Use fp16, q4, q4f32, or q8.")
 
-    exclude_lm_head = not args.no_exclude_lm_head
     onnx_dir = output_dir / "onnx"
 
     if not args.skip_export:
@@ -360,14 +425,45 @@ def main():
         do_fp16(onnx_dir)
         logger.info(f"  {model_name}: OK")
 
-    for bits in quant_bits:
+    if do_q4:
         logger.info("=" * 60)
-        logger.info(f"Quantizing to Q{bits}")
+        logger.info("Exporting Q4 (GatherBlockQuantized)")
         logger.info("=" * 60)
+        export_model_q4(
+            args.model,
+            output_dir,
+            block_size=args.block_size,
+            symmetric=not args.q4_asymmetric,
+        )
+        logger.info(f"  {model_name}: OK")
 
-        # Q4: symmetric by default (required for WebGPU), Q8: asymmetric
-        symmetric = (bits == 4) and not args.q4_asymmetric
-        do_quantize(onnx_dir, bits, exclude_lm_head, args.block_size, symmetric=symmetric)
+    if do_q4f32:
+        logger.info("=" * 60)
+        logger.info("Quantizing to Q4F32")
+        logger.info("=" * 60)
+        symmetric = not args.q4_asymmetric
+        do_quantize(
+            onnx_dir,
+            bits=4,
+            exclude_lm_head=True,
+            block_size=args.block_size,
+            symmetric=symmetric,
+            output_name="model_q4f32.onnx",
+        )
+        logger.info(f"  {model_name}: OK")
+
+    if do_q8:
+        logger.info("=" * 60)
+        logger.info("Quantizing to Q8")
+        logger.info("=" * 60)
+        do_quantize(
+            onnx_dir,
+            bits=8,
+            exclude_lm_head=True,
+            block_size=args.block_size,
+            symmetric=False,
+            output_name="model_q8.onnx",
+        )
         logger.info(f"  {model_name}: OK")
 
     if not args.no_split_data:
