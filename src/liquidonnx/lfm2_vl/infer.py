@@ -14,8 +14,8 @@ Usage:
     # Specify individual component files
     uv run lfm2-vl-infer --model exports/LFM2-VL-450M-ONNX \
         --embed-tokens embed_tokens_fp16.onnx \
-        --embed-images embed_images_q4.onnx \
-        --decoder decoder_q4.onnx
+        --embed-images vision_encoder_q4.onnx \
+        --decoder decoder_model_merged_q4.onnx
 """
 
 import argparse
@@ -93,8 +93,8 @@ class VLModelInference:
 
         # Resolve file paths (use provided or default)
         embed_tokens_path = onnx_dir / (self.embed_tokens_file or "embed_tokens.onnx")
-        embed_images_path = onnx_dir / (self.embed_images_file or "embed_images.onnx")
-        decoder_path = onnx_dir / (self.decoder_file or "decoder.onnx")
+        embed_images_path = onnx_dir / (self.embed_images_file or "vision_encoder.onnx")
+        decoder_path = onnx_dir / (self.decoder_file or "decoder_model_merged.onnx")
 
         logger.info(f"  embed_tokens: {embed_tokens_path.name}")
         logger.info(f"  embed_images: {embed_images_path.name}")
@@ -269,10 +269,18 @@ def resolve_precision_files(
 
     precision = precision.lower()
     if precision == "fp16":
-        return "embed_tokens_fp16.onnx", "embed_images_fp16.onnx", "decoder_fp16.onnx"
+        return (
+            "embed_tokens_fp16.onnx",
+            "vision_encoder_fp16.onnx",
+            "decoder_model_merged_fp16.onnx",
+        )
     elif precision in ("q4", "q8"):
         # embed_tokens has no quantized version, use fp32
-        return "embed_tokens.onnx", f"embed_images_{precision}.onnx", f"decoder_{precision}.onnx"
+        return (
+            "embed_tokens.onnx",
+            f"vision_encoder_{precision}.onnx",
+            f"decoder_model_merged_{precision}.onnx",
+        )
     else:
         raise ValueError(f"Invalid precision: {precision}. Use fp16, q4, or q8.")
 

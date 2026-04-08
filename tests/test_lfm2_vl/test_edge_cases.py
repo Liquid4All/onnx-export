@@ -131,9 +131,9 @@ def test_image_sizes(
     if not onnx_dir.exists():
         pytest.skip(f"Export not found: {onnx_dir}")
 
-    embed_images_file = onnx_dir / "embed_images.onnx"
+    embed_images_file = onnx_dir / "vision_encoder.onnx"
     if not embed_images_file.exists():
-        pytest.skip(f"embed_images not found: {embed_images_file}")
+        pytest.skip(f"vision_encoder not found: {embed_images_file}")
 
     embed_images_sess = load_onnx_session(embed_images_file)
 
@@ -177,9 +177,9 @@ def test_aspect_ratios(
     if not onnx_dir.exists():
         pytest.skip(f"Export not found: {onnx_dir}")
 
-    embed_images_file = onnx_dir / "embed_images.onnx"
+    embed_images_file = onnx_dir / "vision_encoder.onnx"
     if not embed_images_file.exists():
-        pytest.skip(f"embed_images not found: {embed_images_file}")
+        pytest.skip(f"vision_encoder not found: {embed_images_file}")
 
     embed_images_sess = load_onnx_session(embed_images_file)
 
@@ -216,9 +216,9 @@ def test_batch_different_sizes(
     if not onnx_dir.exists():
         pytest.skip(f"Export not found: {onnx_dir}")
 
-    embed_images_file = onnx_dir / "embed_images.onnx"
+    embed_images_file = onnx_dir / "vision_encoder.onnx"
     if not embed_images_file.exists():
-        pytest.skip(f"embed_images not found: {embed_images_file}")
+        pytest.skip(f"vision_encoder not found: {embed_images_file}")
 
     embed_images_sess = load_onnx_session(embed_images_file)
 
@@ -258,13 +258,13 @@ def test_full_inference_different_sizes(
         pytest.skip(f"Export not found: {onnx_dir}")
 
     embed_tokens_file = onnx_dir / "embed_tokens.onnx"
-    embed_images_file = onnx_dir / "embed_images.onnx"
-    decoder_file = onnx_dir / "decoder.onnx"
+    embed_images_file = onnx_dir / "vision_encoder.onnx"
+    decoder_file = onnx_dir / "decoder_model_merged.onnx"
 
     if not embed_tokens_file.exists():
         pytest.skip(f"embed_tokens not found: {embed_tokens_file}")
     if not embed_images_file.exists():
-        pytest.skip(f"embed_images not found: {embed_images_file}")
+        pytest.skip(f"vision_encoder not found: {embed_images_file}")
     if not decoder_file.exists():
         pytest.skip(f"decoder not found: {decoder_file}")
 

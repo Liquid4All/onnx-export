@@ -9,6 +9,13 @@ import onnxruntime as ort
 logger = logging.getLogger(__name__)
 
 
+# Mapping from legacy component names to Transformers.js v4 names
+_COMPONENT_ALIASES = {
+    "embed_images": "vision_encoder",
+    "decoder": "decoder_model_merged",
+}
+
+
 def get_onnx_file(
     onnx_dir: pathlib.Path, precision: str | None, name: str = "model"
 ) -> pathlib.Path:
@@ -17,11 +24,21 @@ def get_onnx_file(
     Args:
         onnx_dir: Directory containing ONNX files
         precision: None for fp32, "fp16", "q4", "q8"
-        name: Base name of the model file (default: "model")
+        name: Base name of the model file (default: "model").
+              Accepts legacy names (embed_images, decoder) and resolves
+              to new names (vision_encoder, decoder_model_merged) with
+              fallback to legacy if the new file doesn't exist.
 
     Returns:
         Path to the ONNX file (e.g., model.onnx, model_q4.onnx, decoder_fp16.onnx)
     """
+    new_name = _COMPONENT_ALIASES.get(name)
+    if new_name:
+        suffix = f"_{precision}.onnx" if precision else ".onnx"
+        new_path = onnx_dir / f"{new_name}{suffix}"
+        if new_path.exists():
+            return new_path
+        # Fall back to legacy name
     if precision:
         return onnx_dir / f"{name}_{precision}.onnx"
     return onnx_dir / f"{name}.onnx"
@@ -167,8 +184,10 @@ class ONNXTextModel:
             tokenizer_path = self.model_path.parent.parent
         else:
             tokenizer_path = self.model_path
-            # Try decoder.onnx first (LFM2), then model.onnx
-            onnx_path = self.model_path / "onnx" / "decoder.onnx"
+            # Try decoder_model_merged.onnx first, then decoder.onnx (legacy), then model.onnx
+            onnx_path = self.model_path / "onnx" / "decoder_model_merged.onnx"
+            if not onnx_path.exists():
+                onnx_path = self.model_path / "onnx" / "decoder.onnx"
             if not onnx_path.exists():
                 onnx_path = self.model_path / "onnx" / "model.onnx"
 
