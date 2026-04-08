@@ -11,14 +11,14 @@ Output Structure (Transformers.js compatible):
         └── onnx/
             ├── embed_tokens.onnx          # FP32
             ├── embed_tokens_fp16.onnx     # --precision fp16
-            ├── embed_images.onnx          # FP32
-            ├── embed_images_fp16.onnx     # --precision fp16
-            ├── embed_images_q4.onnx       # --precision q4
-            ├── embed_images_q8.onnx       # --precision q8
-            ├── decoder.onnx               # FP32
-            ├── decoder_fp16.onnx          # --precision fp16
-            ├── decoder_q4.onnx            # --precision q4
-            └── decoder_q8.onnx            # --precision q8
+            ├── vision_encoder.onnx          # FP32
+            ├── vision_encoder_fp16.onnx     # --precision fp16
+            ├── vision_encoder_q4.onnx       # --precision q4
+            ├── vision_encoder_q8.onnx       # --precision q8
+            ├── decoder_model_merged.onnx               # FP32
+            ├── decoder_model_merged_fp16.onnx          # --precision fp16
+            ├── decoder_model_merged_q4.onnx            # --precision q4
+            └── decoder_model_merged_q8.onnx            # --precision q8
 
 Usage:
     # Export from HuggingFace
@@ -46,6 +46,7 @@ import gc
 import json
 import logging
 import pathlib
+import re
 
 import onnx
 from onnx import TensorProto, helper
@@ -157,7 +158,7 @@ def export_vl_model(
     output_dir: pathlib.Path | str,
     vision_input_format: str = VISION_MODE_TILED,
 ):
-    """Export LFM2-VL model to ONNX (embed_tokens + embed_images + decoder).
+    """Export LFM2-VL model to ONNX (embed_tokens + vision_encoder + decoder).
 
     Args:
         model_path: HuggingFace model path
@@ -215,8 +216,8 @@ def export_vl_model(
     vision_builder.load_weights(weights)
     vision_model = vision_builder.build()
 
-    vision_path = onnx_dir / "embed_images.onnx"
-    vision_data_path = onnx_dir / "embed_images.onnx_data"
+    vision_path = onnx_dir / "vision_encoder.onnx"
+    vision_data_path = onnx_dir / "vision_encoder.onnx_data"
     if vision_data_path.exists():
         vision_data_path.unlink()
     onnx.save_model(
@@ -224,7 +225,7 @@ def export_vl_model(
         str(vision_path),
         save_as_external_data=True,
         all_tensors_to_one_file=True,
-        location="embed_images.onnx_data",
+        location="vision_encoder.onnx_data",
         size_threshold=1024,
     )
     logger.info(f"embed_images saved to {vision_path}")
@@ -357,8 +358,8 @@ def export_vl_model(
     text_builder.initializers.clear()
     gc.collect()
 
-    decoder_path = onnx_dir / "decoder.onnx"
-    decoder_data_path = onnx_dir / "decoder.onnx_data"
+    decoder_path = onnx_dir / "decoder_model_merged.onnx"
+    decoder_data_path = onnx_dir / "decoder_model_merged.onnx_data"
     if decoder_data_path.exists():
         decoder_data_path.unlink()
 
@@ -368,7 +369,7 @@ def export_vl_model(
         str(decoder_path),
         save_as_external_data=True,
         all_tensors_to_one_file=True,
-        location="decoder.onnx_data",
+        location="decoder_model_merged.onnx_data",
         size_threshold=1024,
     )
     logger.info(f"decoder saved to {decoder_path}")
@@ -386,6 +387,42 @@ def export_vl_model(
         tokenizer.save_pretrained(output_dir)
 
     config.save_pretrained(output_dir)
+
+    # === 1. Create preprocessor_config.json (flat format for Transformers.js) ===
+    processor_config_path = output_dir / "processor_config.json"
+    if processor_config_path.exists():
+        processor_config = json.loads(processor_config_path.read_text())
+        image_processor = processor_config.get("image_processor", {})
+        preprocessor_config = {
+            **image_processor,
+            "processor_class": processor_config.get("processor_class", "Lfm2VlProcessor"),
+        }
+        preprocessor_path = output_dir / "preprocessor_config.json"
+        preprocessor_path.write_text(json.dumps(preprocessor_config, indent=2))
+
+    # === 2. Inline chat_template into tokenizer_config.json ===
+    chat_template_path = output_dir / "chat_template.jinja"
+    tokenizer_config_path = output_dir / "tokenizer_config.json"
+    if chat_template_path.exists() and tokenizer_config_path.exists():
+        tokenizer_config = json.loads(tokenizer_config_path.read_text())
+        if "chat_template" not in tokenizer_config:
+            template = chat_template_path.read_text()
+            template = re.sub(r"\{%-?\s*generation\s*-?%\}", "", template)
+            template = re.sub(r"\{%-?\s*endgeneration\s*-?%\}", "", template)
+            tokenizer_config["chat_template"] = template
+            tokenizer_config_path.write_text(json.dumps(tokenizer_config, indent=2))
+
+    # === 3. Add transformers.js_config to config.json ===
+    config_path = output_dir / "config.json"
+    config_dict = json.loads(config_path.read_text())
+    config_dict["transformers.js_config"] = {
+        "use_external_data_format": {
+            "vision_encoder": True,
+            "embed_tokens": True,
+            "decoder_model_merged": True,
+        },
+    }
+    config_path.write_text(json.dumps(config_dict, indent=2))
 
     # Create generation_config.json
     gen_config = {
@@ -455,10 +492,10 @@ def do_quantize(
         f"vision=q{vision_bits} ({quant_type})..."
     )
 
-    # Quantize embed_images
-    embed_fp32 = onnx_dir / "embed_images.onnx"
+    # Quantize vision_encoder
+    embed_fp32 = onnx_dir / "vision_encoder.onnx"
 
-    embed_output = onnx_dir / f"embed_images_q{vision_bits}.onnx"
+    embed_output = onnx_dir / f"vision_encoder_q{vision_bits}.onnx"
     if embed_fp32.exists() and not embed_output.exists():
         _, embed_orig_mb = get_model_size(embed_fp32)
         quantize_model(
@@ -471,14 +508,14 @@ def do_quantize(
         )
         _, embed_quant_mb = get_model_size(embed_output)
         logger.info(
-            f"  embed_images: {embed_orig_mb:.1f} -> {embed_quant_mb:.1f} MB "
+            f"  vision_encoder: {embed_orig_mb:.1f} -> {embed_quant_mb:.1f} MB "
             f"({embed_orig_mb / embed_quant_mb:.1f}x)"
         )
 
-    # Quantize decoder
-    decoder_fp32 = onnx_dir / "decoder.onnx"
+    # Quantize decoder_model_merged
+    decoder_fp32 = onnx_dir / "decoder_model_merged.onnx"
 
-    decoder_output = onnx_dir / f"decoder_q{decoder_bits}.onnx"
+    decoder_output = onnx_dir / f"decoder_model_merged_q{decoder_bits}.onnx"
     if decoder_fp32.exists() and not decoder_output.exists():
         _, decoder_orig_mb = get_model_size(decoder_fp32)
         quantize_model(
@@ -491,7 +528,7 @@ def do_quantize(
         )
         _, decoder_quant_mb = get_model_size(decoder_output)
         logger.info(
-            f"  decoder: {decoder_orig_mb:.1f} -> {decoder_quant_mb:.1f} MB "
+            f"  decoder_model_merged: {decoder_orig_mb:.1f} -> {decoder_quant_mb:.1f} MB "
             f"({decoder_orig_mb / decoder_quant_mb:.1f}x)"
         )
 
@@ -501,8 +538,8 @@ def do_fp16(onnx_dir: pathlib.Path):
 
     Creates:
     - embed_tokens_fp16.onnx
-    - embed_images_fp16.onnx
-    - decoder_fp16.onnx
+    - vision_encoder_fp16.onnx
+    - decoder_model_merged_fp16.onnx
     """
     if not onnx_dir.exists():
         raise FileNotFoundError(f"ONNX directory not found: {onnx_dir}")
@@ -515,15 +552,15 @@ def do_fp16(onnx_dir: pathlib.Path):
     if embed_tokens_fp32.exists() and not embed_tokens_fp16.exists():
         convert_to_fp16(embed_tokens_fp32, embed_tokens_fp16)
 
-    # Convert embed_images
-    embed_images_fp32 = onnx_dir / "embed_images.onnx"
-    embed_images_fp16 = onnx_dir / "embed_images_fp16.onnx"
-    if embed_images_fp32.exists() and not embed_images_fp16.exists():
-        convert_to_fp16(embed_images_fp32, embed_images_fp16)
+    # Convert vision_encoder
+    vision_encoder_fp32 = onnx_dir / "vision_encoder.onnx"
+    vision_encoder_fp16 = onnx_dir / "vision_encoder_fp16.onnx"
+    if vision_encoder_fp32.exists() and not vision_encoder_fp16.exists():
+        convert_to_fp16(vision_encoder_fp32, vision_encoder_fp16)
 
-    # Convert decoder
-    decoder_fp32 = onnx_dir / "decoder.onnx"
-    decoder_fp16 = onnx_dir / "decoder_fp16.onnx"
+    # Convert decoder_model_merged
+    decoder_fp32 = onnx_dir / "decoder_model_merged.onnx"
+    decoder_fp16 = onnx_dir / "decoder_model_merged_fp16.onnx"
     if decoder_fp32.exists() and not decoder_fp16.exists():
         convert_to_fp16(decoder_fp32, decoder_fp16)
 
