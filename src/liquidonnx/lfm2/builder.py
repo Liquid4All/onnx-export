@@ -1019,9 +1019,7 @@ class LFM2Builder(ONNXBuilderBase):
             n_blocks = (K + self.q4_block_size - 1) // self.q4_block_size
 
             # Reshape to 3D for MatMulNBits: [N, n_blocks, block_size/2]
-            embed_quant_matmul = embed_quant.reshape(
-                vocab_size, n_blocks, self.q4_block_size // 2
-            )
+            embed_quant_matmul = embed_quant.reshape(vocab_size, n_blocks, self.q4_block_size // 2)
             self.add_initializer(
                 "model_embed_tokens_weight_quant_matmul", embed_quant_matmul, dtype=np.uint8
             )
@@ -1092,9 +1090,7 @@ class LFM2Builder(ONNXBuilderBase):
             embed_output = "/model/embed_tokens/GatherBlockQuantized/output_0"
         else:
             embed_output = "/model/embed_tokens/Gather/output_0"
-        self.add_value_info(
-            embed_output, TensorProto.FLOAT, ["batch_size", "sequence_length", H]
-        )
+        self.add_value_info(embed_output, TensorProto.FLOAT, ["batch_size", "sequence_length", H])
 
         # === Per-layer outputs ===
         for layer_idx in range(num_layers):
