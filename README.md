@@ -19,7 +19,7 @@ ONNX export and inference tools for [LFM2](https://www.liquid.ai/liquid-foundati
 |--------|---------------|
 | **LFM2.5**, **LFM2** | fp32, fp16, q4, q8 |
 | **LFM2.5-VL**, **LFM2-VL** | fp32, fp16, q4, q8 |
-| **LFM2-MoE** | fp32, fp16, q4, q4f16 |
+| **LFM2.5-8B-A1B**, **LFM2-8B-A1B** | fp32, fp16, q4, q4f16 |
 | **LFM2.5-Audio** | fp32, fp16, q4, q8 |
 
 
@@ -59,8 +59,11 @@ uv run lfm2-vl-export LiquidAI/LFM2.5-VL-1.6B --vision-format conv2d
 ### 3.3 LFM2-MoE Mixture of Experts
 
 ```bash
-# All precisions
-uv run lfm2-moe-export LiquidAI/LFM2-MoE-8B-A1B --precision
+# Current LFM2.5 MoE checkpoint
+uv run lfm2-moe-export LiquidAI/LFM2.5-8B-A1B --precision
+
+# Earlier LFM2 MoE checkpoint
+uv run lfm2-moe-export LiquidAI/LFM2-8B-A1B --precision
 ```
 
 ## 4. Inference
@@ -105,10 +108,10 @@ uv run lfm2-vl-infer --model ./exports/LFM2.5-VL-1.6B-ONNX \
 
 ```bash
 # Interactive chat
-uv run lfm2-moe-infer --model ./exports/LFM2-MoE-8B-A1B-ONNX/onnx/model_q4.onnx
+uv run lfm2-moe-infer --model ./exports/LFM2.5-8B-A1B-ONNX/onnx/model_q4.onnx
 
 # Force CPU (when model does not fit VRAM)
-uv run lfm2-moe-infer --model ./exports/LFM2-MoE-8B-A1B-ONNX/onnx/model_q4.onnx --cpu
+uv run lfm2-moe-infer --model ./exports/LFM2.5-8B-A1B-ONNX/onnx/model_q4.onnx --cpu
 ```
 
 ### 4.4 Audio (ASR, TTS, Interleaved)
@@ -169,6 +172,7 @@ uv run pytest tests/test_lfm2_vl/test_vision_encoder.py -v
 
 # LFM2-MoE tests
 uv run pytest tests/test_lfm2_moe/test_decoder.py -v
+uv run pytest tests/test_lfm2_moe/test_tokenizer.py -v
 ```
 
 Benchmarking, compare the CPU
@@ -193,6 +197,10 @@ uv run lfm2-bench --model LiquidAI/LFM2.5-1.2B-Instruct \
 
 **Audio:**
 - [LiquidAI/LFM2.5-Audio-1.5B-ONNX](https://huggingface.co/LiquidAI/LFM2.5-Audio-1.5B-ONNX)
+
+**MoE:**
+- `LiquidAI/LFM2.5-8B-A1B` and `LiquidAI/LFM2-8B-A1B` are supported by this exporter.
+- A pre-exported LiquidAI ONNX repo for `LFM2.5-8B-A1B` is not listed here yet.
 
 ### 6.2 onnx-community
 

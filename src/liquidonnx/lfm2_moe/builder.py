@@ -654,44 +654,183 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         self.add_initializer("sin_cache", torch.sin(freqs).numpy())
 
     def build_attention_mask_subgraph(self):
-        # Use community constant naming and path convention
-        const_1_arr = self.get_constant([1])  # /model/constants/INT64/[1]
-        const_1_scalar = self.get_constant(1)  # /model/constants/INT64/1
+        """Build shared padding subgraphs matching the published MoE export.
 
-        self.make_node(
-            "ReduceSum",
-            ["attention_mask", const_1_arr],
-            ["/model/attn_mask_reformat/attn_mask_subgraph/ReduceSum/output_0"],
-            keepdims=0,
-        )
-        self.make_node(
-            "Sub",
-            ["/model/attn_mask_reformat/attn_mask_subgraph/ReduceSum/output_0", const_1_arr],
-            ["/model/attn_mask_reformat/attn_mask_subgraph/Sub/output_0"],
-        )
-        self.make_node(
-            "Cast",
-            ["/model/attn_mask_reformat/attn_mask_subgraph/Sub/output_0"],
-            ["/model/attn_mask_reformat/attn_mask_subgraph/Sub/Cast/output_0"],
-            to=TensorProto.INT32,
-        )
+        The community graph derives three reusable mask views:
+        - `attn_mask_reformat`: batch-expanded sequence lengths for GQA
+        - `shared_conv`: the trailing query-window mask for conv layers
+        - `gqa_attention_bias`: additive mask for left/right-padded attention
 
+        This keeps padded batched inputs aligned with the PyTorch reference and
+        with the published `LFM2-8B-A1B-ONNX` graph structure.
+        """
+        const_0_scalar = self.get_constant(0)
+        const_1_scalar = self.get_constant(1)
+        const_1_arr = self.get_constant([1])
+        const_end = self.get_constant([np.iinfo(np.int64).max])
+
+        # Shared dimension helpers used by both conv and attention subgraphs.
         self.make_node(
             "Shape",
             ["attention_mask"],
-            ["/model/attn_mask_reformat/attn_mask_subgraph/Shape/output_0"],
+            ["/model/shared_dims/attention_mask/Shape/output_0"],
         )
-        self.make_node(
+        total_seq_len = self.make_node(
             "Gather",
-            ["/model/attn_mask_reformat/attn_mask_subgraph/Shape/output_0", const_1_scalar],
-            ["/model/attn_mask_reformat/attn_mask_subgraph/Gather_1/output_0"],
+            ["/model/shared_dims/attention_mask/Shape/output_0", const_1_scalar],
+            ["/model/shared_dims/attention_mask/Gather_1/output_0"],
             axis=0,
         )
         self.make_node(
+            "Shape",
+            ["input_ids"],
+            ["/model/shared_dims/root_input/Shape/output_0"],
+        )
+        batch_size = self.make_node(
+            "Gather",
+            ["/model/shared_dims/root_input/Shape/output_0", const_0_scalar],
+            ["/model/shared_dims/root_input/Gather_0/output_0"],
+            axis=0,
+        )
+        seq_len = self.make_node(
+            "Gather",
+            ["/model/shared_dims/root_input/Shape/output_0", const_1_scalar],
+            ["/model/shared_dims/root_input/Gather_1/output_0"],
+            axis=0,
+        )
+
+        # GroupQueryAttention uses total sequence length, not non-pad token count.
+        self.make_node(
+            "Sub",
+            [total_seq_len, const_1_scalar],
+            ["/model/attn_mask_reformat/attn_mask_subgraph/Sub/output_0"],
+        )
+        seq_len_minus_one = self.make_unsqueeze(
+            "/model/attn_mask_reformat/attn_mask_subgraph/Sub/output_0",
+            self.get_constant([0]),
+            "/model/attn_mask_reformat/attn_mask_subgraph/Sub/Unsqueeze/output_0",
+        )
+        batch_size_unsqueezed = self.make_unsqueeze(
+            batch_size,
+            self.get_constant([0]),
+            "/model/attn_mask_reformat/attn_mask_subgraph/BatchSize/Unsqueeze/output_0",
+        )
+        target_shape = self.make_node(
+            "Concat",
+            [
+                batch_size_unsqueezed,
+                const_1_arr,
+            ],
+            ["/model/attn_mask_reformat/attn_mask_subgraph/Concat/output_0"],
+            axis=0,
+        )
+        self.make_node(
+            "Expand",
+            [
+                seq_len_minus_one,
+                target_shape,
+            ],
+            ["/model/attn_mask_reformat/attn_mask_subgraph/Expand/output_0"],
+        )
+        self.make_node(
             "Cast",
-            ["/model/attn_mask_reformat/attn_mask_subgraph/Gather_1/output_0"],
+            ["/model/attn_mask_reformat/attn_mask_subgraph/Expand/output_0"],
+            ["/model/attn_mask_reformat/attn_mask_subgraph/Expand/Cast/output_0"],
+            to=TensorProto.INT32,
+        )
+        self.make_node(
+            "Cast",
+            [total_seq_len],
             ["/model/attn_mask_reformat/attn_mask_subgraph/Gather/Cast/output_0"],
             to=TensorProto.INT32,
+        )
+
+        # Shared conv mask: slice the trailing query window and broadcast over H.
+        self.make_node(
+            "Mul",
+            [seq_len, self.get_constant(-1)],
+            ["/model/shared_conv/Neg_Seq_Len/output_0"],
+        )
+        self.make_unsqueeze(
+            "/model/shared_conv/Neg_Seq_Len/output_0",
+            self.get_constant([0]),
+            "/model/shared_conv/Unsqueeze_starts/output_0",
+        )
+        self.make_slice(
+            "attention_mask",
+            "/model/shared_conv/Unsqueeze_starts/output_0",
+            const_end,
+            self.get_constant([1]),
+            "/model/shared_conv/Slice_Mask/output_0",
+        )
+        self.make_node(
+            "Cast",
+            ["/model/shared_conv/Slice_Mask/output_0"],
+            ["/model/shared_conv/Mask_Cast/output_0"],
+            to=TensorProto.FLOAT,
+        )
+        self.make_unsqueeze(
+            "/model/shared_conv/Mask_Cast/output_0",
+            self.get_constant([-1]),
+            "/model/shared_conv/Mask_Unsqueeze_Last/output_0",
+        )
+
+        # Additive attention bias derived from attention_mask for padded batches.
+        self.make_node(
+            "Cast",
+            ["attention_mask"],
+            ["/model/gqa_attention_bias/Cast/output_0"],
+            to=TensorProto.FLOAT,
+        )
+        self.make_node(
+            "Sub",
+            [
+                self.get_constant(1.0, dtype=np.float32),
+                "/model/gqa_attention_bias/Cast/output_0",
+            ],
+            ["/model/gqa_attention_bias/Sub/output_0"],
+        )
+        self.make_node(
+            "Mul",
+            [
+                "/model/gqa_attention_bias/Sub/output_0",
+                self.get_constant(MASK_VALUE, dtype=np.float32),
+            ],
+            ["/model/gqa_attention_bias/Mul/output_0"],
+        )
+        self.make_unsqueeze(
+            "/model/gqa_attention_bias/Mul/output_0",
+            self.get_constant([1, 2]),
+            "/model/gqa_attention_bias/Unsqueeze/output_0",
+        )
+        seq_len_unsqueezed = self.make_unsqueeze(
+            seq_len,
+            self.get_constant([0]),
+            "/model/gqa_attention_bias/Unsqueeze_S/output_0",
+        )
+        total_seq_unsqueezed = self.make_unsqueeze(
+            total_seq_len,
+            self.get_constant([0]),
+            "/model/gqa_attention_bias/Unsqueeze_T/output_0",
+        )
+        gqa_target_shape = self.make_node(
+            "Concat",
+            [
+                batch_size_unsqueezed,
+                const_1_arr,
+                seq_len_unsqueezed,
+                total_seq_unsqueezed,
+            ],
+            ["/model/gqa_attention_bias/Target4D/output_0"],
+            axis=0,
+        )
+        self.make_node(
+            "Expand",
+            [
+                "/model/gqa_attention_bias/Unsqueeze/output_0",
+                gqa_target_shape,
+            ],
+            ["/model/gqa_attention_bias/Expand/output_0"],
         )
 
     def build_conv_layer(self, layer_idx: int, hidden_state: str) -> str:
@@ -708,16 +847,22 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             name="LayerNorm",
         )
 
+        masked_normed = self.make_mul(
+            normed,
+            "/model/shared_conv/Mask_Unsqueeze_Last/output_0",
+            f"{prefix}/conv/Mask_Mul_Input/output_0",
+        )
+
         if self.use_q4:
             in_proj = self.make_matmul_nbits(
-                normed,
+                masked_normed,
                 self.weights[f"{weight_prefix}.conv.in_proj.weight"].T,
                 f"model_layers_{layer_idx}_conv_in_proj_MatMul_weight",
                 f"{prefix}/conv/in_proj/MatMul/output_0",
             )
         else:
             in_proj = self.make_matmul(
-                normed,
+                masked_normed,
                 f"{weight_prefix}.conv.in_proj.MatMul.weight",
                 f"{prefix}/conv/in_proj/MatMul/output_0",
             )
@@ -751,27 +896,10 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             group=H,
         )
 
-        # Extract seq_len from LayerNorm output (shape [B, S, H]) at axis 1
-        self.make_node("Shape", [normed], [f"{prefix}/conv/Shape/output_0"])
-        self.make_node(
-            "Gather",
-            [f"{prefix}/conv/Shape/output_0", self.get_constant(1)],
-            [f"{prefix}/conv/Gather_1/output_0"],
-            axis=0,
-        )
-
-        # Slice last seq_len elements (community naming: Neg_Seq_Len, Unsqueeze_starts)
-        neg_seq = self.make_mul(
-            f"{prefix}/conv/Gather_1/output_0",
-            self.get_constant(-1),
-            f"{prefix}/conv/Neg_Seq_Len/output_0",
-        )
-        slice_start = self.make_unsqueeze(
-            neg_seq, self.get_constant([0]), f"{prefix}/conv/Unsqueeze_starts/output_0"
-        )
+        # Slice last seq_len elements using the shared query-width helper.
         self.make_slice(
             conv_out_full,
-            slice_start,
+            "/model/shared_conv/Unsqueeze_starts/output_0",
             self.get_constant([np.iinfo(np.int64).max]),
             self.get_constant([2]),
             f"{prefix}/conv/Slice_Conv_Output/output_0",
@@ -901,8 +1029,9 @@ class LFM2MoEBuilder(ONNXBuilderBase):
         scale = 1.0 / (hd**0.5)
 
         # Use community attn mask output names
-        seqlens_k = "/model/attn_mask_reformat/attn_mask_subgraph/Sub/Cast/output_0"
+        seqlens_k = "/model/attn_mask_reformat/attn_mask_subgraph/Expand/Cast/output_0"
         total_seq = "/model/attn_mask_reformat/attn_mask_subgraph/Gather/Cast/output_0"
+        attention_bias = "/model/gqa_attention_bias/Expand/output_0"
 
         if self.use_integrated_rope:
             self.make_node(
@@ -917,6 +1046,8 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                     total_seq,
                     "cos_cache",
                     "sin_cache",
+                    "",
+                    attention_bias,
                 ],
                 [
                     f"{prefix}/attn/GroupQueryAttention/output_0",
@@ -964,6 +1095,8 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                     total_seq,
                     "",
                     "",
+                    "",
+                    attention_bias,
                 ],
                 [
                     f"{prefix}/attn/GroupQueryAttention/output_0",
@@ -1492,12 +1625,77 @@ class LFM2MoEBuilder(ONNXBuilderBase):
             self.add_value_info(init.name, dtype, shape)
 
         # === Attention mask subgraph outputs ===
-        self.add_value_info(f"{mask_prefix}/ReduceSum/output_0", TensorProto.INT64, ["batch_size"])
-        self.add_value_info(f"{mask_prefix}/Sub/output_0", TensorProto.INT64, ["batch_size"])
-        self.add_value_info(f"{mask_prefix}/Sub/Cast/output_0", TensorProto.INT32, ["batch_size"])
-        self.add_value_info(f"{mask_prefix}/Shape/output_0", TensorProto.INT64, [2])
-        self.add_value_info(f"{mask_prefix}/Gather/output_0", TensorProto.INT64, [])
+        self.add_value_info(f"{mask_prefix}/Sub/output_0", TensorProto.INT64, [])
+        self.add_value_info(f"{mask_prefix}/Sub/Unsqueeze/output_0", TensorProto.INT64, [1])
+        self.add_value_info(f"{mask_prefix}/BatchSize/Unsqueeze/output_0", TensorProto.INT64, [1])
+        self.add_value_info(f"{mask_prefix}/Concat/output_0", TensorProto.INT64, [2])
+        self.add_value_info(f"{mask_prefix}/Expand/output_0", TensorProto.INT64, ["batch_size", 1])
+        self.add_value_info(
+            f"{mask_prefix}/Expand/Cast/output_0", TensorProto.INT32, ["batch_size", 1]
+        )
         self.add_value_info(f"{mask_prefix}/Gather/Cast/output_0", TensorProto.INT32, [])
+        self.add_value_info(
+            "/model/shared_dims/attention_mask/Shape/output_0", TensorProto.INT64, [2]
+        )
+        self.add_value_info(
+            "/model/shared_dims/attention_mask/Gather_1/output_0", TensorProto.INT64, []
+        )
+        self.add_value_info("/model/shared_dims/root_input/Shape/output_0", TensorProto.INT64, [2])
+        self.add_value_info(
+            "/model/shared_dims/root_input/Gather_0/output_0", TensorProto.INT64, []
+        )
+        self.add_value_info(
+            "/model/shared_dims/root_input/Gather_1/output_0", TensorProto.INT64, []
+        )
+        self.add_value_info("/model/shared_conv/Neg_Seq_Len/output_0", TensorProto.INT64, [])
+        self.add_value_info("/model/shared_conv/Unsqueeze_starts/output_0", TensorProto.INT64, [1])
+        self.add_value_info(
+            "/model/shared_conv/Slice_Mask/output_0",
+            TensorProto.INT64,
+            ["batch_size", "sequence_length"],
+        )
+        self.add_value_info(
+            "/model/shared_conv/Mask_Cast/output_0",
+            TensorProto.FLOAT,
+            ["batch_size", "sequence_length"],
+        )
+        self.add_value_info(
+            "/model/shared_conv/Mask_Unsqueeze_Last/output_0",
+            TensorProto.FLOAT,
+            ["batch_size", "sequence_length", 1],
+        )
+        self.add_value_info(
+            "/model/gqa_attention_bias/Cast/output_0",
+            TensorProto.FLOAT,
+            ["batch_size", "total_sequence_length"],
+        )
+        self.add_value_info(
+            "/model/gqa_attention_bias/Sub/output_0",
+            TensorProto.FLOAT,
+            ["batch_size", "total_sequence_length"],
+        )
+        self.add_value_info(
+            "/model/gqa_attention_bias/Mul/output_0",
+            TensorProto.FLOAT,
+            ["batch_size", "total_sequence_length"],
+        )
+        self.add_value_info(
+            "/model/gqa_attention_bias/Unsqueeze/output_0",
+            TensorProto.FLOAT,
+            ["batch_size", 1, 1, "total_sequence_length"],
+        )
+        self.add_value_info(
+            "/model/gqa_attention_bias/Unsqueeze_S/output_0", TensorProto.INT64, [1]
+        )
+        self.add_value_info(
+            "/model/gqa_attention_bias/Unsqueeze_T/output_0", TensorProto.INT64, [1]
+        )
+        self.add_value_info("/model/gqa_attention_bias/Target4D/output_0", TensorProto.INT64, [4])
+        self.add_value_info(
+            "/model/gqa_attention_bias/Expand/output_0",
+            TensorProto.FLOAT,
+            ["batch_size", 1, "sequence_length", "total_sequence_length"],
+        )
 
         # === Embedding output ===
         self.add_value_info(
@@ -1525,6 +1723,11 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                     f"{prefix}/conv/in_proj/MatMul/output_0",
                     TensorProto.FLOAT,
                     ["batch_size", "sequence_length", 3 * H],
+                )
+                self.add_value_info(
+                    f"{prefix}/conv/Mask_Mul_Input/output_0",
+                    TensorProto.FLOAT,
+                    ["batch_size", "sequence_length", H],
                 )
                 self.add_value_info(
                     f"{prefix}/conv/Transpose_1/output_0",
@@ -1555,12 +1758,6 @@ class LFM2MoEBuilder(ONNXBuilderBase):
                     f"{prefix}/conv/Conv_Input/output_0",
                     TensorProto.FLOAT,
                     ["batch_size", H, "sequence_length_plus_cache"],
-                )
-                self.add_value_info(f"{prefix}/conv/Shape/output_0", TensorProto.INT64, [3])
-                self.add_value_info(f"{prefix}/conv/Gather_1/output_0", TensorProto.INT64, [])
-                self.add_value_info(f"{prefix}/conv/Neg_Seq_Len/output_0", TensorProto.INT64, [])
-                self.add_value_info(
-                    f"{prefix}/conv/Unsqueeze_starts/output_0", TensorProto.INT64, [1]
                 )
                 self.add_value_info(
                     f"{prefix}/conv/Mul_2/output_0",

@@ -6,7 +6,7 @@ compared to PyTorch reference.
 
 Run with:
     uv run pytest tests/test_lfm2_moe/test_coherence.py -v
-    uv run pytest tests/test_lfm2_moe/test_coherence.py -v -k "8B-A1B and q4"
+    uv run pytest tests/test_lfm2_moe/test_coherence.py -v -k "LFM2.5-8B-A1B and q4"
 """
 
 import logging
@@ -25,11 +25,13 @@ logger = logging.getLogger(__name__)
 # HuggingFace model IDs to test
 MODELS = [
     "LiquidAI/LFM2-8B-A1B",
+    "LiquidAI/LFM2.5-8B-A1B",
 ]
 
 QUANT_CONFIGS = [
     pytest.param(None, id="fp32"),
     pytest.param("q4", id="q4"),
+    pytest.param("q8", id="q8"),
 ]
 
 MAX_NEW_TOKENS = 20

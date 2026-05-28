@@ -5,7 +5,7 @@ Tests single-step logit comparison between PyTorch and ONNX models.
 
 Run with:
     uv run pytest tests/test_lfm2_moe/test_decoder.py -v
-    uv run pytest tests/test_lfm2_moe/test_decoder.py -v -k "8B-A1B and q4"
+    uv run pytest tests/test_lfm2_moe/test_decoder.py -v -k "LFM2.5-8B-A1B and q4"
 """
 
 import logging
@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 # HuggingFace model IDs to test
 MODELS = [
     "LiquidAI/LFM2-8B-A1B",
+    "LiquidAI/LFM2.5-8B-A1B",
 ]
 
 PROMPTS = ["Hello, how are", "The sky is", "1 + 1 ="]
@@ -33,6 +34,7 @@ QUANT_CONFIGS = [
     pytest.param("fp16", ["top_k"], id="fp16"),
     pytest.param("q4", ["top_k"], id="q4"),
     pytest.param("q4f16", ["top_k"], id="q4f16"),
+    pytest.param("q8", ["top_k"], id="q8"),
 ]
 
 

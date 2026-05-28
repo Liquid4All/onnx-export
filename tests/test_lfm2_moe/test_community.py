@@ -20,7 +20,8 @@ from liquidonnx.session import get_onnx_file, load_onnx_session
 
 logger = logging.getLogger(__name__)
 
-# HuggingFace model IDs to test
+# HuggingFace model IDs to test.
+# Keep this scoped to models with published onnx-community exports.
 MODELS = [
     "LiquidAI/LFM2-8B-A1B",
 ]

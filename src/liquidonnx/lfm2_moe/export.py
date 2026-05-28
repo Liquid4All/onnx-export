@@ -15,21 +15,23 @@ Output Structure (Transformers.js compatible):
             ├── model_q4.onnx        # --precision q4 (inline builder Q4 with QMoE ops)
             ├── model_q4.onnx_data
             ├── model_q4f16.onnx     # --precision q4f16
-            └── model_q4f16.onnx_data
+            ├── model_q4f16.onnx_data
+            ├── model_q8.onnx        # --precision q8 (INT8 MatMul quantization, MoE experts stay FP32)
+            └── model_q8.onnx_data
 
 Usage:
     # Export FP32 base model
-    uv run lfm2-moe-export LiquidAI/LFM2-MoE-8B-A1B
+    uv run lfm2-moe-export LiquidAI/LFM2.5-8B-A1B
 
-    # Export all precisions (q4, q4f16, fp16)
-    uv run lfm2-moe-export LiquidAI/LFM2-MoE-8B-A1B --precision
+    # Export all precisions (q4, q4f16, fp16, q8)
+    uv run lfm2-moe-export LiquidAI/LFM2.5-8B-A1B --precision
 
     # Export specific precisions
-    uv run lfm2-moe-export LiquidAI/LFM2-MoE-8B-A1B --precision q4
-    uv run lfm2-moe-export LiquidAI/LFM2-MoE-8B-A1B --precision fp16 q4f16
+    uv run lfm2-moe-export LiquidAI/LFM2.5-8B-A1B --precision q4
+    uv run lfm2-moe-export LiquidAI/LFM2.5-8B-A1B --precision fp16 q4f16 q8
 
     # Convert existing export (skip base export step)
-    uv run lfm2-moe-export LiquidAI/LFM2-MoE-8B-A1B --precision --skip-export
+    uv run lfm2-moe-export LiquidAI/LFM2.5-8B-A1B --precision --skip-export
 """
 
 import argparse
@@ -42,7 +44,7 @@ from transformers import AutoConfig, AutoTokenizer
 
 from liquidonnx.external_data import split_external_data
 from liquidonnx.lfm2_moe.builder import LFM2MoEBuilder, LFM2MoEConfig
-from liquidonnx.quantize import get_total_model_size_mb
+from liquidonnx.quantize import get_total_model_size_mb, quantize_model
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +245,16 @@ def convert_q4_to_fp16(
             if out.name != "logits":
                 out.type.tensor_type.elem_type = TensorProto.FLOAT16
 
+    # Keep intermediate Casts aligned with the FP16 activation path.
+    # The Q4 builder emits Cast-to-FLOAT nodes for mask/bias plumbing; after
+    # converting the graph to Q4F16 they must become FLOAT16 as well.
+    for node in graph.node:
+        if node.op_type != "Cast":
+            continue
+        for attr in node.attribute:
+            if attr.name == "to" and attr.i == TensorProto.FLOAT:
+                attr.i = TensorProto.FLOAT16
+
     # Add Cast node for logits (fp16 -> fp32) matching community
     for output in graph.output:
         if output.name == "logits":
@@ -286,8 +298,8 @@ def convert_q4_to_fp16(
 def get_model_name(model_path: str) -> str:
     """Extract model name from HF slug or local path.
 
-    Works for both HF slugs ("LiquidAI/LFM2-MoE-8B-A1B" -> "LFM2-MoE-8B-A1B")
-    and local paths ("./LFM2-MoE-8B-A1B/" -> "LFM2-MoE-8B-A1B").
+    Works for both HF slugs ("LiquidAI/LFM2.5-8B-A1B" -> "LFM2.5-8B-A1B")
+    and local paths ("./LFM2.5-8B-A1B/" -> "LFM2.5-8B-A1B").
     """
     return pathlib.Path(model_path).name
 
@@ -436,6 +448,59 @@ def do_q4f16(onnx_dir: pathlib.Path):
     convert_q4_to_fp16(model_q4, model_q4f16)
 
 
+def do_quantize(
+    onnx_dir: pathlib.Path,
+    bits: int,
+    exclude_lm_head: bool,
+    block_size: int,
+    symmetric: bool = False,
+    output_name: str | None = None,
+    source: str = "model.onnx",
+):
+    """Quantize model to INT8 using MatMulNBits.
+
+    For MoE exports, this post-quantizes standard MatMul nodes while the fused
+    MoE expert weights remain FP32 inside the custom operator.
+    """
+    input_model = onnx_dir / source
+    if not input_model.exists():
+        raise FileNotFoundError(f"{source} not found in {onnx_dir}")
+
+    output_model = onnx_dir / (output_name or f"model_q{bits}.onnx")
+
+    if output_model.exists():
+        logger.info(f"Skipping {output_model.name} (already exists)")
+        return
+
+    orig_mb = get_total_model_size_mb(input_model)
+    quant_type = "symmetric" if symmetric else "asymmetric"
+    logger.info(f"Quantizing {source} to Q{bits} ({quant_type})...")
+
+    quantize_model(
+        input_model,
+        output_model,
+        bits=bits,
+        block_size=block_size,
+        exclude_lm_head=exclude_lm_head,
+        symmetric=symmetric,
+    )
+
+    quant_mb = get_total_model_size_mb(output_model)
+    if orig_mb > 0:
+        logger.info(f"  {orig_mb:.1f} MB -> {quant_mb:.1f} MB ({orig_mb / quant_mb:.1f}x)")
+
+
+def delete_model_family(model_path: pathlib.Path) -> None:
+    """Delete an ONNX model and all of its external-data shards."""
+    parent = model_path.parent
+    shard_pattern = f"{model_path.name}_data*"
+
+    for artifact in [model_path, *sorted(parent.glob(shard_pattern))]:
+        if artifact.exists():
+            artifact.unlink()
+            logger.info(f"  Deleted intermediate {artifact.name}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Export LFM2-MoE models to ONNX",
@@ -445,7 +510,7 @@ def main():
 
     parser.add_argument(
         "model",
-        help="HuggingFace model ID or local path (e.g., LiquidAI/LFM2-MoE-8B-A1B)",
+        help="HuggingFace model ID or local path (e.g., LiquidAI/LFM2.5-8B-A1B)",
     )
     parser.add_argument(
         "--output-dir",
@@ -467,7 +532,7 @@ def main():
         "--precision",
         nargs="*",
         metavar="PRECISION",
-        help="Output precisions: fp16, q4, q4f16, or all (default if no args)",
+        help="Output precisions: fp16, q4, q4f16, q8, or all (default if no args)",
     )
     parser.add_argument(
         "--integrated-rope",
@@ -489,6 +554,12 @@ def main():
         "--q4",
         action="store_true",
         help="Full Q4 quantization matching onnx-community Q4 structure (includes QMoE)",
+    )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=32,
+        help="Block size for post-export quantization (default: 32)",
     )
     parser.add_argument(
         "--split-data",
@@ -517,12 +588,14 @@ def main():
     do_q4 = False
     do_q4f16_conversion = False
     do_fp16_conversion = False
+    do_q8_conversion = False
 
     if args.precision is not None:
         if len(args.precision) == 0:
             do_q4 = True
             do_q4f16_conversion = True
             do_fp16_conversion = True
+            do_q8_conversion = True
         else:
             for p in args.precision:
                 p = p.lower()
@@ -532,11 +605,14 @@ def main():
                     do_q4f16_conversion = True
                 elif p == "fp16":
                     do_fp16_conversion = True
+                elif p == "q8":
+                    do_q8_conversion = True
                 else:
-                    parser.error(f"Invalid precision: {p}. Use fp16, q4, or q4f16.")
+                    parser.error(f"Invalid precision: {p}. Use fp16, q4, q4f16, or q8.")
 
     need_q4_export = do_q4 or do_q4f16_conversion
-    has_precision = do_q4 or do_q4f16_conversion or do_fp16_conversion
+    need_fp32_export = do_fp16_conversion or do_q8_conversion
+    has_precision = do_q4 or do_q4f16_conversion or do_fp16_conversion or do_q8_conversion
 
     # === Export base models ===
     if not args.skip_export:
@@ -556,9 +632,9 @@ def main():
                 )
                 logger.info(f"  {model_name}: OK")
 
-            if do_fp16_conversion:
+            if need_fp32_export:
                 logger.info("=" * 60)
-                logger.info("Exporting model (FP32 base for FP16 conversion)")
+                logger.info("Exporting model (FP32 base for conversion/quantization)")
                 logger.info("=" * 60)
                 logger.info(f"Exporting {args.model} to {output_dir}...")
                 export_model(
@@ -593,6 +669,20 @@ def main():
             logger.info(f"  {model_name}: OK")
 
     # === Precision conversions ===
+    if do_q8_conversion:
+        logger.info("=" * 60)
+        logger.info("Quantizing to Q8")
+        logger.info("=" * 60)
+        do_quantize(
+            onnx_dir,
+            bits=8,
+            exclude_lm_head=True,
+            block_size=args.block_size,
+            symmetric=False,
+            output_name="model_q8.onnx",
+        )
+        logger.info(f"  {model_name}: OK")
+
     if do_fp16_conversion:
         logger.info("=" * 60)
         logger.info("Converting to FP16")
@@ -600,11 +690,10 @@ def main():
         do_fp16(onnx_dir)
         logger.info(f"  {model_name}: OK")
 
-        # Delete intermediate FP32 model.onnx + model.onnx_data
-        for intermediate in [onnx_dir / "model.onnx", onnx_dir / "model.onnx_data"]:
-            if intermediate.exists():
-                intermediate.unlink()
-                logger.info(f"  Deleted intermediate {intermediate.name}")
+        # Delete intermediate FP32 model.onnx + model.onnx_data once all
+        # dependent conversions/quantization have completed.
+        if not do_q8_conversion:
+            delete_model_family(onnx_dir / "model.onnx")
 
     if do_q4f16_conversion:
         logger.info("=" * 60)
@@ -615,10 +704,7 @@ def main():
 
     if not do_q4 and need_q4_export:
         # q4f16 was requested but not q4 — delete the intermediate q4 model
-        for intermediate in [onnx_dir / "model_q4.onnx", onnx_dir / "model_q4.onnx_data"]:
-            if intermediate.exists():
-                intermediate.unlink()
-                logger.info(f"  Deleted intermediate {intermediate.name}")
+        delete_model_family(onnx_dir / "model_q4.onnx")
 
     if not args.no_split_data:
         chunk_size_bytes = int(args.split_data * 1024 * 1024 * 1024)

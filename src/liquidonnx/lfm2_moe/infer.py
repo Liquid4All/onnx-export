@@ -3,9 +3,9 @@
 ONNX inference script for LFM2-MoE models.
 
 Usage:
-    uv run lfm2-moe-infer --model exports/LFM2-MoE-8B-A1B-ONNX
-    uv run lfm2-moe-infer --model exports/LFM2-MoE-8B-A1B-ONNX --prompt "Hello"
-    uv run lfm2-moe-infer --model exports/LFM2-MoE-8B-A1B-ONNX/onnx/model_q4.onnx
+    uv run lfm2-moe-infer --model exports/LFM2.5-8B-A1B-ONNX
+    uv run lfm2-moe-infer --model exports/LFM2.5-8B-A1B-ONNX --prompt "Hello"
+    uv run lfm2-moe-infer --model exports/LFM2.5-8B-A1B-ONNX/onnx/model_q4.onnx
 """
 
 import argparse
