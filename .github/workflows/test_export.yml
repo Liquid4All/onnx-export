@@ -1,0 +1,84 @@
+name: Test Export
+
+# Manually-triggered smoke test of the ONNX export pipeline on a GitHub-hosted
+# runner (no GPU, no external services): given an HF model slug and its family,
+# run the matching export CLI and assert it produced an ONNX graph.
+#
+# Large checkpoints may exceed the runner's disk/RAM — keep to a small model
+# (the defaults export in a few minutes). To export a gated/private model, add
+# an `HF_TOKEN` repository secret.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: HF model slug to export (e.g. LiquidAI/LFM2-350M)
+        required: true
+        default: LiquidAI/LFM2-350M
+      family:
+        description: Model family (selects the export CLI)
+        type: choice
+        options:
+          - text
+          - vl
+          - moe
+          - audio
+        default: text
+      precision:
+        description: 'Precision(s) to export, space-separated (e.g. "q4" or "fp16 q4")'
+        required: true
+        default: q4
+
+concurrency:
+  group: export-test-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # ONNX exports (fp32 base + quantized copies) are large; reclaim the disk
+      # the GitHub image spends on toolchains this job doesn't use.
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - uses: astral-sh/setup-uv@v8.2.0
+      - run: uv python install 3.12
+      - run: uv sync
+
+      - name: Export to ONNX
+        env:
+          MODEL: ${{ inputs.model }}
+          FAMILY: ${{ inputs.family }}
+          PRECISION: ${{ inputs.precision }}
+          # Optional: set an HF_TOKEN repo secret to export gated/private models.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          case "$FAMILY" in
+            text)  CLI=lfm2-export ;;
+            vl)    CLI=lfm2-vl-export ;;
+            moe)   CLI=lfm2-moe-export ;;
+            audio) CLI=lfm2-audio-export ;;
+            *) echo "::error::unknown family '$FAMILY'"; exit 1 ;;
+          esac
+          echo "Exporting $MODEL with '$CLI --precision $PRECISION'"
+          # $PRECISION is intentionally unquoted so multiple precisions split into args.
+          uv run "$CLI" "$MODEL" --precision $PRECISION
+
+      - name: Show exported files
+        run: |
+          ls -lashR exports
+          echo "ONNX graphs:"
+          find exports -name '*.onnx' -printf '%s\t%p\n' || true
+
+      - name: Assert an ONNX graph was produced
+        run: |
+          count=$(find exports -name '*.onnx' | wc -l)
+          echo "Produced $count ONNX graph(s)"
+          test "$count" -gt 0
