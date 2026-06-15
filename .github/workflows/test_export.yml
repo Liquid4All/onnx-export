@@ -1,8 +1,12 @@
 name: Test Export
 
-# Manually-triggered smoke test of the ONNX export pipeline on a GitHub-hosted
-# runner (no GPU, no external services): given an HF model slug and its family,
-# run the matching export CLI and assert it produced an ONNX graph.
+# Smoke test of the ONNX export pipeline on a GitHub-hosted runner (no GPU, no
+# external services): run an export CLI for a model family and assert it
+# produced an ONNX graph.
+#
+# Triggers:
+#   * push to main / PRs against main that touch export code (default model)
+#   * manual dispatch (pick the model, family, and precision)
 #
 # Large checkpoints may exceed the runner's disk/RAM — keep to a small model
 # (the defaults export in a few minutes). To export a gated/private model, add
@@ -28,10 +32,19 @@ on:
         description: 'Precision(s) to export, space-separated (e.g. "q4" or "fp16 q4")'
         required: true
         default: q4
+  push:
+    branches: [main]
+    paths: &export-paths
+      - 'src/liquidonnx/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/test_export.yml'
+  pull_request:
+    paths: *export-paths
 
 concurrency:
-  group: export-test-${{ github.run_id }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   export:
@@ -53,9 +66,11 @@ jobs:
 
       - name: Export to ONNX
         env:
-          MODEL: ${{ inputs.model }}
-          FAMILY: ${{ inputs.family }}
-          PRECISION: ${{ inputs.precision }}
+          # On push/PR the `inputs` context is empty, so fall back to the same
+          # defaults the workflow_dispatch form offers.
+          MODEL: ${{ inputs.model || 'LiquidAI/LFM2-350M' }}
+          FAMILY: ${{ inputs.family || 'text' }}
+          PRECISION: ${{ inputs.precision || 'q4' }}
           # Optional: set an HF_TOKEN repo secret to export gated/private models.
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
