@@ -1,4 +1,4 @@
-name: Export test
+name: Test Export
 
 # Manually-triggered smoke test of the ONNX export pipeline on a GitHub-hosted
 # runner (no GPU, no external services): given an HF model slug and its family,
@@ -37,7 +37,7 @@ jobs:
   export:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       # ONNX exports (fp32 base + quantized copies) are large; reclaim the disk
       # the GitHub image spends on toolchains this job doesn't use.
@@ -47,7 +47,7 @@ jobs:
             /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v8.2.0
       - run: uv python install 3.12
       - run: uv sync
 
