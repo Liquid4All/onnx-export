@@ -3,14 +3,14 @@ name: Test Export
 # Smoke test of the ONNX export pipeline on a GitHub-hosted runner (no GPU, no
 # external services). Two jobs run in sequence:
 #
-#   1. `export`               — run an export CLI for a model family and assert
-#                               it produced an ONNX graph, then upload it.
-#   2. `inference-smoke-test` — download that ONNX and run one short generation
-#                               ("hello") through the project's onnxruntime CLI.
+#   1. `export`         — run an export CLI for a model family and assert it
+#                         produced an ONNX graph, then upload it.
+#   2. `run-inference`  — download that ONNX and run one short generation
+#                         ("hello") through the project's onnxruntime CLI.
 #
 # The inference job is intentionally separate and depends on `export`, so the
 # export job can still be marked successful even when inference fails — a red
-# `inference-smoke-test` check points squarely at inference, not export.
+# `run-inference` check points squarely at inference, not export.
 #
 # Triggers:
 #   * push to main / PRs against main that touch export code (default model)
@@ -111,14 +111,14 @@ jobs:
       # Hand the export (graphs + external data + tokenizer/config) to the
       # inference job, which runs on a fresh runner.
       - name: Upload exported ONNX
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: onnx-export
           path: exports/
           if-no-files-found: error
           retention-days: 1
 
-  inference-smoke-test:
+  run-inference:
     # Separate job so a failure here is clearly "inference", not "export". It
     # only runs once `export` succeeds (and is skipped if `export` fails).
     needs: export
@@ -142,7 +142,7 @@ jobs:
       - run: uv sync
 
       - name: Download exported ONNX
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: onnx-export
           path: exports/
