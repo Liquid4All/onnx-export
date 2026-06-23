@@ -1,16 +1,18 @@
 name: Test Export
 
 # Smoke test of the ONNX export pipeline on a GitHub-hosted runner (no GPU, no
-# external services). Two jobs run in sequence:
+# external services). Two jobs:
 #
-#   1. `export`         — run an export CLI for a model family and assert it
-#                         produced an ONNX graph, then upload it.
-#   2. `run-inference`  — download that ONNX and run one short generation
-#                         ("hello") through the project's onnxruntime CLI.
+#   1. `export`         — run an export CLI for a model family, assert it
+#                         produced an ONNX graph, then run one short inference
+#                         ("hello") inline and record whether it passed.
+#   2. `run-inference`  — a lightweight gate that re-publishes that inline
+#                         inference result as its own pass/fail check.
 #
-# The inference job is intentionally separate and depends on `export`, so the
-# export job can still be marked successful even when inference fails — a red
-# `run-inference` check points squarely at inference, not export.
+# Inference runs inside `export` (same runner, no artifact handoff) but is
+# surfaced as a separate `run-inference` check: `export` stays green even when
+# inference fails, and a red `run-inference` points squarely at inference, not
+# export.
 #
 # Triggers:
 #   * push to main / PRs against main that touch export code (default model)
@@ -18,9 +20,9 @@ name: Test Export
 #
 # Large checkpoints may exceed the runner's disk/RAM — keep to a small model
 # (the defaults export in a few minutes). CPU inference on a hosted runner is
-# slow for large checkpoints, so the inference job is time-bounded (see
-# `timeout-minutes` and `INFER_TIMEOUT`). To export a gated/private model, add
-# an `HF_TOKEN` repository secret.
+# slow for large checkpoints, so the inline inference is time-bounded by
+# `INFER_TIMEOUT`. To export a gated/private model, add an `HF_TOKEN`
+# repository secret.
 
 on:
   workflow_dispatch:
@@ -59,6 +61,10 @@ concurrency:
 jobs:
   export:
     runs-on: ubuntu-latest
+    # Expose the inline smoke-test result so the `run-inference` gate can turn
+    # it into its own pass/fail check without re-running anything.
+    outputs:
+      inference_passed: ${{ steps.infer.outputs.inference_passed }}
     steps:
       - uses: actions/checkout@v6
 
@@ -108,46 +114,13 @@ jobs:
           echo "Produced $count ONNX graph(s)"
           test "$count" -gt 0
 
-      # Hand the export (graphs + external data + tokenizer/config) to the
-      # inference job, which runs on a fresh runner.
-      - name: Upload exported ONNX
-        uses: actions/upload-artifact@v7
-        with:
-          name: onnx-export
-          path: exports/
-          if-no-files-found: error
-          retention-days: 1
-
-  run-inference:
-    # Separate job so a failure here is clearly "inference", not "export". It
-    # only runs once `export` succeeds (and is skipped if `export` fails).
-    needs: export
-    runs-on: ubuntu-latest
-    # Bound the whole job (artifact download + uv sync + one short generation).
-    # A hang or an oversized checkpoint trips this rather than running for hours.
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v6
-
-      # Large checkpoints downloaded as an artifact can be big; reclaim the disk
-      # the GitHub image spends on toolchains this job doesn't use.
-      - name: Free up disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          df -h /
-
-      - uses: astral-sh/setup-uv@v8.2.0
-      - run: uv python install 3.12
-      - run: uv sync
-
-      - name: Download exported ONNX
-        uses: actions/download-artifact@v8
-        with:
-          name: onnx-export
-          path: exports/
-
+      # Run one short generation right here on the freshly-exported files — no
+      # artifact handoff. The step never fails the job (continue-on-error +
+      # always records a result); the `run-inference` gate turns the recorded
+      # result into a pass/fail check of its own.
       - name: Run inference (send "hello")
+        id: infer
+        continue-on-error: true
         env:
           # On push/PR the `inputs` context is empty; mirror the export defaults.
           FAMILY: ${{ inputs.family || 'text' }}
@@ -160,14 +133,19 @@ jobs:
           # timeout (rather than a multi-hour hang) be the failure signal.
           INFER_TIMEOUT: '600'
         run: |
-          set -euo pipefail
+          # No `set -e`: a failed generation must still record a result and let
+          # the `run-inference` gate (not this step) be the red check.
+          set -uo pipefail
+
+          fail() {  # record failure, note it, and stop the step (job stays green)
+            echo "inference_passed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::$1 (reported by the run-inference gate)"
+            exit 1
+          }
 
           # Exactly one "<model>-ONNX" directory is produced per export.
           MODEL_DIR=$(find exports -maxdepth 1 -type d -name '*-ONNX' | head -n1)
-          if [ -z "$MODEL_DIR" ]; then
-            echo "::error::no exported model directory found under exports/"
-            exit 1
-          fi
+          [ -n "$MODEL_DIR" ] || fail "no exported model directory found under exports/"
           ONNX_DIR="$MODEL_DIR/onnx"
           echo "Model dir: $MODEL_DIR"
           ls -la "$ONNX_DIR"
@@ -187,31 +165,31 @@ jobs:
             # No quantized variant -> fall back to fp32 (no --precision flag).
           }
 
-          run() {  # bound a single generation; surface timeout vs. other failures
+          run() {  # bound a single generation; map success/timeout/error to the output
             echo "+ timeout ${INFER_TIMEOUT}s: $*"
             if timeout "$INFER_TIMEOUT" "$@" </dev/null; then
+              echo "inference_passed=true" >> "$GITHUB_OUTPUT"
               echo "Inference smoke test passed."
             else
               rc=$?
               if [ "$rc" -eq 124 ]; then
-                echo "::error::inference smoke test timed out after ${INFER_TIMEOUT}s"
+                fail "inference smoke test timed out after ${INFER_TIMEOUT}s"
               else
-                echo "::error::inference smoke test failed (exit $rc)"
+                fail "inference smoke test failed (exit $rc)"
               fi
-              exit "$rc"
             fi
           }
 
           case "$FAMILY" in
             text)
               FILE=$(pick_file model_q4.onnx model_q4f32.onnx model_q8.onnx model_fp16.onnx model.onnx) \
-                || { echo "::error::no text model file found in $ONNX_DIR"; exit 1; }
+                || fail "no text model file found in $ONNX_DIR"
               run uv run lfm2-infer --model "$FILE" --prompt "$PROMPT" \
                 --cpu --no-stream --max-tokens "$MAX_TOKENS"
               ;;
             moe)
               FILE=$(pick_file model_q4.onnx model_q4f16.onnx model_q4f32.onnx model_q8.onnx model_fp16.onnx model.onnx) \
-                || { echo "::error::no moe model file found in $ONNX_DIR"; exit 1; }
+                || fail "no moe model file found in $ONNX_DIR"
               run uv run lfm2-moe-infer --model "$FILE" --prompt "$PROMPT" \
                 --cpu --no-stream --max-tokens "$MAX_TOKENS"
               ;;
@@ -229,5 +207,24 @@ jobs:
               run uv run lfm2-audio-infer "$MODEL_DIR" --mode text ${PREC:+--precision "$PREC"} \
                 --prompt "$PROMPT" --max-tokens "$MAX_TOKENS"
               ;;
-            *) echo "::error::unknown family '$FAMILY'"; exit 1 ;;
+            *) fail "unknown family '$FAMILY'" ;;
           esac
+
+  run-inference:
+    # Gate job: re-publishes the inline smoke-test result (run inside `export`)
+    # as its own pass/fail check. Needs no checkout, deps, or artifacts — it
+    # only reads the job output. Skipped if `export` itself fails.
+    needs: export
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate on the inference result
+        env:
+          PASSED: ${{ needs.export.outputs.inference_passed }}
+        run: |
+          echo "inference_passed='$PASSED'"
+          if [ "$PASSED" = "true" ]; then
+            echo "Inference smoke test passed."
+          else
+            echo "::error::inference smoke test failed — see the 'Run inference (send \"hello\")' step in the export job"
+            exit 1
+          fi
