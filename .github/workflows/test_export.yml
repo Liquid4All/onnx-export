@@ -1,15 +1,25 @@
 name: Test Export
 
 # Smoke test of the ONNX export pipeline on a GitHub-hosted runner (no GPU, no
-# external services): run an export CLI for a model family and assert it
-# produced an ONNX graph.
+# external services). Two jobs run in sequence:
+#
+#   1. `export`               — run an export CLI for a model family and assert
+#                               it produced an ONNX graph, then upload it.
+#   2. `inference-smoke-test` — download that ONNX and run one short generation
+#                               ("hello") through the project's onnxruntime CLI.
+#
+# The inference job is intentionally separate and depends on `export`, so the
+# export job can still be marked successful even when inference fails — a red
+# `inference-smoke-test` check points squarely at inference, not export.
 #
 # Triggers:
 #   * push to main / PRs against main that touch export code (default model)
 #   * manual dispatch (pick the model, family, and precision)
 #
 # Large checkpoints may exceed the runner's disk/RAM — keep to a small model
-# (the defaults export in a few minutes). To export a gated/private model, add
+# (the defaults export in a few minutes). CPU inference on a hosted runner is
+# slow for large checkpoints, so the inference job is time-bounded (see
+# `timeout-minutes` and `INFER_TIMEOUT`). To export a gated/private model, add
 # an `HF_TOKEN` repository secret.
 
 on:
@@ -97,3 +107,127 @@ jobs:
           count=$(find exports -name '*.onnx' | wc -l)
           echo "Produced $count ONNX graph(s)"
           test "$count" -gt 0
+
+      # Hand the export (graphs + external data + tokenizer/config) to the
+      # inference job, which runs on a fresh runner.
+      - name: Upload exported ONNX
+        uses: actions/upload-artifact@v4
+        with:
+          name: onnx-export
+          path: exports/
+          if-no-files-found: error
+          retention-days: 1
+
+  inference-smoke-test:
+    # Separate job so a failure here is clearly "inference", not "export". It
+    # only runs once `export` succeeds (and is skipped if `export` fails).
+    needs: export
+    runs-on: ubuntu-latest
+    # Bound the whole job (artifact download + uv sync + one short generation).
+    # A hang or an oversized checkpoint trips this rather than running for hours.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      # Large checkpoints downloaded as an artifact can be big; reclaim the disk
+      # the GitHub image spends on toolchains this job doesn't use.
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - uses: astral-sh/setup-uv@v8.2.0
+      - run: uv python install 3.12
+      - run: uv sync
+
+      - name: Download exported ONNX
+        uses: actions/download-artifact@v4
+        with:
+          name: onnx-export
+          path: exports/
+
+      - name: Run inference (send "hello")
+        env:
+          # On push/PR the `inputs` context is empty; mirror the export defaults.
+          FAMILY: ${{ inputs.family || 'text' }}
+          PROMPT: hello
+          # Keep the smoke test cheap on CPU — we only need a few tokens to prove
+          # the graph loads and runs.
+          MAX_TOKENS: '16'
+          # Seconds before the single generation is force-killed. CPU inference
+          # on a hosted runner is slow for large checkpoints, so cap it and let a
+          # timeout (rather than a multi-hour hang) be the failure signal.
+          INFER_TIMEOUT: '600'
+        run: |
+          set -euo pipefail
+
+          # Exactly one "<model>-ONNX" directory is produced per export.
+          MODEL_DIR=$(find exports -maxdepth 1 -type d -name '*-ONNX' | head -n1)
+          if [ -z "$MODEL_DIR" ]; then
+            echo "::error::no exported model directory found under exports/"
+            exit 1
+          fi
+          ONNX_DIR="$MODEL_DIR/onnx"
+          echo "Model dir: $MODEL_DIR"
+          ls -la "$ONNX_DIR"
+
+          # Prefer the smallest/fastest precision present (quantized first) so the
+          # CPU smoke test stays cheap.
+          pick_file() {  # echoes the first existing onnx file from the candidates
+            for f in "$@"; do
+              if [ -f "$ONNX_DIR/$f" ]; then echo "$ONNX_DIR/$f"; return 0; fi
+            done
+            return 1
+          }
+          pick_precision() {  # echoes a --precision shorthand for dir-based CLIs
+            for p in q4 q8 fp16; do
+              if ls "$ONNX_DIR"/*_"$p".onnx >/dev/null 2>&1; then echo "$p"; return 0; fi
+            done
+            # No quantized variant -> fall back to fp32 (no --precision flag).
+          }
+
+          run() {  # bound a single generation; surface timeout vs. other failures
+            echo "+ timeout ${INFER_TIMEOUT}s: $*"
+            if timeout "$INFER_TIMEOUT" "$@" </dev/null; then
+              echo "Inference smoke test passed."
+            else
+              rc=$?
+              if [ "$rc" -eq 124 ]; then
+                echo "::error::inference smoke test timed out after ${INFER_TIMEOUT}s"
+              else
+                echo "::error::inference smoke test failed (exit $rc)"
+              fi
+              exit "$rc"
+            fi
+          }
+
+          case "$FAMILY" in
+            text)
+              FILE=$(pick_file model_q4.onnx model_q4f32.onnx model_q8.onnx model_fp16.onnx model.onnx) \
+                || { echo "::error::no text model file found in $ONNX_DIR"; exit 1; }
+              run uv run lfm2-infer --model "$FILE" --prompt "$PROMPT" \
+                --cpu --no-stream --max-tokens "$MAX_TOKENS"
+              ;;
+            moe)
+              FILE=$(pick_file model_q4.onnx model_q4f16.onnx model_q4f32.onnx model_q8.onnx model_fp16.onnx model.onnx) \
+                || { echo "::error::no moe model file found in $ONNX_DIR"; exit 1; }
+              run uv run lfm2-moe-infer --model "$FILE" --prompt "$PROMPT" \
+                --cpu --no-stream --max-tokens "$MAX_TOKENS"
+              ;;
+            vl)
+              # VL takes the model directory + a precision shorthand (text-only,
+              # no --images). It auto-selects CPU when no CUDA is present.
+              PREC=$(pick_precision)
+              run uv run lfm2-vl-infer --model "$MODEL_DIR" ${PREC:+--precision "$PREC"} \
+                --prompt "$PROMPT" --no-stream --max-tokens "$MAX_TOKENS"
+              ;;
+            audio)
+              # Text mode keeps the smoke test to a plain text generation (no
+              # audio in/out). Auto-selects CPU when no CUDA is present.
+              PREC=$(pick_precision)
+              run uv run lfm2-audio-infer "$MODEL_DIR" --mode text ${PREC:+--precision "$PREC"} \
+                --prompt "$PROMPT" --max-tokens "$MAX_TOKENS"
+              ;;
+            *) echo "::error::unknown family '$FAMILY'"; exit 1 ;;
+          esac
