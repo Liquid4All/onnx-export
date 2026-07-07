@@ -54,9 +54,13 @@ on:
   pull_request:
     paths: *export-paths
 
+# Manual dispatches each get a unique group (the run id), so parameter sweeps —
+# e.g. one run per model/precision — execute in parallel instead of cancelling
+# each other. Push/PR runs keep one group per ref with cancel-in-progress, so a
+# superseded commit's run is still cancelled.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   export:
