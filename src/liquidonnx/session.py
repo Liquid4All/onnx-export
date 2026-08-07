@@ -208,8 +208,14 @@ class ONNXTextModel:
         messages: list,
         max_new_tokens: int = 100,
         stream: bool = True,
+        skip_special_tokens: bool = True,
     ) -> str:
-        """Generate response for chat messages."""
+        """Generate response for chat messages.
+
+        `skip_special_tokens=False` keeps in-band markers (tool-call
+        delimiters, reasoning boundaries) in the returned text — serving
+        consumers parse them; the interactive CLI wants them stripped.
+        """
         prompt = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
@@ -260,7 +266,7 @@ class ONNXTextModel:
         if stream:
             print()
 
-        return self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        return self.tokenizer.decode(generated_tokens, skip_special_tokens=skip_special_tokens)
 
 
 def run_chat_loop(model: ONNXTextModel, args) -> None:
