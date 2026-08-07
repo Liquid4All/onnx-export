@@ -45,7 +45,13 @@ def get_onnx_dir(exports_dir: Path, size: str) -> Path:
 
 
 class VLModelInference:
-    """ONNX inference for LFM2-VL models."""
+    """ONNX inference for LFM2-VL models.
+
+    Public API (re-exported from `liquidonnx.lfm2_vl`): embedding servers and
+    smoke harnesses load a repo directory and drive `generate` directly — the
+    CLI below is one such consumer. `generate` also handles text-only
+    conversations (no vision encoder run), so a VL export can serve plain chat.
+    """
 
     def __init__(
         self,
@@ -53,11 +59,13 @@ class VLModelInference:
         embed_tokens_file: str | None = None,
         embed_images_file: str | None = None,
         decoder_file: str | None = None,
+        force_cpu: bool = False,
     ):
         self.model_path = Path(model_path)
         self.embed_tokens_file = embed_tokens_file
         self.embed_images_file = embed_images_file
         self.decoder_file = decoder_file
+        self.force_cpu = force_cpu
         self.processor = None
         self.tokenizer = None
         self.embed_tokens_sess = None
@@ -100,9 +108,10 @@ class VLModelInference:
         logger.info(f"  embed_images: {embed_images_path.name}")
         logger.info(f"  decoder: {decoder_path.name}")
 
-        self.embed_tokens_sess = load_onnx_session(embed_tokens_path)
-        self.embed_images_sess = load_onnx_session(embed_images_path)
-        self.decoder_sess = load_onnx_session(decoder_path)
+        providers = ["CPUExecutionProvider"] if self.force_cpu else None
+        self.embed_tokens_sess = load_onnx_session(embed_tokens_path, providers=providers)
+        self.embed_images_sess = load_onnx_session(embed_images_path, providers=providers)
+        self.decoder_sess = load_onnx_session(decoder_path, providers=providers)
 
         self.vision_format = detect_vision_format(self.embed_images_sess)
         logger.info(f"Vision format: {self.vision_format}")
@@ -159,8 +168,14 @@ class VLModelInference:
         images: list[Image.Image] | None = None,
         max_new_tokens: int = 100,
         stream: bool = True,
+        skip_special_tokens: bool = True,
     ) -> str:
-        """Generate response for chat messages with optional images."""
+        """Generate response for chat messages with optional images.
+
+        `skip_special_tokens=False` keeps in-band markers (tool-call
+        delimiters, reasoning boundaries) in the returned text — serving
+        consumers parse them; the interactive CLI wants them stripped.
+        """
         images = images or []
 
         if images:
@@ -250,7 +265,7 @@ class VLModelInference:
         if stream:
             print()
 
-        return self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        return self.tokenizer.decode(generated_tokens, skip_special_tokens=skip_special_tokens)
 
 
 def resolve_precision_files(
