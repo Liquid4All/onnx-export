@@ -37,6 +37,14 @@ uv sync --extra gpu
 uv sync --extra dev
 ```
 
+Model loading does not execute Python code from Hugging Face repositories by default. For a
+trusted repository that requires custom Transformers code, explicitly opt in:
+
+```bash
+$env:LIQUIDONNX_TRUST_REMOTE_CODE = "1"  # PowerShell
+uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx
+```
+
 ## 3. Export
 
 ### 3.1 LFM2 Text Models

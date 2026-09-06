@@ -48,6 +48,7 @@ import pathlib
 import onnx
 from transformers import AutoConfig, AutoTokenizer
 
+from liquidonnx import remote_code_enabled
 from liquidonnx.external_data import split_external_data
 from liquidonnx.lfm2.builder import LFM2Builder, LFM2Config
 from liquidonnx.quantize import get_model_size, get_total_model_size_mb, quantize_model
@@ -126,7 +127,7 @@ def export_model(model_path: str, output_dir: pathlib.Path | str):
             └── model.onnx_data
     """
     output_dir = pathlib.Path(output_dir)
-    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=remote_code_enabled())
     lfm2_config = LFM2Config.from_hf_config(config)
 
     builder = LFM2Builder(lfm2_config)
@@ -152,7 +153,7 @@ def export_model(model_path: str, output_dir: pathlib.Path | str):
 
     logger.info(f"Model saved to {output_path}")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=remote_code_enabled())
     tokenizer.save_pretrained(output_dir)
     config.save_pretrained(output_dir)
 

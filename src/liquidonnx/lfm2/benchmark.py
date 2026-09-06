@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from liquidonnx import remote_code_enabled
 from liquidonnx.quantize import get_total_model_size_mb
 from liquidonnx.session import initialize_cache, load_onnx_session, update_cache
 
@@ -48,7 +49,9 @@ class ONNXBenchmark:
         from transformers import AutoTokenizer
 
         logger.info(f"Loading tokenizer: {self.model_path}")
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_path, trust_remote_code=remote_code_enabled()
+        )
 
     def load_onnx_model(self, onnx_path: str):
         """Load ONNX model and return session + load time."""

@@ -51,6 +51,7 @@ import re
 import onnx
 from onnx import TensorProto, helper
 
+from liquidonnx import remote_code_enabled
 from liquidonnx.external_data import split_external_data
 from liquidonnx.lfm2.builder import LFM2Builder
 from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
@@ -178,7 +179,7 @@ def export_vl_model(
     # Load model weights
     logger.info(f"Loading weights from {model_path}...")
     model = AutoModelForImageTextToText.from_pretrained(
-        model_path, torch_dtype=torch.float32, trust_remote_code=True
+         model_path, torch_dtype=torch.float32, trust_remote_code=remote_code_enabled()
     )
 
     weights = {}
@@ -379,11 +380,15 @@ def export_vl_model(
 
     # Copy tokenizer and config
     try:
-        processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained(
+            model_path, trust_remote_code=remote_code_enabled()
+        )
         processor.save_pretrained(output_dir)
     except Exception as e:
         logger.warning(f"Could not save processor: {e}")
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path, trust_remote_code=remote_code_enabled()
+        )
         tokenizer.save_pretrained(output_dir)
 
     config.save_pretrained(output_dir)

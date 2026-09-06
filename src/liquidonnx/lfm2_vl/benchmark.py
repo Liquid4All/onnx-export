@@ -21,6 +21,7 @@ import onnxruntime as ort
 from PIL import Image
 from transformers import AutoProcessor
 
+from liquidonnx import remote_code_enabled
 from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.preprocessing import (
     build_inputs_embeds,
@@ -127,7 +128,9 @@ class VLBenchmark:
 
         hf_model = self._get_hf_model_name()
         logger.info(f"Loading processor from {hf_model}...")
-        self.processor = AutoProcessor.from_pretrained(hf_model, trust_remote_code=True)
+        self.processor = AutoProcessor.from_pretrained(
+            hf_model, trust_remote_code=remote_code_enabled()
+        )
         self.tokenizer = self.processor.tokenizer
         self.image_token_id = get_image_token_id(self.tokenizer)
 
