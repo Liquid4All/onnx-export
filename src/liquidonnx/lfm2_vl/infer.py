@@ -26,6 +26,7 @@ import numpy as np
 from PIL import Image
 from transformers import AutoProcessor
 
+from liquidonnx import remote_code_enabled
 from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.preprocessing import (
     build_inputs_embeds,
@@ -85,7 +86,9 @@ class VLModelInference:
                 hf_model = str(self.model_path)
 
         logger.info(f"Loading processor from {hf_model}...")
-        self.processor = AutoProcessor.from_pretrained(hf_model, trust_remote_code=True)
+        self.processor = AutoProcessor.from_pretrained(
+            hf_model, trust_remote_code=remote_code_enabled()
+        )
         self.tokenizer = self.processor.tokenizer
         self.image_token_id = self.tokenizer.convert_tokens_to_ids("<image>")
 

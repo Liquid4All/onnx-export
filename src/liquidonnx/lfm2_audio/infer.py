@@ -51,6 +51,8 @@ import time
 import numpy as np
 import onnxruntime as ort
 
+from liquidonnx import remote_code_enabled
+
 logger = logging.getLogger(__name__)
 
 # === Default System Prompts ===
@@ -209,7 +211,9 @@ class LFM2AudioInference:
         # Load tokenizer
         from transformers import AutoTokenizer
 
-        self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            str(model_dir), trust_remote_code=remote_code_enabled()
+        )
 
         # Resolve file paths (use provided or default)
         decoder_path = self.onnx_dir / (decoder_file or "decoder.onnx")

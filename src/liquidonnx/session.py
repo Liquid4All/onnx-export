@@ -6,6 +6,8 @@ import pathlib
 import numpy as np
 import onnxruntime as ort
 
+from liquidonnx import remote_code_enabled
+
 logger = logging.getLogger(__name__)
 
 
@@ -194,7 +196,9 @@ class ONNXTextModel:
         if not onnx_path.exists():
             raise FileNotFoundError(f"ONNX file not found: {onnx_path}")
 
-        self.tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path), trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            str(tokenizer_path), trust_remote_code=remote_code_enabled()
+        )
 
         providers = ["CPUExecutionProvider"] if self.force_cpu else None
         logger.info(f"Loading ONNX from {onnx_path}...")
