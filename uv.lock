@@ -550,7 +550,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.12.0" },
     { name = "torch", specifier = ">=2.0.0" },
     { name = "torchvision", specifier = ">=0.24.1" },
-    { name = "transformers", git = "https://github.com/huggingface/transformers.git?rev=3c25177" },
+    { name = "transformers", git = "https://github.com/huggingface/transformers.git?rev=3c2517727ce28a30f5044e01663ee204deb1cdbe" },
 ]
 provides-extras = ["gpu", "dev"]
 
@@ -1891,7 +1891,7 @@ wheels = [
 [[package]]
 name = "transformers"
 version = "5.0.0.dev0"
-source = { git = "https://github.com/huggingface/transformers.git?rev=3c25177#3c2517727ce28a30f5044e01663ee204deb1cdbe" }
+source = { git = "https://github.com/huggingface/transformers.git?rev=3c2517727ce28a30f5044e01663ee204deb1cdbe#3c2517727ce28a30f5044e01663ee204deb1cdbe" }
 dependencies = [
     { name = "filelock" },
     { name = "huggingface-hub" },

@@ -70,7 +70,7 @@ jobs:
     outputs:
       inference_passed: ${{ steps.infer.outputs.inference_passed }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       # ONNX exports (fp32 base + quantized copies) are large; reclaim the disk
       # the GitHub image spends on toolchains this job doesn't use.
@@ -80,7 +80,7 @@ jobs:
             /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
 
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
       - run: uv python install 3.12
       - run: uv sync
 

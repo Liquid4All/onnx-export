@@ -88,7 +88,7 @@ url = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Night
 explicit = true
 
 [tool.uv.sources]
-transformers = { git = "https://github.com/huggingface/transformers.git", rev = "3c25177" }
+transformers = { git = "https://github.com/huggingface/transformers.git", rev = "3c2517727ce28a30f5044e01663ee204deb1cdbe" }
 onnxruntime = { index = "ort-nightly" }
 onnxruntime-gpu = { index = "ort-nightly" }
 
