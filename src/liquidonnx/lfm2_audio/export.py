@@ -446,12 +446,17 @@ def export_decoder(
 
 
 def do_quantize(onnx_dir: pathlib.Path, bits: int, block_size: int, symmetric: bool):
-    """Quantize all exportable models to specified precision."""
+    """Quantize all exportable models to specified precision.
+
+    audio_embedding is excluded: it is a single Gather over an embedding table,
+    and MatMulNBits quantization only rewrites MatMul. Quantizing it produced a
+    full-size (~134 MB) byte-for-byte copy per precision. Inference reads the
+    table from audio_embedding.bin, falling back to audio_embedding.onnx.
+    """
     # Models to quantize: (relative_path, exclude_lm_head)
     models_to_quantize = [
         ("decoder", True),
         ("audio_encoder", False),
-        ("audio_embedding", False),
         ("audio_detokenizer", False),
         ("vocoder_depthformer", False),
     ]

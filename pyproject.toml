@@ -5,26 +5,26 @@ description = "LFM2 ONNX export and inference tools"
 requires-python = ">=3.12"
 
 dependencies = [
-    "onnx",
-    "onnxruntime>=1.24.0.dev",  # Nightly for QMoE 14-input support
-    "transformers>=5.0.0.dev0",
-    "numpy>=2.2.0,<2.4",  # numba requires numpy < 2.4
+    "onnx>=1.22.0",
+    "onnxruntime>=1.30.0",  # Audio graphs verified against 1.30; the old nightly index had no macOS wheels
+    "transformers>=5.17.0",
+    "numpy>=2.2.0,<2.6",  # numba (via librosa) requires numpy < 2.6
     "torch>=2.0.0",
     "pillow",
     "torchvision>=0.24.1",
-    "onnx-ir>=0.1.13",
+    "onnx-ir>=1.0.0",
     "scipy>=1.12.0",  # For ISTFT in audio decoding
-    "onnxscript>=0.5.7",
+    "onnxscript>=0.7.2",
 ]
 
 [project.optional-dependencies]
 gpu = [
-    "onnxruntime-gpu>=1.24.0.dev",  # CUDA support (replaces onnxruntime)
+    "onnxruntime-gpu>=1.30.0",  # CUDA support (replaces onnxruntime)
 ]
 dev = [
     "pytest",
     "ruff",
-    "liquid-audio>=1.1.0",  # Reference model for audio export/tests
+    "liquid-audio>=1.3.0",  # Reference model for audio export/tests (1.3 supports transformers 5.x)
 ]
 
 [project.scripts]
@@ -78,23 +78,9 @@ ignore = [
 [tool.ruff.format]
 quote-style = "double"
 
-[tool.uv]
-# For bleeding-edge packages from git
-prerelease = "if-necessary-or-explicit"
-
-[[tool.uv.index]]
-name = "ort-nightly"
-url = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/"
-explicit = true
-
-[tool.uv.sources]
-transformers = { git = "https://github.com/huggingface/transformers.git", rev = "3c25177" }
-onnxruntime = { index = "ort-nightly" }
-onnxruntime-gpu = { index = "ort-nightly" }
-
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
     "ruff>=0.14.10",
-    "liquid-audio>=1.1.0",
+    "liquid-audio>=1.3.0",
 ]

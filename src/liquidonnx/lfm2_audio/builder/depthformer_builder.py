@@ -66,7 +66,8 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         self.intermediate_size = 2816
         self.vocab_size = 2049
         self.norm_eps = 1e-5
-        self.rope_theta = 10000.0
+        # liquid_audio.model.transformer.MHA default (precompute_freqs_cis alone defaults to 1e4)
+        self.rope_theta = 1_000_000.0
         self.max_seq_len = 16  # Max positions for RoPE (8 steps + cache)
 
     def build_inputs(self):
@@ -247,51 +248,11 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         """Build gather operation to get current depth slice.
 
         depth_slices: [B, 8, 1024], step_idx: scalar → [B, 1024]
+
+        step_idx is a scalar, so a plain Gather on axis 1 already drops the
+        gathered axis - no index broadcasting or squeeze needed.
         """
-        prefix = "/get_slice"
-
-        # Get batch size from depth_slices shape
-        self.make_node("Shape", [depth_slices], [f"{prefix}/shape/output_0"])
-        batch_size = self.make_gather(
-            f"{prefix}/shape/output_0", self.get_constant(0), f"{prefix}/batch/output_0"
-        )
-
-        # Expand step_idx for gather: scalar → [B, 1, 1024]
-        step_unsq1 = self.make_unsqueeze(
-            "step_idx", self.get_constant([0]), f"{prefix}/step_unsq1/output_0"
-        )
-        step_unsq2 = self.make_unsqueeze(
-            step_unsq1, self.get_constant([0]), f"{prefix}/step_unsq2/output_0"
-        )
-        step_unsq3 = self.make_unsqueeze(
-            step_unsq2, self.get_constant([0]), f"{prefix}/step_unsq3/output_0"
-        )
-
-        # Expand to [B, 1, 1024]
-        batch_unsq = self.make_unsqueeze(
-            batch_size, self.get_constant([0]), f"{prefix}/batch_unsq/output_0"
-        )
-        expand_shape = self.make_concat(
-            [batch_unsq, self.get_constant([1]), self.get_constant([self.dim])],
-            f"{prefix}/expand_shape/output_0",
-            axis=0,
-        )
-        step_expanded = self.make_node(
-            "Expand", [step_unsq3, expand_shape], [f"{prefix}/step_exp/output_0"]
-        )
-
-        # Gather from depth_slices along axis=1
-        gathered = self.make_node(
-            "GatherElements",
-            [depth_slices, step_expanded],
-            [f"{prefix}/gather/output_0"],
-            axis=1,
-        )
-
-        # Squeeze dim 1: [B, 1, 1024] → [B, 1024]
-        return self.make_node(
-            "Squeeze", [gathered, self.get_constant([1])], [f"{prefix}/squeeze/output_0"]
-        )
+        return self.make_gather(depth_slices, "step_idx", "/get_slice/Gather/output_0", axis=1)
 
     def build_prev_embedding(self) -> str:
         """Build previous token embedding lookup with step 0 handling.
@@ -627,9 +588,18 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
             domain="com.microsoft",
             num_heads=nh,
             kv_num_heads=nkv,
+            # do_rotary defaults to 0, which makes GQA ignore the cos/sin cache entirely.
+            do_rotary=1,
+            # Q/K were rearranged to the split layout above, so GQA applies split-style rotary.
             rotary_interleaved=0,
             scale=float(1.0 / np.sqrt(hd)),
         )
+
+        # GQA's shape inference copies past_len onto present_k/v. The WebGPU kernel declares
+        # present as MayInplace(past), so with matching symbolic shapes the planner aliases the
+        # buffers and the run fails once the cache grows. Pin present to its own dim param.
+        for name in (gqa_present_k, gqa_present_v):
+            self.add_value_info(name, TensorProto.FLOAT, ["batch", nkv, "new_len", hd])
 
         # GQA output is [B, 1, num_heads * head_dim], reshape to [B, 1, dim]
         attn_flat = self.make_reshape(
@@ -694,6 +664,7 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         norm_weight = self.make_gather(
             "stacked_logits_norm_weights", "step_idx", f"{prefix}/norm_w/output_0", axis=0
         )
+        # Stored pre-transposed as [8, dim, vocab], so no per-step Transpose is needed
         logits_weight = self.make_gather(
             "stacked_logits_weights", "step_idx", f"{prefix}/logits_w/output_0", axis=0
         )
@@ -706,11 +677,8 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
             epsilon=self.norm_eps,
         )
 
-        # Linear projection
-        logits_w_t = self.make_transpose(
-            logits_weight, f"{prefix}/logits_w_t/output_0", perm=[1, 0]
-        )
-        return self.make_matmul(x_normed, logits_w_t, "logits")
+        # [B, dim] @ [dim, vocab] → [B, vocab]
+        return self.make_matmul(x_normed, logits_weight, "logits")
 
     def load_weights(self, model_path: str):
         """Load all depthformer and depth_linear weights from HuggingFace model."""
@@ -748,7 +716,8 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         logits_norm_list = []
         for i in range(self.num_codebooks):
             embed_list.append(self.weights[f"depth_embeddings.{i}.embedding.weight"])
-            logits_list.append(self.weights[f"depth_embeddings.{i}.to_logits.weight"])
+            # Transposed here so build_step_logits() needs no per-step Transpose
+            logits_list.append(self.weights[f"depth_embeddings.{i}.to_logits.weight"].T)
             logits_norm_list.append(self.weights[f"depth_embeddings.{i}.embedding_norm.weight"])
 
         self.add_initializer("stacked_embed_weights", np.stack(embed_list, axis=0))
