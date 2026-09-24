@@ -190,6 +190,9 @@ jobs:
                 || fail "no text model file found in $ONNX_DIR"
               run uv run lfm2-infer --model "$FILE" --prompt "$PROMPT" \
                 --cpu --no-stream --max-tokens "$MAX_TOKENS"
+              # Released onnxruntime-genai runs lfm2; lfm2_moe needs a newer build.
+              run uv run --with onnxruntime-genai lfm2-infer --model "$MODEL_DIR" --genai \
+                --prompt "$PROMPT" --no-stream --max-tokens "$MAX_TOKENS"
               ;;
             moe)
               FILE=$(pick_file model_q4.onnx model_q4f16.onnx model_q4f32.onnx model_q8.onnx model_fp16.onnx model.onnx) \

@@ -1,5 +1,6 @@
 """Shared ONNX inference utilities."""
 
+import json
 import logging
 import pathlib
 
@@ -145,21 +146,55 @@ def initialize_cache(session: ort.InferenceSession) -> dict:
     return cache
 
 
-def update_cache(cache: dict, outputs: list, output_infos: list) -> None:
-    """Update cache from model outputs.
+def cache_input_name(output_name: str) -> str | None:
+    """Past-cache input fed by a present-cache output, for both decoder layouts.
 
-    Handles present_conv -> past_conv and present. -> past_key_values. mappings.
+    liquidonnx builders: present_conv.N -> past_conv.N, present.N.key -> past_key_values.N.key
+    onnxruntime-genai:   present.N.conv -> past.N.conv, present.N.key -> past_key_values.N.key
     """
-    for i, out_info in enumerate(output_infos[1:], 1):  # Skip logits
-        name = out_info.name
-        if "present_conv" in name:
-            cache_name = name.replace("present_conv", "past_conv")
-        elif "present." in name:
-            cache_name = name.replace("present.", "past_key_values.")
-        else:
-            continue
+    if output_name.startswith("present_conv."):
+        return output_name.replace("present_conv.", "past_conv.", 1)
+    if output_name.startswith("present.") and output_name.endswith(".conv"):
+        return output_name.replace("present.", "past.", 1)
+    if output_name.startswith("present."):
+        return output_name.replace("present.", "past_key_values.", 1)
+    return None
+
+
+def update_cache(cache: dict, outputs: list, output_infos: list) -> None:
+    for out_info, value in zip(output_infos, outputs, strict=True):
+        cache_name = cache_input_name(out_info.name)
         if cache_name in cache:
-            cache[cache_name] = outputs[i]
+            cache[cache_name] = value
+
+
+def decoder_inputs(
+    session: ort.InferenceSession, input_ids: np.ndarray, cache: dict, past_len: int
+) -> dict:
+    """Feed for one decoder step: the tokens, a full attention mask, positions if the graph
+    takes them (genai graphs derive them from the mask), and the cache."""
+    names = {inp.name for inp in session.get_inputs()}
+    seq_len = input_ids.shape[1]
+    feed = {
+        "input_ids": input_ids.astype(np.int64),
+        "attention_mask": np.ones((input_ids.shape[0], past_len + seq_len), dtype=np.int64),
+    }
+    if "position_ids" in names:
+        positions = np.arange(past_len, past_len + seq_len, dtype=np.int64)
+        feed["position_ids"] = np.broadcast_to(positions, input_ids.shape).copy()
+    feed.update(cache)
+    return feed
+
+
+def default_decoder(model_dir: pathlib.Path) -> pathlib.Path:
+    """Decoder of an export folder: genai_config.json's choice, else the legacy file names."""
+    genai_config = model_dir / "genai_config.json"
+    if genai_config.exists():
+        return model_dir / json.loads(genai_config.read_text())["model"]["decoder"]["filename"]
+    for name in ("decoder_model_merged.onnx", "decoder.onnx", "model.onnx"):
+        if (model_dir / "onnx" / name).exists():
+            return model_dir / "onnx" / name
+    return model_dir / "onnx" / "model.onnx"
 
 
 class ONNXTextModel:
@@ -169,7 +204,6 @@ class ONNXTextModel:
         self.model_path = pathlib.Path(model_path)
         self.tokenizer = None
         self.session = None
-        self.input_names = set()
         self.force_cpu = force_cpu
 
     def load(self):
@@ -184,12 +218,7 @@ class ONNXTextModel:
             tokenizer_path = self.model_path.parent.parent
         else:
             tokenizer_path = self.model_path
-            # Try decoder_model_merged.onnx first, then decoder.onnx (legacy), then model.onnx
-            onnx_path = self.model_path / "onnx" / "decoder_model_merged.onnx"
-            if not onnx_path.exists():
-                onnx_path = self.model_path / "onnx" / "decoder.onnx"
-            if not onnx_path.exists():
-                onnx_path = self.model_path / "onnx" / "model.onnx"
+            onnx_path = default_decoder(self.model_path)
 
         if not onnx_path.exists():
             raise FileNotFoundError(f"ONNX file not found: {onnx_path}")
@@ -200,8 +229,7 @@ class ONNXTextModel:
         logger.info(f"Loading ONNX from {onnx_path}...")
         self.session = load_onnx_session(onnx_path, providers=providers)
 
-        self.input_names = {inp.name for inp in self.session.get_inputs()}
-        logger.info(f"Model loaded. Inputs: {len(self.input_names)} tensors")
+        logger.info(f"Model loaded. Inputs: {len(self.session.get_inputs())} tensors")
 
     def generate(
         self,
@@ -220,26 +248,13 @@ class ONNXTextModel:
         cache = initialize_cache(self.session)
         output_infos = self.session.get_outputs()
 
-        seq_len = input_ids.shape[1]
-        position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
-
         generated_tokens = []
-        cur_len = seq_len
+        past_len = 0
 
         for step in range(max_new_tokens):
-            if step == 0:
-                ids = input_ids
-                pos = position_ids
-            else:
-                ids = np.array([[generated_tokens[-1]]], dtype=np.int64)
-                pos = np.array([[cur_len - 1]], dtype=np.int64)
-
-            attn_mask = np.ones((1, cur_len), dtype=np.int64)
-
-            feed = {"input_ids": ids, "attention_mask": attn_mask}
-            if "position_ids" in self.input_names:
-                feed["position_ids"] = pos
-            feed.update(cache)
+            ids = input_ids if step == 0 else np.array([[generated_tokens[-1]]], dtype=np.int64)
+            feed = decoder_inputs(self.session, ids, cache, past_len)
+            past_len += ids.shape[1]
 
             outputs = self.session.run(None, feed)
             logits = outputs[0][0, -1]
@@ -248,7 +263,6 @@ class ONNXTextModel:
             generated_tokens.append(next_token)
 
             update_cache(cache, outputs, output_infos)
-            cur_len += 1
 
             if stream:
                 token_str = self.tokenizer.decode([next_token])
@@ -263,7 +277,60 @@ class ONNXTextModel:
         return self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
 
-def run_chat_loop(model: ONNXTextModel, args) -> None:
+class GenaiTextModel:
+    """ONNXTextModel's interface on onnxruntime-genai, driven by the export's genai_config.json."""
+
+    def __init__(self, model_path: str):
+        self.model_path = pathlib.Path(model_path)
+        self.tokenizer = None
+        self.model = None
+
+    def load(self):
+        """Load tokenizer and the onnxruntime-genai model (a .onnx path picks the precision)."""
+        import onnxruntime_genai as og
+        from transformers import AutoTokenizer
+
+        if self.model_path.suffix == ".onnx":
+            model_dir = self.model_path.parent.parent
+            decoder = self.model_path.resolve().relative_to(model_dir.resolve()).as_posix()
+            config = og.Config(str(model_dir))
+            config.overlay(json.dumps({"model": {"decoder": {"filename": decoder}}}))
+        else:
+            model_dir = self.model_path
+            config = og.Config(str(model_dir))
+
+        logger.info(f"Loading {model_dir} with onnxruntime-genai {og.__version__}...")
+        self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+        self.model = og.Model(config)
+
+    def generate(self, messages: list, max_new_tokens: int = 100, stream: bool = True) -> str:
+        import onnxruntime_genai as og
+
+        prompt = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        input_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
+
+        params = og.GeneratorParams(self.model)
+        params.set_search_options(do_sample=False, max_length=len(input_ids) + max_new_tokens)
+        generator = og.Generator(self.model, params)
+        generator.append_tokens(np.array(input_ids, dtype=np.int32))
+
+        generated_tokens = []
+        while not generator.is_done():
+            generator.generate_next_token()
+            next_token = int(generator.get_next_tokens()[0])
+            generated_tokens.append(next_token)
+            if stream:
+                print(self.tokenizer.decode([next_token]), end="", flush=True)
+
+        if stream:
+            print()
+
+        return self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+
+
+def run_chat_loop(model: ONNXTextModel | GenaiTextModel, args) -> None:
     """Run interactive chat loop."""
     print("\n" + "=" * 50)
     print("LFM2 Model - ONNX Inference")

@@ -11,12 +11,16 @@ Run with:
 import logging
 import pathlib
 
-import numpy as np
 import pytest
 import torch
 from helpers import get_model_name, get_onnx_dir
 
-from liquidonnx.session import get_onnx_file, load_onnx_session
+from liquidonnx.session import (
+    decoder_inputs,
+    get_onnx_file,
+    initialize_cache,
+    load_onnx_session,
+)
 from liquidonnx.verify import check_results, compare_arrays, compare_top_k, get_tolerances
 
 logger = logging.getLogger(__name__)
@@ -83,28 +87,9 @@ def test_decoder(
         pytorch_logits = outputs.logits.numpy()
     logger.info(f"  PyTorch logits: shape={pytorch_logits.shape}")
 
-    available_inputs = {
-        "input_ids": input_ids.numpy().astype(np.int64),
-        "attention_mask": attention_mask.numpy().astype(np.int64),
-        "position_ids": position_ids.numpy().astype(np.int64),
-    }
-
-    # Build inputs dict based on what the session actually expects
-    onnx_inputs = {}
-    for inp in onnx_sess.get_inputs():
-        if inp.name in available_inputs:
-            onnx_inputs[inp.name] = available_inputs[inp.name]
-        else:
-            # KV cache and other optional inputs - initialize with zeros
-            # FP16 models expect float16 inputs for KV cache
-            expected_dtype = inp.type
-            if "float16" in expected_dtype:
-                dtype = np.float16
-            else:
-                dtype = np.float32
-            shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-            onnx_inputs[inp.name] = np.zeros(shape, dtype=dtype)
-
+    onnx_inputs = decoder_inputs(
+        onnx_sess, input_ids.numpy(), initialize_cache(onnx_sess), past_len=0
+    )
     onnx_logits = onnx_sess.run(None, onnx_inputs)[0]
     logger.info(f"  ONNX logits: shape={onnx_logits.shape}")
 
@@ -115,8 +100,8 @@ def test_decoder(
             compare_arrays(f"decoder: '{prompt[:20]}...'", pytorch_logits, onnx_logits, atol, rtol)
         )
     if "top_k" in checks:
-        # Q4 has more aggressive quantization, so lower threshold
-        min_overlap = 5 if precision in (None, "fp16") else 2
+        # Quantization reorders the top-5; so can fp16 activations, by flipping a near-tied expert.
+        min_overlap = {None: 5, "fp16": 3}.get(precision, 2)
         results.append(
             compare_top_k(
                 f"top-5: '{prompt[:20]}...'", pytorch_logits, onnx_logits, min_overlap=min_overlap

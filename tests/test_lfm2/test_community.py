@@ -19,7 +19,12 @@ import pytest
 import torch
 from helpers import download_community_onnx, get_model_name, get_onnx_dir
 
-from liquidonnx.session import get_onnx_file, load_onnx_session
+from liquidonnx.session import (
+    decoder_inputs,
+    get_onnx_file,
+    initialize_cache,
+    load_onnx_session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,30 +119,12 @@ def test_community_comparison(
         )
         pytorch_logits = outputs.logits.numpy()
 
-    # Prepare ONNX inputs
-    available_inputs = {
-        "input_ids": input_ids.numpy().astype(np.int64),
-        "attention_mask": attention_mask.numpy().astype(np.int64),
-        "position_ids": position_ids.numpy().astype(np.int64),
-    }
-
-    # Build inputs for local model
-    local_inputs = {}
-    for inp in local_sess.get_inputs():
-        if inp.name in available_inputs:
-            local_inputs[inp.name] = available_inputs[inp.name]
-        else:
-            shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-            local_inputs[inp.name] = np.zeros(shape, dtype=np.float32)
-
-    # Build inputs for community model
-    community_inputs = {}
-    for inp in community_sess.get_inputs():
-        if inp.name in available_inputs:
-            community_inputs[inp.name] = available_inputs[inp.name]
-        else:
-            shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-            community_inputs[inp.name] = np.zeros(shape, dtype=np.float32)
+    # Prepare ONNX inputs (the two graphs take different position and cache inputs)
+    ids = input_ids.numpy()
+    local_inputs = decoder_inputs(local_sess, ids, initialize_cache(local_sess), past_len=0)
+    community_inputs = decoder_inputs(
+        community_sess, ids, initialize_cache(community_sess), past_len=0
+    )
 
     # Run ONNX inference
     local_logits = local_sess.run(None, local_inputs)[0]

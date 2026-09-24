@@ -11,12 +11,16 @@ Run with:
 import logging
 import pathlib
 
-import numpy as np
 import pytest
 import torch
 from helpers import get_model_name, get_onnx_dir
 
-from liquidonnx.session import get_onnx_file, load_onnx_session
+from liquidonnx.session import (
+    decoder_inputs,
+    get_onnx_file,
+    initialize_cache,
+    load_onnx_session,
+)
 from liquidonnx.verify import check_results, compare_arrays, compare_top_k, get_tolerances
 
 logger = logging.getLogger(__name__)
@@ -81,17 +85,9 @@ def test_decoder(
         pytorch_logits = outputs.logits.numpy()
     logger.info(f"  PyTorch logits: shape={pytorch_logits.shape}")
 
-    onnx_inputs = {
-        "input_ids": input_ids.numpy().astype(np.int64),
-        "attention_mask": attention_mask.numpy().astype(np.int64),
-        "position_ids": position_ids.numpy().astype(np.int64),
-    }
-
-    for inp in onnx_sess.get_inputs():
-        if inp.name not in onnx_inputs:
-            shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-            onnx_inputs[inp.name] = np.zeros(shape, dtype=np.float32)
-
+    onnx_inputs = decoder_inputs(
+        onnx_sess, input_ids.numpy(), initialize_cache(onnx_sess), past_len=0
+    )
     onnx_logits = onnx_sess.run(None, onnx_inputs)[0]
     logger.info(f"  ONNX logits: shape={onnx_logits.shape}")
 
