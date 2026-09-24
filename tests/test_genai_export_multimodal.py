@@ -16,8 +16,10 @@ import numpy as np
 import onnx
 import pytest
 import torch
+from packaging.version import Version
 from PIL import Image
 from test_lfm2_audio.synthetic import HIDDEN, build_model_dir
+from tokenizers import Regex, Tokenizer, models, pre_tokenizers
 from transformers import AutoProcessor, Lfm2VlConfig, Lfm2VlForConditionalGeneration
 
 from liquidonnx.embeddings import embed
@@ -168,26 +170,66 @@ def test_vl_genai_config(vl):
 
 
 def test_vl_genai_runtime(vl):
+    """The lfm2_vl pipeline on the q4 bundle, against the same files in plain onnxruntime."""
     og = pytest.importorskip("onnxruntime_genai")
+    version = Version(og.__version__)
+    # lfm2_vl landed after the 0.16.0 release; builds of main report 0.16.0-dev.
+    if not version.is_devrelease and version <= Version("0.16.0"):
+        pytest.skip(f"onnxruntime-genai {og.__version__} has no lfm2_vl")
     _, processor, output_dir = vl
-    try:
-        model = og.Model(str(output_dir))
-    except RuntimeError as e:
-        pytest.skip(f"onnxruntime-genai {og.__version__} cannot load lfm2_vl: {e}")
+    model = og.Model(str(output_dir))
 
     messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Hi"}]}]
     prompt = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
     inputs = model.create_multimodal_processor()(prompt, images=og.Images.open(str(IMAGE)))
     genai_ids = inputs["input_ids"].as_numpy()[0]
-    assert genai_ids.tolist() == vl_inputs(processor)["input_ids"][0].tolist()
+    reference_inputs = vl_inputs(processor)
+    assert genai_ids.tolist() == reference_inputs["input_ids"][0].tolist()
 
     params = og.GeneratorParams(model)
     params.set_search_options(do_sample=False, max_length=len(genai_ids) + 4)
     generator = og.Generator(model, params)
     generator.set_inputs(inputs)
+    generator.generate_next_token()
+    actual = generator.get_output("logits")[0, -1]
     while not generator.is_done():
         generator.generate_next_token()
     assert len(generator.get_sequence(0)) > len(genai_ids)
+
+    # genai resizes the image with onnxruntime-extensions, so its pixels differ slightly.
+    decoder = session(output_dir, vl_export.bundle("q4")["decoder"])
+    embeds = vl_embeds(output_dir, "q4", reference_inputs)
+    expected = decoder.run(None, decoder_inputs(decoder, embeds, initialize_cache(decoder), 0))[0]
+    assert cosine(expected[0, -1], actual) >= 0.999
+
+
+def pre_tokenize(pattern: str, text: str) -> list[str]:
+    split = pre_tokenizers.Split(Regex(pattern), "isolated")
+    return [piece for piece, _ in split.pre_tokenize_str(text)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<|im_start|>user\nIt's 2026; THEY'LL say we'd 12345 things.<|im_end|>\n",
+        "one\n\n  two\r\n\tthree   ",
+        "  (a)b! 'x' 'Ve ll 3.14",
+    ],
+)
+def test_vl_tokenizer_pattern_swap_keeps_splits(text: str):
+    expected = pre_tokenize(vl_export.UNSUPPORTED_PATTERN, text)
+    assert pre_tokenize(vl_export.SUPPORTED_PATTERN, text) == expected
+
+
+def test_vl_fix_tokenizer_pattern(tmp_path):
+    path = tmp_path / "tokenizer.json"
+    tokenizer = Tokenizer(models.WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = pre_tokenizers.Split(Regex(vl_export.UNSUPPORTED_PATTERN), "isolated")
+    tokenizer.save(str(path))
+
+    vl_export.fix_tokenizer_pattern(path)
+    pattern = json.loads(path.read_text())["pre_tokenizer"]["pattern"]["Regex"]
+    assert pattern == vl_export.SUPPORTED_PATTERN
 
 
 # === Audio ===
@@ -224,6 +266,16 @@ def test_audio_genai_config(audio):
     ]
     for filename in files:
         assert (audio / filename).exists()
+
+
+def test_audio_genai_config_checks_token_ids(audio, tmp_path):
+    tokenizer = json.loads((audio / "tokenizer.json").read_text())
+    for token in tokenizer["added_tokens"]:
+        if token["content"] == "<|reserved_123|>":
+            token["id"] = 134
+    (tmp_path / "tokenizer.json").write_text(json.dumps(tokenizer))
+    with pytest.raises(ValueError, match="reserved_123"):
+        audio_export.write_genai_config(tmp_path, "q4")
 
 
 def test_audio_embeddings_scatter_features(audio):

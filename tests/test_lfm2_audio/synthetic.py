@@ -55,6 +55,7 @@ SPECIAL_TOKENS = {
     "<|text_end|>": 130,
     "<|mixed_start|>": 131,
     "<|mixed_end|>": 132,
+    "<|reserved_123|>": 133,
 }
 CHAR_BASE = 8  # printable ASCII 32..126 → 8..102, "\n" → 103
 

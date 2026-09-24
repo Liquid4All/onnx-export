@@ -54,7 +54,7 @@ def test_embeddings(
 
     session = load_onnx_session(onnx_dir / filename)
 
-    # Two image placeholders in the middle of the prompt, as the processor writes them
+    # Two image placeholders mid-prompt
     image_token_id = get_image_token_id(processor.tokenizer)
     text_ids = processor.tokenizer.encode(prompt)
     input_ids = np.array([text_ids[:2] + [image_token_id] * 2 + text_ids[2:]], dtype=np.int64)

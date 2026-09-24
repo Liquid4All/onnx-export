@@ -111,7 +111,6 @@ def load_embed_tokens_weight(onnx_dir: pathlib.Path) -> np.ndarray:
         logger.info(f"Loaded embed_tokens from {bin_path.name}: {weight.shape}")
         return weight
 
-    # Fallback: the table of the onnxruntime-genai embedding model
     logger.warning("embed_tokens.bin not found, reading the table from embeddings.onnx")
     import onnx
 
@@ -257,12 +256,7 @@ class LFM2AudioInference:
             config = json.load(f)
 
         lfm_config = config.get("lfm", {})
-        self.hidden_size = lfm_config.get("hidden_size", 2048)
         self.num_layers = lfm_config.get("num_hidden_layers", 16)
-        self.num_kv_heads = lfm_config.get("num_key_value_heads", 8)
-        self.head_dim = self.hidden_size // lfm_config.get("num_attention_heads", 32)
-        self.conv_L = lfm_config.get("conv_L_cache", 3)
-        self.layer_types = lfm_config.get("layer_types", [])
         self.vocab_size = lfm_config.get("vocab_size", 65536)
 
         # Audio config

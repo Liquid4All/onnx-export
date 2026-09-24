@@ -68,12 +68,16 @@ logger = logging.getLogger(__name__)
 PRECISIONS = ("fp16", "q4", "q8")
 DEFAULT_ORDER = ("q4", "q8", "fp16")
 DECODER_OPTIONS = {"exclude_embeds": "true", "include_hidden_states": "true"}
-# <|reserved_123|>: the placeholder the embedding model replaces with audio features. The
-# onnxruntime-genai audio processor writes one per encoder frame.
-AUDIO_TOKEN_ID = 133
-# <|audio_start|> and <|text_end|>: the model turns to speech here, so they only end generation
-# in a text-only pipeline.
-MODALITY_SWITCH_TOKEN_IDS = (128, 130)
+# Token ids this export hard-codes; write_genai_config checks them against tokenizer.json.
+SPECIAL_TOKEN_IDS = {"<|reserved_123|>": 133, "<|audio_start|>": 128, "<|text_end|>": 130}
+# The placeholder the embedding model replaces with audio features. The onnxruntime-genai audio
+# processor writes one per encoder frame.
+AUDIO_TOKEN_ID = SPECIAL_TOKEN_IDS["<|reserved_123|>"]
+# The model turns to speech here, so these only end generation in a text-only pipeline.
+MODALITY_SWITCH_TOKEN_IDS = (
+    SPECIAL_TOKEN_IDS["<|audio_start|>"],
+    SPECIAL_TOKEN_IDS["<|text_end|>"],
+)
 
 
 def bundle(precision: str) -> dict[str, str]:
@@ -323,14 +327,12 @@ def export_embed_tokens(
 
 
 def derive_precision_files(onnx_dir: pathlib.Path, precision: str, block_size: int):
-    """Write every file bundle(precision) needs that is not there yet."""
+    """Write the files bundle(precision) loads."""
     derive_precision(onnx_dir, precision, name="decoder", block_size=block_size)
 
     for name in ("audio_encoder", "audio_detokenizer"):
         fp32_path = onnx_dir / f"{name}.onnx"
         output_path = onnx_dir / f"{name}_{precision}.onnx"
-        if not fp32_path.exists():
-            continue
         if precision == "fp16":
             convert_to_fp16(fp32_path, output_path, keep_io=True)
             continue
@@ -350,17 +352,18 @@ def derive_precision_files(onnx_dir: pathlib.Path, precision: str, block_size: i
     # The depthformer and audio embedding stay fp16 in every non-fp32 bundle; the audio
     # embedding is a Gather, which weight-only quantization leaves at full size anyway.
     for name in ("vocoder_depthformer", "audio_embedding"):
-        output_path = onnx_dir / f"{name}_fp16.onnx"
-        if not output_path.exists():
-            convert_to_fp16(onnx_dir / f"{name}.onnx", output_path, keep_io=True)
-
-    embeddings = onnx_dir / "embeddings_fp16.onnx"
-    if not embeddings.exists():
-        embeddings_to_fp16(onnx_dir / "embeddings.onnx", embeddings)
+        convert_to_fp16(onnx_dir / f"{name}.onnx", onnx_dir / f"{name}_fp16.onnx", keep_io=True)
+    embeddings_to_fp16(onnx_dir / "embeddings.onnx", onnx_dir / "embeddings_fp16.onnx")
 
 
 def write_genai_config(output_dir: pathlib.Path, precision: str):
     """Point genai_config.json at one precision and add the speech input and output sections."""
+    tokenizer = json.loads((output_dir / "tokenizer.json").read_text())
+    ids = {token["content"]: token["id"] for token in tokenizer["added_tokens"]}
+    if any(ids.get(name) != i for name, i in SPECIAL_TOKEN_IDS.items()):
+        found = {name: ids.get(name) for name in SPECIAL_TOKEN_IDS}
+        raise ValueError(f"tokenizer.json has {found}; the export assumes {SPECIAL_TOKEN_IDS}")
+
     files = {k: f"onnx/{v}" for k, v in bundle(precision).items()}
     config_path = output_dir / "genai_config.json"
     config = json.loads(config_path.read_text())

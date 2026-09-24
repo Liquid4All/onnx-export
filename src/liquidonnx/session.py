@@ -149,7 +149,7 @@ def initialize_cache(session: ort.InferenceSession) -> dict:
 def cache_input_name(output_name: str) -> str | None:
     """Past-cache input fed by a present-cache output, for both decoder layouts.
 
-    liquidonnx builders: present_conv.N -> past_conv.N, present.N.key -> past_key_values.N.key
+    onnx-community:      present_conv.N -> past_conv.N, present.N.key -> past_key_values.N.key
     onnxruntime-genai:   present.N.conv -> past.N.conv, present.N.key -> past_key_values.N.key
     """
     if output_name.startswith("present_conv."):

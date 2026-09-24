@@ -21,6 +21,7 @@ import onnxruntime as ort
 from PIL import Image
 from transformers import AutoProcessor
 
+from liquidonnx.embeddings import embed, embedding_feed
 from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.preprocessing import (
     build_inputs_embeds,
@@ -217,17 +218,9 @@ class VLBenchmark:
 
         return outputs[0][0], elapsed
 
-    def _token_feed(self, input_ids: np.ndarray) -> dict:
-        """Token lookup feed; the embeddings.onnx layout also takes (here no) image features."""
-        feed = {"input_ids": input_ids.astype(np.int64)}
-        inputs = self.embed_tokens_sess.get_inputs()
-        if len(inputs) > 1:
-            feed[inputs[1].name] = np.zeros((0, inputs[1].shape[1]), np.float32)
-        return feed
-
     def _get_text_embeddings(self, input_ids: np.ndarray) -> np.ndarray:
         """Get text embeddings."""
-        return self.embed_tokens_sess.run(None, self._token_feed(input_ids))[0]
+        return embed(self.embed_tokens_sess, input_ids)
 
     def benchmark_components(
         self, image: Image.Image | None = None, num_runs: int = 10
@@ -238,7 +231,7 @@ class VLBenchmark:
 
         # Embed tokens
         embed_tokens_ms = benchmark_component(
-            self.embed_tokens_sess, self._token_feed(dummy_ids), num_runs
+            self.embed_tokens_sess, embedding_feed(self.embed_tokens_sess, dummy_ids), num_runs
         )
 
         # Embed images

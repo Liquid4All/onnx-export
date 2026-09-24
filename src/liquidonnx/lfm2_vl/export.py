@@ -202,7 +202,7 @@ def derive_precision_files(
     block_size: int = DEFAULT_BLOCK_SIZE,
     q4_symmetric: bool = True,
 ):
-    """Write every file bundle(precision) needs that is not there yet."""
+    """Write the files bundle(precision) loads."""
     files = bundle(precision)
     derive_precision(
         onnx_dir, precision, name="decoder", block_size=block_size, q4_symmetric=q4_symmetric
@@ -222,9 +222,7 @@ def derive_precision_files(
             symmetric=bits == 4 and q4_symmetric,
         )
 
-    embeddings = onnx_dir / files["embedding"]
-    if not embeddings.exists():
-        embeddings_to_fp16(onnx_dir / "embeddings.onnx", embeddings)
+    embeddings_to_fp16(onnx_dir / "embeddings.onnx", onnx_dir / files["embedding"])
 
 
 def genai_processor_config(image_processor) -> dict:

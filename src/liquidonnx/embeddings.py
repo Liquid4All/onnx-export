@@ -89,10 +89,10 @@ def embeddings_to_fp16(source: pathlib.Path, path: pathlib.Path) -> pathlib.Path
     )
 
 
-def embed(session, input_ids: np.ndarray, features: np.ndarray | None = None) -> np.ndarray:
-    """Run an embedding model; features=None means no feature rows (plain text).
+def embedding_feed(session, input_ids: np.ndarray, features: np.ndarray | None = None) -> dict:
+    """Feed for an embedding model; features=None means no feature rows (plain text).
 
-    A legacy embed_tokens.onnx (input_ids only) is a plain lookup and takes no features.
+    An onnx-community embed_tokens.onnx (input_ids only) is a plain lookup and takes no features.
     """
     inputs = session.get_inputs()
     feed = {"input_ids": input_ids.astype(np.int64)}
@@ -102,4 +102,8 @@ def embed(session, input_ids: np.ndarray, features: np.ndarray | None = None) ->
         feed[inputs[1].name] = features.astype(np.float32)
     elif features is not None:
         raise ValueError("this embedding model has no feature input")
-    return session.run(None, feed)[0]
+    return feed
+
+
+def embed(session, input_ids: np.ndarray, features: np.ndarray | None = None) -> np.ndarray:
+    return session.run(None, embedding_feed(session, input_ids, features))[0]
