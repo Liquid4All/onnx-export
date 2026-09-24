@@ -7,7 +7,7 @@ Provides common infrastructure for building ONNX graphs:
 - Weight management utilities
 
 Used by:
-- LFM2Builder (text model)
+- LFM2Builder (VL / audio decoder)
 - VisionEmbedBuilder (vision encoder + projector)
 - EmbedTokensBuilder (token embeddings)
 """

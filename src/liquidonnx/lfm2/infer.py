@@ -30,7 +30,8 @@ def main():
     parser.add_argument(
         "--genai",
         action="store_true",
-        help="Run through onnxruntime-genai (genai_config.json) instead of plain onnxruntime",
+        help="Run through onnxruntime-genai instead of plain onnxruntime "
+        "(always the CPU EP from genai_config.json; --cpu has no effect)",
     )
     args = parser.parse_args()
 

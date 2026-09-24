@@ -42,7 +42,6 @@ COMMON = {
     "max_position_embeddings": 256,
     "tie_word_embeddings": True,
 }
-# Minimum cosine similarity of the logits against PyTorch.
 MIN_COSINE = {
     "fp32": 0.999999,
     "fp16": 0.9999,
@@ -94,7 +93,7 @@ def export(request, tmp_path_factory):
     export_model(str(root / "checkpoint"), output_dir)
     for precision in ALL_PRECISIONS:
         derive_precision(output_dir / "onnx", precision)
-    set_default_decoder(output_dir)
+    set_default_decoder(output_dir, list(ALL_PRECISIONS))
     return request.param, model, output_dir
 
 
@@ -132,13 +131,15 @@ def test_logits_match_pytorch(export, precision: str):
         np.testing.assert_allclose(actual, expected, atol=1e-5)
 
 
-@pytest.mark.parametrize("precision", ["fp32", "fp16", "q8"])
+@pytest.mark.parametrize("precision", ["fp32", "fp16", "q8", "q4"])
 def test_cached_decode_matches_prefill(export, precision: str):
     _, _, output_dir = export
     session = load_onnx_session(model_file(output_dir, precision), ["CPUExecutionProvider"])
     feed = decoder_inputs(session, TOKENS, initialize_cache(session), 0)
     prefill = session.run(None, feed)[0][0, 3:].astype(np.float32)
-    np.testing.assert_allclose(run_cached(session, TOKENS, prefill=4), prefill, atol=1e-3)
+    # MatMulNBits takes different kernels for one token and for a whole prompt.
+    atol = 5e-3 if precision == "q4" else 1e-3
+    np.testing.assert_allclose(run_cached(session, TOKENS, prefill=4), prefill, atol=atol)
 
 
 def test_graph_layout(export):

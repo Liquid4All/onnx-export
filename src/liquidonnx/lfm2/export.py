@@ -177,14 +177,11 @@ def _quantize(
     return output_path
 
 
-def set_default_decoder(output_dir: pathlib.Path):
-    """Point genai_config.json at the preferred precision that was exported."""
+def set_default_decoder(output_dir: pathlib.Path, precisions: list[str]):
+    """Point genai_config.json at the preferred one of precisions (fp32 if none)."""
     config_path = output_dir / "genai_config.json"
-    onnx_dir = output_dir / "onnx"
-    filename = next(
-        (f"model_{p}.onnx" for p in DEFAULT_ORDER if (onnx_dir / f"model_{p}.onnx").exists()),
-        "model.onnx",
-    )
+    default = next((p for p in DEFAULT_ORDER if p in precisions), None)
+    filename = f"model_{default}.onnx" if default else "model.onnx"
     config = json.loads(config_path.read_text())
     config["model"]["decoder"]["filename"] = f"onnx/{filename}"
     config_path.write_text(json.dumps(config, indent=4))
@@ -266,8 +263,9 @@ def main(default_precisions: tuple[str, ...] = TEXT_PRECISIONS, description: str
     precisions.sort(key=ALL_PRECISIONS.index)
 
     if args.skip_export:
-        if not (onnx_dir / "model.onnx").exists():
-            parser.error(f"--skip-export needs an existing {onnx_dir / 'model.onnx'}")
+        for required in (onnx_dir / "model.onnx", output_dir / "genai_config.json"):
+            if not required.exists():
+                parser.error(f"--skip-export needs an existing {required}")
     else:
         logger.info("=" * 60)
         logger.info(f"Exporting {args.model} (fp32) to {output_dir}")
@@ -283,7 +281,11 @@ def main(default_precisions: tuple[str, ...] = TEXT_PRECISIONS, description: str
             onnx_dir, precision, block_size=args.block_size, q4_symmetric=not args.q4_asymmetric
         )
 
-    set_default_decoder(output_dir)
+    # Rebuilding fp32 makes precisions from earlier runs stale; --skip-export keeps them valid.
+    available = precisions
+    if args.skip_export:
+        available = [p for p in ALL_PRECISIONS if (onnx_dir / f"model_{p}.onnx").exists()]
+    set_default_decoder(output_dir, available)
 
     if not args.no_split_data:
         chunk_size_bytes = int(args.split_data * 1024 * 1024 * 1024)

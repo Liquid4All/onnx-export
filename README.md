@@ -111,12 +111,14 @@ uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx
 # Force CPU execution
 uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx --cpu
 
-# Run through onnxruntime-genai instead of plain onnxruntime
+# Run through onnxruntime-genai instead of plain onnxruntime (always CPU; --cpu has no effect)
 uv pip install onnxruntime-genai
 uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX --genai
 ```
 
 > **Note:** onnxruntime-genai 0.16 runs the text models; the MoE model type (`lfm2_moe`) needs a build that includes [microsoft/onnxruntime-genai#2575](https://github.com/microsoft/onnxruntime-genai/pull/2575).
+
+> **Note:** Batched inputs to the text and MoE decoders must be right-padded: GroupQueryAttention takes each row's length from the attention mask sum.
 
 ### 4.2 Vision-Language
 
@@ -267,7 +269,7 @@ uv run lfm2-bench --model LiquidAI/LFM2.5-1.2B-Instruct \
 **MoE:**
 - [onnx-community/LFM2-8B-A1B-ONNX](https://huggingface.co/onnx-community/LFM2-8B-A1B-ONNX)
 
-> **Note:** The onnx-community models are exported using [Transformers.js](https://github.com/huggingface/transformers.js) tooling with a different export pipeline. This project aims to produce compatible graph structures and file naming conventions to ensure interoperability with Transformers.js and other ONNX consumers.
+> **Note:** The onnx-community models are exported using [Transformers.js](https://github.com/huggingface/transformers.js) tooling with a different export pipeline. The VL and audio exports aim for compatible graph structures and file naming conventions to ensure interoperability with Transformers.js and other ONNX consumers; the text and MoE exports follow onnxruntime-genai instead.
 
 ## 7. Acknowledgements
 

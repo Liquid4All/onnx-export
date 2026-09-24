@@ -204,7 +204,6 @@ class ONNXTextModel:
         self.model_path = pathlib.Path(model_path)
         self.tokenizer = None
         self.session = None
-        self.input_names = set()
         self.force_cpu = force_cpu
 
     def load(self):
@@ -230,8 +229,7 @@ class ONNXTextModel:
         logger.info(f"Loading ONNX from {onnx_path}...")
         self.session = load_onnx_session(onnx_path, providers=providers)
 
-        self.input_names = {inp.name for inp in self.session.get_inputs()}
-        logger.info(f"Model loaded. Inputs: {len(self.input_names)} tensors")
+        logger.info(f"Model loaded. Inputs: {len(self.session.get_inputs())} tensors")
 
     def generate(
         self,

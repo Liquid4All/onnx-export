@@ -15,6 +15,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -40,18 +41,24 @@ def builder_dir() -> pathlib.Path:
         return models
 
     logger.info(f"Fetching onnxruntime-genai model builder @ {GENAI_COMMIT[:12]}...")
-    staging = checkout.with_name(checkout.name + ".partial")
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True)
-    for args in (
-        ["init", "-q"],
-        ["remote", "add", "origin", GENAI_REPO],
-        ["sparse-checkout", "set", BUILDER_SUBDIR],
-        ["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", GENAI_COMMIT],
-        ["checkout", "-q", "FETCH_HEAD"],
-    ):
-        subprocess.run(["git", "-C", str(staging), *args], check=True)
-    staging.rename(checkout)
+    checkout.parent.mkdir(parents=True, exist_ok=True)
+    staging = pathlib.Path(tempfile.mkdtemp(dir=checkout.parent, prefix=f"{checkout.name}."))
+    try:
+        for args in (
+            ["init", "-q"],
+            ["remote", "add", "origin", GENAI_REPO],
+            ["sparse-checkout", "set", BUILDER_SUBDIR],
+            ["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", GENAI_COMMIT],
+            ["checkout", "-q", "FETCH_HEAD"],
+        ):
+            subprocess.run(["git", "-C", str(staging), *args], check=True)
+        staging.rename(checkout)
+    except OSError:
+        # A concurrent export completed the same checkout first.
+        if not (models / "builder.py").exists():
+            raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     return models
 
 
@@ -66,9 +73,7 @@ def resolve_checkpoint(model: str) -> pathlib.Path:
     return pathlib.Path(snapshot_download(model))
 
 
-def build_decoder(
-    model: str, output_dir: pathlib.Path, extra_options: dict[str, str] | None = None
-) -> pathlib.Path:
+def build_decoder(model: str, output_dir: pathlib.Path) -> pathlib.Path:
     """Run the genai builder (fp32, CPU EP) and return the path of the generated model.onnx.
 
     output_dir also receives genai_config.json and the tokenizer files the builder writes.
@@ -88,9 +93,6 @@ def build_decoder(
         "-c",
         str(cache_dir() / "genai-builder-cache"),
     ]
-    if extra_options:
-        cmd += ["--extra_options", *[f"{k}={v}" for k, v in extra_options.items()]]
-
     logger.info(f"Building decoder with the onnxruntime-genai builder: {checkpoint}")
     subprocess.run(cmd, check=True)
     return output_dir / "model.onnx"
