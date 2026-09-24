@@ -132,8 +132,8 @@ class VLBenchmark:
         self.image_token_id = get_image_token_id(self.tokenizer)
 
         logger.info("Loading ONNX models...")
-        # Handle both local and community naming conventions
-        embed_tokens_path = self._find_onnx_file("embed_tokens.onnx")
+        # Local exports (embeddings.onnx) and community ones (embed_tokens.onnx)
+        embed_tokens_path = self._find_onnx_file("embeddings.onnx", "embed_tokens.onnx")
         embed_images_path = self._find_onnx_file("embed_images.onnx", "vision_encoder.onnx")
         decoder_path = self._find_onnx_file("decoder.onnx", "decoder_model_merged.onnx")
 
@@ -151,7 +151,7 @@ class VLBenchmark:
         total = 0.0
         # Try both local and community naming
         file_options = [
-            ["embed_tokens.onnx"],
+            ["embeddings.onnx", "embed_tokens.onnx"],
             ["embed_images.onnx", "vision_encoder.onnx"],
             ["decoder.onnx", "decoder_model_merged.onnx"],
         ]
@@ -168,7 +168,7 @@ class VLBenchmark:
         counts = {}
         # Map component names to possible file names
         components = {
-            "embed_tokens": ["embed_tokens.onnx"],
+            "embed_tokens": ["embeddings.onnx", "embed_tokens.onnx"],
             "embed_images": ["embed_images.onnx", "vision_encoder.onnx"],
             "decoder": ["decoder.onnx", "decoder_model_merged.onnx"],
         }
@@ -217,10 +217,17 @@ class VLBenchmark:
 
         return outputs[0][0], elapsed
 
+    def _token_feed(self, input_ids: np.ndarray) -> dict:
+        """Token lookup feed; the embeddings.onnx layout also takes (here no) image features."""
+        feed = {"input_ids": input_ids.astype(np.int64)}
+        inputs = self.embed_tokens_sess.get_inputs()
+        if len(inputs) > 1:
+            feed[inputs[1].name] = np.zeros((0, inputs[1].shape[1]), np.float32)
+        return feed
+
     def _get_text_embeddings(self, input_ids: np.ndarray) -> np.ndarray:
         """Get text embeddings."""
-        outputs = self.embed_tokens_sess.run(None, {"input_ids": input_ids.astype(np.int64)})
-        return outputs[0]
+        return self.embed_tokens_sess.run(None, self._token_feed(input_ids))[0]
 
     def benchmark_components(
         self, image: Image.Image | None = None, num_runs: int = 10
@@ -231,7 +238,7 @@ class VLBenchmark:
 
         # Embed tokens
         embed_tokens_ms = benchmark_component(
-            self.embed_tokens_sess, {"input_ids": dummy_ids}, num_runs
+            self.embed_tokens_sess, self._token_feed(dummy_ids), num_runs
         )
 
         # Embed images

@@ -169,19 +169,21 @@ def update_cache(cache: dict, outputs: list, output_infos: list) -> None:
 
 
 def decoder_inputs(
-    session: ort.InferenceSession, input_ids: np.ndarray, cache: dict, past_len: int
+    session: ort.InferenceSession, inputs: np.ndarray, cache: dict, past_len: int
 ) -> dict:
-    """Feed for one decoder step: the tokens, a full attention mask, positions if the graph
-    takes them (genai graphs derive them from the mask), and the cache."""
+    """Feed for one decoder step: token ids [B, S] or embeddings [B, S, H], a full attention
+    mask, positions if the graph takes them (genai graphs derive them from the mask), and the
+    cache."""
     names = {inp.name for inp in session.get_inputs()}
-    seq_len = input_ids.shape[1]
-    feed = {
-        "input_ids": input_ids.astype(np.int64),
-        "attention_mask": np.ones((input_ids.shape[0], past_len + seq_len), dtype=np.int64),
-    }
+    batch, seq_len = inputs.shape[:2]
+    feed = {"attention_mask": np.ones((batch, past_len + seq_len), dtype=np.int64)}
+    if inputs.ndim == 3:
+        feed["inputs_embeds"] = inputs.astype(np.float32)
+    else:
+        feed["input_ids"] = inputs.astype(np.int64)
     if "position_ids" in names:
         positions = np.arange(past_len, past_len + seq_len, dtype=np.int64)
-        feed["position_ids"] = np.broadcast_to(positions, input_ids.shape).copy()
+        feed["position_ids"] = np.broadcast_to(positions, (batch, seq_len)).copy()
     feed.update(cache)
     return feed
 

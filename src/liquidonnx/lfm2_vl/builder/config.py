@@ -2,8 +2,6 @@
 
 from dataclasses import dataclass
 
-from liquidonnx.lfm2.builder import LFM2Config
-
 
 @dataclass
 class SigLIP2Config:
@@ -32,7 +30,7 @@ class SigLIP2Config:
 
 @dataclass
 class LFM2VLConfig:
-    text_config: LFM2Config
+    text_hidden_size: int
     vision_config: SigLIP2Config
     projector_hidden_size: int
     projector_hidden_act: str = "gelu"
@@ -46,7 +44,7 @@ class LFM2VLConfig:
     @classmethod
     def from_hf_config(cls, config) -> "LFM2VLConfig":
         return cls(
-            text_config=LFM2Config.from_hf_config(config.text_config),
+            text_hidden_size=config.text_config.hidden_size,
             vision_config=SigLIP2Config.from_hf_config(config.vision_config),
             projector_hidden_size=config.projector_hidden_size,
             projector_hidden_act=getattr(config, "projector_hidden_act", "gelu"),

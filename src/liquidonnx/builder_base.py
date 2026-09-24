@@ -6,10 +6,9 @@ Provides common infrastructure for building ONNX graphs:
 - Helper methods for common operations (MatMul, Add, LayerNorm, etc.)
 - Weight management utilities
 
-Used by:
-- LFM2Builder (VL / audio decoder)
-- VisionEmbedBuilder (vision encoder + projector)
-- EmbedTokensBuilder (token embeddings)
+Used by the graphs the onnxruntime-genai model builder does not make:
+- VisionEmbedBuilder (VL vision encoder + projector)
+- ConformerEncoderBuilder, DepthformerUnifiedBuilder, AudioDetokenizerBuilder (audio)
 """
 
 import logging

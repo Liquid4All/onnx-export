@@ -13,9 +13,9 @@ Usage:
 
     # Specify individual component files
     uv run lfm2-vl-infer --model exports/LFM2-VL-450M-ONNX \
-        --embed-tokens embed_tokens_fp16.onnx \
+        --embeddings embeddings_fp16.onnx \
         --embed-images vision_encoder_q4.onnx \
-        --decoder decoder_model_merged_q4.onnx
+        --decoder decoder_q4.onnx
 """
 
 import argparse
@@ -26,15 +26,16 @@ import numpy as np
 from PIL import Image
 from transformers import AutoProcessor
 
+from liquidonnx.embeddings import embed
 from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
+from liquidonnx.lfm2_vl.export import bundle
 from liquidonnx.lfm2_vl.preprocessing import (
-    build_inputs_embeds,
     detect_vision_format,
     pad_to_square,
     preprocess_conv2d,
     preprocess_tiled,
 )
-from liquidonnx.session import initialize_cache, load_onnx_session, update_cache
+from liquidonnx.session import decoder_inputs, initialize_cache, load_onnx_session, update_cache
 
 logger = logging.getLogger(__name__)
 
@@ -50,17 +51,17 @@ class VLModelInference:
     def __init__(
         self,
         model_path: str,
-        embed_tokens_file: str | None = None,
+        embeddings_file: str | None = None,
         embed_images_file: str | None = None,
         decoder_file: str | None = None,
     ):
         self.model_path = Path(model_path)
-        self.embed_tokens_file = embed_tokens_file
+        self.embeddings_file = embeddings_file
         self.embed_images_file = embed_images_file
         self.decoder_file = decoder_file
         self.processor = None
         self.tokenizer = None
-        self.embed_tokens_sess = None
+        self.embeddings_sess = None
         self.embed_images_sess = None
         self.decoder_sess = None
         self.image_token_id = None
@@ -91,16 +92,16 @@ class VLModelInference:
 
         onnx_dir = self.model_path / "onnx"
 
-        # Resolve file paths (use provided or default)
-        embed_tokens_path = onnx_dir / (self.embed_tokens_file or "embed_tokens.onnx")
-        embed_images_path = onnx_dir / (self.embed_images_file or "vision_encoder.onnx")
-        decoder_path = onnx_dir / (self.decoder_file or "decoder_model_merged.onnx")
+        files = bundle("fp32")
+        embeddings_path = onnx_dir / (self.embeddings_file or files["embedding"])
+        embed_images_path = onnx_dir / (self.embed_images_file or files["vision"])
+        decoder_path = onnx_dir / (self.decoder_file or files["decoder"])
 
-        logger.info(f"  embed_tokens: {embed_tokens_path.name}")
+        logger.info(f"  embeddings: {embeddings_path.name}")
         logger.info(f"  embed_images: {embed_images_path.name}")
         logger.info(f"  decoder: {decoder_path.name}")
 
-        self.embed_tokens_sess = load_onnx_session(embed_tokens_path)
+        self.embeddings_sess = load_onnx_session(embeddings_path)
         self.embed_images_sess = load_onnx_session(embed_images_path)
         self.decoder_sess = load_onnx_session(decoder_path)
 
@@ -141,17 +142,17 @@ class VLModelInference:
 
         return embeddings
 
-    def _get_text_embeddings(self, input_ids: np.ndarray) -> np.ndarray:
-        """Get text embeddings from token IDs."""
-        outputs = self.embed_tokens_sess.run(None, {"input_ids": input_ids.astype(np.int64)})
-        return outputs[0]  # [1, seq_len, hidden_dim]
-
-    def _build_inputs_embeds_expanded(
-        self, input_ids: np.ndarray, image_embeds_list: list[np.ndarray]
+    def _get_inputs_embeds(
+        self, input_ids: np.ndarray, image_embeds_list: list[np.ndarray] | None = None
     ) -> np.ndarray:
-        """Build inputs_embeds for expanded token sequence using liquidonnx utility."""
-        text_embeds = self._get_text_embeddings(input_ids)[0]  # [seq_len, hidden]
-        return build_inputs_embeds(text_embeds, image_embeds_list, self.image_token_id, input_ids)
+        """Token embeddings with each image's features in place of its <image> tokens."""
+        if not image_embeds_list:
+            return embed(self.embeddings_sess, input_ids)
+        features = np.concatenate(image_embeds_list)
+        placeholders = int((input_ids == self.image_token_id).sum())
+        if placeholders != len(features):
+            raise ValueError(f"{placeholders} <image> tokens but {len(features)} image features")
+        return embed(self.embeddings_sess, input_ids, features)
 
     def generate(
         self,
@@ -194,8 +195,7 @@ class VLModelInference:
             )
             input_ids = inputs["input_ids"].numpy()
 
-            image_embeds_list = self._get_image_embeddings(images)
-            inputs_embeds = self._build_inputs_embeds_expanded(input_ids, image_embeds_list)
+            inputs_embeds = self._get_inputs_embeds(input_ids, self._get_image_embeddings(images))
         else:
             prompt = self.tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
@@ -203,33 +203,19 @@ class VLModelInference:
             input_ids = np.array(
                 [self.tokenizer.encode(prompt, add_special_tokens=False)], dtype=np.int64
             )
-            inputs_embeds = self._get_text_embeddings(input_ids)
+            inputs_embeds = self._get_inputs_embeds(input_ids)
 
         cache = initialize_cache(self.decoder_sess)
-        has_position_ids = "position_ids" in {inp.name for inp in self.decoder_sess.get_inputs()}
-
-        seq_len = inputs_embeds.shape[1]
         generated_tokens = []
-        cur_len = seq_len
+        past_len = 0
 
         for step in range(max_new_tokens):
             if step == 0:
                 embeds = inputs_embeds
-                pos = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
             else:
-                last_token = np.array([[generated_tokens[-1]]], dtype=np.int64)
-                embeds = self._get_text_embeddings(last_token)
-                pos = np.array([[cur_len - 1]], dtype=np.int64)
-
-            attn_mask = np.ones((1, cur_len), dtype=np.int64)
-
-            feed = {
-                "inputs_embeds": embeds.astype(np.float32),
-                "attention_mask": attn_mask,
-            }
-            if has_position_ids:
-                feed["position_ids"] = pos
-            feed.update(cache)
+                embeds = self._get_inputs_embeds(np.array([[generated_tokens[-1]]]))
+            feed = decoder_inputs(self.decoder_sess, embeds, cache, past_len)
+            past_len += embeds.shape[1]
 
             outputs = self.decoder_sess.run(None, feed)
             logits = outputs[0][0, -1]
@@ -238,7 +224,6 @@ class VLModelInference:
             generated_tokens.append(next_token)
 
             update_cache(cache, outputs, self.decoder_sess.get_outputs())
-            cur_len += 1
 
             if stream:
                 token_str = self.tokenizer.decode([next_token])
@@ -253,36 +238,10 @@ class VLModelInference:
         return self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
 
-def resolve_precision_files(
-    precision: str | None,
-) -> tuple[str | None, str | None, str | None]:
-    """Resolve file names from precision shorthand.
-
-    Args:
-        precision: One of "fp16", "q4", "q8", or None for default (fp32)
-
-    Returns:
-        Tuple of (embed_tokens_file, embed_images_file, decoder_file)
-    """
-    if precision is None:
-        return None, None, None
-
-    precision = precision.lower()
-    if precision == "fp16":
-        return (
-            "embed_tokens_fp16.onnx",
-            "vision_encoder_fp16.onnx",
-            "decoder_model_merged_fp16.onnx",
-        )
-    elif precision in ("q4", "q8"):
-        # embed_tokens has no quantized version, use fp32
-        return (
-            "embed_tokens.onnx",
-            f"vision_encoder_{precision}.onnx",
-            f"decoder_model_merged_{precision}.onnx",
-        )
-    else:
-        raise ValueError(f"Invalid precision: {precision}. Use fp16, q4, or q8.")
+def resolve_precision_files(precision: str | None) -> tuple[str, str, str]:
+    """(embeddings, vision encoder, decoder) file names for fp16, q4, q8 or None (fp32)."""
+    files = bundle((precision or "fp32").lower())
+    return files["embedding"], files["vision"], files["decoder"]
 
 
 def main():
@@ -300,9 +259,9 @@ def main():
         help="Model precision: fp16, q4, or q8 (default: fp32)",
     )
     parser.add_argument(
-        "--embed-tokens",
+        "--embeddings",
         metavar="FILE",
-        help="Custom embed_tokens ONNX file (relative to onnx/ dir)",
+        help="Custom embedding model file (relative to onnx/ dir)",
     )
     parser.add_argument(
         "--embed-images",
@@ -321,11 +280,11 @@ def main():
         args.images = args.images[:2]
 
     # Resolve component files from --precision or explicit file args
-    embed_tokens_file, embed_images_file, decoder_file = resolve_precision_files(args.precision)
+    embeddings_file, embed_images_file, decoder_file = resolve_precision_files(args.precision)
 
     # Explicit file args override --precision
-    if args.embed_tokens:
-        embed_tokens_file = args.embed_tokens
+    if args.embeddings:
+        embeddings_file = args.embeddings
     if args.embed_images:
         embed_images_file = args.embed_images
     if args.decoder:
@@ -333,7 +292,7 @@ def main():
 
     model = VLModelInference(
         args.model,
-        embed_tokens_file=embed_tokens_file,
+        embeddings_file=embeddings_file,
         embed_images_file=embed_images_file,
         decoder_file=decoder_file,
     )

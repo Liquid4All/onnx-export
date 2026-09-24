@@ -71,7 +71,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
 
         # Projector dimensions
         self.vision_hidden = config.vision_config.hidden_size
-        self.text_hidden = config.text_config.hidden_size
+        self.text_hidden = config.text_hidden_size
         self.proj_hidden = config.projector_hidden_size
         self.downsample = config.downsample_factor
 
@@ -1516,17 +1516,12 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         return "image_features"
 
     def load_weights(self, weights: dict[str, np.ndarray]):
+        # transformers >= 5 names the SigLIP2 tower model.vision_tower.* (no vision_model level).
         for name, weight in weights.items():
-            if name.startswith("model.vision_tower.vision_model."):
-                new_name = name.replace("model.vision_tower.", "")
-                self.weights[new_name] = weight
-            elif name.startswith("vision_model."):
-                self.weights[name] = weight
+            if name.startswith("model.vision_tower."):
+                self.weights["vision_model." + name.removeprefix("model.vision_tower.")] = weight
             elif name.startswith("model.multi_modal_projector."):
-                new_name = name.replace("model.", "")
-                self.weights[new_name] = weight
-            elif name.startswith("multi_modal_projector."):
-                self.weights[name] = weight
+                self.weights[name.removeprefix("model.")] = weight
 
         logger.info(f"Loaded {len(self.weights)} vision + projector weights")
 

@@ -22,7 +22,7 @@ ONNX export and inference tools for [LFM2](https://www.liquid.ai/liquid-foundati
 | **LFM2.5-8B-A1B**, **LFM2-8B-A1B** | fp32, fp16, q4, q4f16, q8 |
 | **LFM2.5-Audio** | fp32, fp16, q4, q8 |
 
-Text and MoE exports are [onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai) model folders: the decoder comes from the onnxruntime-genai model builder and every precision is derived from its fp32 graph by this repository. They are not loadable by Transformers.js.
+Every export is an [onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai) model folder. The decoders come from the onnxruntime-genai model builder; this repository builds the vision encoder, the audio graphs and the embedding models that splice image or audio features into the token embeddings, and derives every precision. The exports are not loadable by Transformers.js.
 
 
 ## 2. Installation
@@ -72,12 +72,28 @@ The first export fetches the onnxruntime-genai model builder at a pinned commit 
 ### 3.2 LFM2-VL Vision-Language Models
 
 ```bash
-# All precisions
+# All precisions (fp16, q4, q8)
 uv run lfm2-vl-export LiquidAI/LFM2.5-VL-1.6B --precision
 
-# Conv2d vision format (alternative to default tiled)
+# Conv2d vision format (alternative to default tiled), for plain onnxruntime only
 uv run lfm2-vl-export LiquidAI/LFM2.5-VL-1.6B --vision-format conv2d
 ```
+
+Output:
+
+```
+exports/LFM2.5-VL-1.6B-ONNX/
+├── genai_config.json            # lfm2_vl pipeline; points at the q4 files
+├── genai_processor_config.json  # onnxruntime-genai image preprocessing
+├── config.json, processor_config.json, tokenizer.json, tokenizer_config.json, chat_template.jinja
+└── onnx/
+    ├── decoder.onnx             # fp32 decoder (inputs_embeds in); decoder_{fp16,q4,q8}.onnx
+    ├── vision_encoder.onnx      # SigLIP2 + projector; vision_encoder_{fp16,q4,q8}.onnx
+    ├── embeddings.onnx          # token table + image feature scatter
+    └── embeddings_fp16.onnx     # fp16 table, used with fp16, q4 and q8
+```
+
+onnxruntime-genai resizes each image once instead of tiling it, as the upstream processor does with `do_image_splitting=False`. The image preprocessing follows the checkpoint's own processor (bilinear for LFM2.5-VL-450M/1.6B, bicubic for the others). A conv2d export has no `genai_config.json`, because onnxruntime-genai needs the tiled encoder.
 
 ### 3.3 LFM2-MoE Mixture of Experts
 
@@ -90,6 +106,31 @@ uv run lfm2-moe-export LiquidAI/LFM2-8B-A1B --precision
 ```
 
 Same layout as the text models. The experts become `QMoE` int4 (q4, q4f16) or int8 (q8); the routers stay fp32.
+
+### 3.4 LFM2.5-Audio
+
+```bash
+# All precisions (fp16, q4, q8)
+uv run lfm2-audio-export LiquidAI/LFM2.5-Audio-1.5B --precision
+```
+
+Output:
+
+```
+exports/LFM2.5-Audio-1.5B-ONNX/
+├── genai_config.json            # lfm2_audio pipeline with speech input and output; points at q4
+├── config.json, tokenizer.json, tokenizer_config.json
+└── onnx/
+    ├── decoder.onnx             # fp32 decoder (inputs_embeds in, logits + hidden_states out)
+    ├── embeddings.onnx          # token table + audio feature scatter (embeddings_fp16.onnx too)
+    ├── audio_encoder.onnx       # Conformer speech encoder
+    ├── audio_embedding.onnx     # audio codes -> decoder input
+    ├── vocoder_depthformer.onnx # decoder hidden state -> frame of 8 audio codes
+    ├── audio_detokenizer.onnx   # audio codes -> STFT features, run after generation
+    └── ...                      # {graph}_{fp16,q4,q8}.onnx, embed_tokens.bin, mel_config.json
+```
+
+The q4 and q8 configs keep the depthformer and audio embedding at fp16, because a quantized depthformer changes most audio codes.
 
 ## 4. Inference
 
@@ -116,9 +157,9 @@ uv pip install onnxruntime-genai
 uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX --genai
 ```
 
-> **Note:** onnxruntime-genai 0.16 runs the text models; the MoE model type (`lfm2_moe`) needs a build that includes [microsoft/onnxruntime-genai#2575](https://github.com/microsoft/onnxruntime-genai/pull/2575).
+> **Note:** onnxruntime-genai 0.16 runs the text models. The MoE, VL and audio model types (`lfm2_moe`, `lfm2_vl`, `lfm2_audio`) need a build that includes [#2575](https://github.com/microsoft/onnxruntime-genai/pull/2575), [#2571](https://github.com/microsoft/onnxruntime-genai/pull/2571) and [#2601](https://github.com/microsoft/onnxruntime-genai/pull/2601).
 
-> **Note:** Batched inputs to the text and MoE decoders must be right-padded: GroupQueryAttention takes each row's length from the attention mask sum.
+> **Note:** Batched inputs to the decoders must be right-padded: GroupQueryAttention takes each row's length from the attention mask sum.
 
 ### 4.2 Vision-Language
 
@@ -138,7 +179,7 @@ uv run lfm2-vl-infer --model ./exports/LFM2.5-VL-1.6B-ONNX \
     --prompt "Hello, how are you?"
 ```
 
-> **Note:** VL inference requires the model directory path (not a single .onnx file) since it loads multiple components: `embed_tokens.onnx`, `embed_images.onnx`, and `decoder.onnx`.
+> **Note:** VL inference requires the model directory path (not a single .onnx file) since it loads multiple components: `embeddings.onnx`, `vision_encoder.onnx` and `decoder.onnx`. Use `--precision` to select fp16, q4 or q8.
 
 ### 4.3 MoE
 
@@ -160,7 +201,7 @@ LFM2.5-Audio is a multimodal audio-language model supporting three modes:
 - **TTS** (Text-to-Speech): Generate audio from text
 - **Interleaved**: Mixed text and audio input/output for conversational audio
 
-The model uses 5 ONNX components:
+Plain onnxruntime inference uses 5 ONNX components:
 - `decoder.onnx` - LFM2 language model backbone
 - `audio_encoder.onnx` - Conformer encoder for ASR input
 - `audio_embedding.onnx` - Audio code embeddings for TTS/interleaved
@@ -202,8 +243,9 @@ Tests verify ONNX exports against PyTorch reference models.
 # Install dev dependencies
 uv sync --extra dev
 
-# Text/MoE export pipeline on tiny random checkpoints (no model download)
+# Export pipelines on tiny random checkpoints (no model download)
 uv run pytest tests/test_genai_export.py -v
+uv run pytest tests/test_genai_export_multimodal.py -v
 
 # LFM2 text model tests
 uv run pytest tests/test_lfm2/test_decoder.py -v -k "q4"
@@ -269,7 +311,7 @@ uv run lfm2-bench --model LiquidAI/LFM2.5-1.2B-Instruct \
 **MoE:**
 - [onnx-community/LFM2-8B-A1B-ONNX](https://huggingface.co/onnx-community/LFM2-8B-A1B-ONNX)
 
-> **Note:** The onnx-community models are exported using [Transformers.js](https://github.com/huggingface/transformers.js) tooling with a different export pipeline. The VL and audio exports aim for compatible graph structures and file naming conventions to ensure interoperability with Transformers.js and other ONNX consumers; the text and MoE exports follow onnxruntime-genai instead.
+> **Note:** The onnx-community models are exported using [Transformers.js](https://github.com/huggingface/transformers.js) tooling with a different export pipeline. This project's exports follow onnxruntime-genai instead, so their graphs and file names differ.
 
 ## 7. Acknowledgements
 
