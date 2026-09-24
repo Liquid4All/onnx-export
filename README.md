@@ -17,10 +17,12 @@ ONNX export and inference tools for [LFM2](https://www.liquid.ai/liquid-foundati
 
 | Family | Quant Formats |
 |--------|---------------|
-| **LFM2.5**, **LFM2** | fp32, fp16, q4, q8 |
+| **LFM2.5**, **LFM2** | fp32, fp16, q4, q4f32, q8 |
 | **LFM2.5-VL**, **LFM2-VL** | fp32, fp16, q4, q8 |
-| **LFM2.5-8B-A1B**, **LFM2-8B-A1B** | fp32, fp16, q4, q4f16 |
+| **LFM2.5-8B-A1B**, **LFM2-8B-A1B** | fp32, fp16, q4, q4f16, q8 |
 | **LFM2.5-Audio** | fp32, fp16, q4, q8 |
+
+Text and MoE exports are [onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai) model folders: the decoder comes from the onnxruntime-genai model builder and every precision is derived from its fp32 graph by this repository. They are not loadable by Transformers.js.
 
 
 ## 2. Installation
@@ -42,9 +44,30 @@ uv sync --extra dev
 ### 3.1 LFM2 Text Models
 
 ```bash
-# All precisions
+# All precisions (fp16, q4, q4f32, q8)
 uv run lfm2-export LiquidAI/LFM2.5-1.2B-Instruct --precision
+
+# Specific precisions
+uv run lfm2-export LiquidAI/LFM2.5-350M --precision q4 q8
 ```
+
+Output:
+
+```
+exports/LFM2.5-1.2B-Instruct-ONNX/
+├── genai_config.json      # onnxruntime-genai config; decoder -> onnx/model_q4.onnx
+├── config.json, tokenizer.json, tokenizer_config.json, chat_template.jinja
+└── onnx/
+    ├── model.onnx         # fp32
+    ├── model_fp16.onnx    # fp16 weights, activations and caches; fp32 logits
+    ├── model_q4.onnx      # int4; embedding and tied lm_head share one int4 table
+    ├── model_q4f32.onnx   # int4 MatMuls; fp32 embedding and lm_head
+    └── model_q8.onnx      # int8
+```
+
+`genai_config.json` points at the first exported precision of q4, q4f16, q8, fp16, q4f32, fp32; override `model.decoder.filename` to load another one.
+
+The first export fetches the onnxruntime-genai model builder at a pinned commit into `~/.cache/liquidonnx` (needs `git`). Set `LIQUIDONNX_GENAI_BUILDER` to a local `src/python/py/models` directory to use another copy.
 
 ### 3.2 LFM2-VL Vision-Language Models
 
@@ -59,12 +82,14 @@ uv run lfm2-vl-export LiquidAI/LFM2.5-VL-1.6B --vision-format conv2d
 ### 3.3 LFM2-MoE Mixture of Experts
 
 ```bash
-# Current LFM2.5 MoE checkpoint
+# Current LFM2.5 MoE checkpoint (fp16, q4, q4f16, q8)
 uv run lfm2-moe-export LiquidAI/LFM2.5-8B-A1B --precision
 
 # Earlier LFM2 MoE checkpoint
 uv run lfm2-moe-export LiquidAI/LFM2-8B-A1B --precision
 ```
+
+Same layout as the text models. The experts become `QMoE` int4 (q4, q4f16) or int8 (q8); the routers stay fp32.
 
 ## 4. Inference
 
@@ -73,7 +98,10 @@ All inference commands provide interactive multi-turn chat with streaming output
 ### 4.1 Text Generation
 
 ```bash
-# Interactive chat (starts conversation loop)
+# Interactive chat with the precision genai_config.json points at
+uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX
+
+# A specific precision
 uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx
 
 # Single prompt (non-interactive)
@@ -82,7 +110,13 @@ uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx
 
 # Force CPU execution
 uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx --cpu
+
+# Run through onnxruntime-genai instead of plain onnxruntime
+uv pip install onnxruntime-genai
+uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX --genai
 ```
+
+> **Note:** onnxruntime-genai 0.16 runs the text models; the MoE model type (`lfm2_moe`) needs a build that includes [microsoft/onnxruntime-genai#2575](https://github.com/microsoft/onnxruntime-genai/pull/2575).
 
 ### 4.2 Vision-Language
 
@@ -112,6 +146,9 @@ uv run lfm2-moe-infer --model ./exports/LFM2.5-8B-A1B-ONNX/onnx/model_q4.onnx
 
 # Force CPU (when model does not fit VRAM)
 uv run lfm2-moe-infer --model ./exports/LFM2.5-8B-A1B-ONNX/onnx/model_q4.onnx --cpu
+
+# Through onnxruntime-genai
+uv run lfm2-moe-infer --model ./exports/LFM2.5-8B-A1B-ONNX --genai
 ```
 
 ### 4.4 Audio (ASR, TTS, Interleaved)
@@ -162,6 +199,9 @@ Tests verify ONNX exports against PyTorch reference models.
 ```bash
 # Install dev dependencies
 uv sync --extra dev
+
+# Text/MoE export pipeline on tiny random checkpoints (no model download)
+uv run pytest tests/test_genai_export.py -v
 
 # LFM2 text model tests
 uv run pytest tests/test_lfm2/test_decoder.py -v -k "q4"

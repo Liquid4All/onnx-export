@@ -16,7 +16,12 @@ import pytest
 import torch
 from helpers import download_community_moe_onnx, get_model_name, get_onnx_dir
 
-from liquidonnx.session import get_onnx_file, load_onnx_session
+from liquidonnx.session import (
+    decoder_inputs,
+    get_onnx_file,
+    initialize_cache,
+    load_onnx_session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,33 +122,12 @@ def test_community_comparison(
         )
         pytorch_logits = outputs.logits.numpy()
 
-    # Prepare ONNX inputs
-    available_inputs = {
-        "input_ids": input_ids.numpy().astype(np.int64),
-        "attention_mask": attention_mask.numpy().astype(np.int64),
-        "position_ids": position_ids.numpy().astype(np.int64),
-    }
-
-    def build_inputs_for_session(sess, available_inputs, use_fp16: bool = False):
-        """Build inputs dict for an ONNX session, handling dtype requirements."""
-        inputs = {}
-        for inp in sess.get_inputs():
-            if inp.name in available_inputs:
-                inputs[inp.name] = available_inputs[inp.name]
-            else:
-                # For KV cache inputs, check expected dtype
-                expected_dtype = inp.type
-                if "float16" in expected_dtype and use_fp16:
-                    dtype = np.float16
-                else:
-                    dtype = np.float32
-                shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-                inputs[inp.name] = np.zeros(shape, dtype=dtype)
-        return inputs
-
-    use_fp16 = precision in ("fp16", "q4f16")
-    local_inputs = build_inputs_for_session(local_sess, available_inputs, use_fp16)
-    community_inputs = build_inputs_for_session(community_sess, available_inputs, use_fp16)
+    # Prepare ONNX inputs (the two graphs take different position and cache inputs)
+    ids = input_ids.numpy()
+    local_inputs = decoder_inputs(local_sess, ids, initialize_cache(local_sess), past_len=0)
+    community_inputs = decoder_inputs(
+        community_sess, ids, initialize_cache(community_sess), past_len=0
+    )
 
     # Run ONNX inference
     local_logits = local_sess.run(None, local_inputs)[0]

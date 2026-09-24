@@ -26,68 +26,11 @@ import onnx
 from onnx import TensorProto, helper
 
 from liquidonnx.builder_base import ONNXBuilderBase
+from liquidonnx.quantize import quantize_int4_block
 
 logger = logging.getLogger(__name__)
 
-# === INT4 Block Quantization ===
-
-INT4_BITS = 4
-INT4_MAX = (1 << INT4_BITS) - 1  # 15, max value for unsigned 4-bit
 DEFAULT_BLOCK_SIZE = 32
-SCALE_EPS = 1e-10
-
-
-def quantize_int4_block(
-    weight: np.ndarray, block_size: int = DEFAULT_BLOCK_SIZE
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Quantize weight tensor to INT4 with block-wise scales and zero points.
-
-    Args:
-        weight: FP32 weight tensor of shape [..., K] where K is quantized dimension
-        block_size: Number of elements per quantization block
-
-    Returns:
-        quant: UINT8 tensor with packed INT4 values (2 per byte)
-        scales: FP32 scales, one per block
-        zero_points: UINT8 packed zero points (2 per byte)
-    """
-    *batch_dims, K = weight.shape
-    n_blocks = (K + block_size - 1) // block_size
-
-    pad_K = n_blocks * block_size
-    if pad_K != K:
-        pad_shape = list(weight.shape)
-        pad_shape[-1] = pad_K - K
-        weight = np.concatenate([weight, np.zeros(pad_shape, dtype=weight.dtype)], axis=-1)
-
-    weight_blocked = weight.reshape(*batch_dims, n_blocks, block_size)
-
-    w_min = weight_blocked.min(axis=-1, keepdims=True)
-    w_max = weight_blocked.max(axis=-1, keepdims=True)
-
-    scale = (w_max - w_min) / float(INT4_MAX)
-    scale = np.where(scale < SCALE_EPS, 1.0, scale)
-    zero_point = np.round(-w_min / scale).clip(0, INT4_MAX).astype(np.uint8)
-
-    # q = round(w/s + zp) to match community
-    quant = np.round(weight_blocked / scale + zero_point).clip(0, INT4_MAX).astype(np.uint8)
-
-    # Pack two INT4 values into one UINT8 (low nibble first)
-    quant_packed = quant[..., 0::2] | (quant[..., 1::2] << 4)
-
-    scales = scale.squeeze(-1).astype(np.float32)
-
-    # Pack zero points
-    zero_point = zero_point.squeeze(-1)
-    if n_blocks % 2 == 1:
-        zp_shape = list(zero_point.shape)
-        zp_shape[-1] = 1
-        zero_point = np.concatenate([zero_point, np.zeros(zp_shape, dtype=np.uint8)], axis=-1)
-    zp_packed = zero_point[..., 0::2] | (zero_point[..., 1::2] << 4)
-
-    quant_final = quant_packed.reshape(*batch_dims, -1)
-
-    return quant_final, scales, zp_packed
 
 
 @dataclass

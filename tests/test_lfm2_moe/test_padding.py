@@ -24,7 +24,9 @@ PROMPTS = [
     "Name the capital of France.",
     "Explain in one sentence why compilers use intermediate representations.",
 ]
-PADDING_SIDES = ["left", "right"]
+# GroupQueryAttention in the onnxruntime-genai decoder takes each row's length from the mask sum, so
+# batches are right-padded.
+PADDING_SIDES = ["right"]
 MIN_COSINE = 0.95
 MIN_TOP5_OVERLAP = 4
 

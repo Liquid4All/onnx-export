@@ -11,7 +11,7 @@ Usage:
 import argparse
 import logging
 
-from liquidonnx.session import ONNXTextModel, run_chat_loop
+from liquidonnx.session import GenaiTextModel, ONNXTextModel, run_chat_loop
 
 
 def main():
@@ -21,11 +21,19 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=100, help="Max tokens to generate")
     parser.add_argument("--no-stream", action="store_true", help="Disable streaming output")
     parser.add_argument("--cpu", action="store_true", help="Force CPU execution (skip CUDA)")
+    parser.add_argument(
+        "--genai",
+        action="store_true",
+        help="Run through onnxruntime-genai (genai_config.json) instead of plain onnxruntime",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
 
-    model = ONNXTextModel(args.model, force_cpu=args.cpu)
+    if args.genai:
+        model = GenaiTextModel(args.model)
+    else:
+        model = ONNXTextModel(args.model, force_cpu=args.cpu)
     model.load()
 
     run_chat_loop(model, args)
