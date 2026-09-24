@@ -64,11 +64,15 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             helper.make_tensor_value_info("audio_lengths", TensorProto.INT64, ["batch_size"])
         )
 
-    def build_subsampling(self, input_name: str) -> str:
+    def build_subsampling(self, input_name: str) -> tuple[str, str]:
         """Build subsampling layer (ConvSubsampling from liquid-audio).
 
         Subsampling reduces temporal resolution by factor of 8:
             [B, T, 128] → [B, T//8, 512]
+
+        Returns:
+            (hidden_state, len_after_conv2) where len_after_conv2 is the float [B]
+            valid length after the second stride-2 conv, consumed by build_length_output()
 
         Architecture:
             [B, T, 128] → reshape [B, 1, T, 128]
@@ -93,6 +97,14 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             input_name, self.get_constant([1]), f"{prefix}/Unsqueeze/output_0"
         )
 
+        # Reference MaskedConvSequential re-masks before every layer, updating lengths after
+        # each stride. Masking before each *strided* conv is what changes valid outputs:
+        # padded neighbours must contribute 0 to the kernel window.
+        mel_lengths_f = self.make_node(
+            "Cast", ["mel_lengths"], [f"{prefix}/mel_lengths_f/output_0"], to=1
+        )
+        reshaped = self._apply_conv2d_mask(reshaped, mel_lengths_f, f"{prefix}/mask_in")
+
         # === Block 1: Conv2d(1→256) + ReLU ===
         # conv.0 weight is [256, 1, 3, 3] - regular conv, not depthwise
         conv0 = self.make_node(
@@ -112,10 +124,12 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             "mel_lengths", kernel=3, stride=2, pad=1, prefix=f"{prefix}/len0"
         )
 
+        relu0_masked = self._apply_conv2d_mask(relu0, len_after_conv0, f"{prefix}/mask0")
+
         # === Block 2: Depthwise conv (stride 2) + Pointwise conv + ReLU ===
         conv2 = self.make_node(
             "Conv",
-            [relu0, "encoder.pre_encode.conv.2.weight", "encoder.pre_encode.conv.2.bias"],
+            [relu0_masked, "encoder.pre_encode.conv.2.weight", "encoder.pre_encode.conv.2.bias"],
             [f"{prefix}/conv2/Conv/output_0"],
             kernel_shape=[3, 3],
             strides=[2, 2],
@@ -189,7 +203,7 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         flattened = self.make_reshape(transposed, new_shape, f"{prefix}/Reshape/output_0")
 
         # Linear projection to d_model
-        return self.make_linear(
+        hidden_state = self.make_linear(
             flattened,
             self.weights["conformer.pre_encode.out.weight"],
             "encoder.pre_encode.out.weight",
@@ -197,8 +211,73 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             bias=self.weights["conformer.pre_encode.out.bias"],
             bias_name="encoder.pre_encode.out.bias",
         )
+        return hidden_state, len_after_conv2
 
-    def build_conformer_block(self, layer_idx: int, hidden_state: str, pos_emb_name: str) -> str:
+    def build_pad_masks(self, hidden_state: str, valid_length: str) -> tuple[str, str]:
+        """Build the padding masks the reference encoder applies to every layer.
+
+        Mirrors ConformerEncoder._create_masks: positions past the item's valid length are
+        zeroed in the conv module and excluded from self-attention (both as queries and as
+        keys), so a padded batch gives the same result as running each item alone.
+
+        Args:
+            hidden_state: Post-subsampling activations [B, T, D]
+            valid_length: Float [B] valid length after subsampling
+
+        Returns:
+            (conv_mask, attn_bias) where conv_mask is float [B, 1, T] for the [B, C, T] conv
+            module and attn_bias is float [B, 1, T, T] added to the attention scores.
+        """
+        prefix = "/encoder/pad_mask"
+
+        self.make_node("Shape", [hidden_state], [f"{prefix}/shape/output_0"])
+        time = self.make_gather(
+            f"{prefix}/shape/output_0", self.get_constant(1), f"{prefix}/time/output_0", axis=0
+        )
+        time_range = self.make_node(
+            "Range",
+            [self.get_constant(0), time, self.get_constant(1)],
+            [f"{prefix}/range/output_0"],
+        )
+        time_f = self.make_node("Cast", [time_range], [f"{prefix}/range_f/output_0"], to=1)
+
+        # valid [B, T]: position < length
+        len_2d = self.make_reshape(
+            valid_length, self.get_constant([-1, 1]), f"{prefix}/len_2d/output_0"
+        )
+        valid = self.make_node("Less", [time_f, len_2d], [f"{prefix}/valid/output_0"])
+
+        # conv mask [B, 1, T]
+        valid_f = self.make_node("Cast", [valid], [f"{prefix}/valid_f/output_0"], to=1)
+        conv_mask = self.make_unsqueeze(
+            valid_f, self.get_constant([1]), f"{prefix}/conv_mask/output_0"
+        )
+
+        # attention mask [B, 1, T, T]: valid as query AND as key
+        as_key = self.make_unsqueeze(valid, self.get_constant([1]), f"{prefix}/as_key/output_0")
+        as_query = self.make_unsqueeze(valid, self.get_constant([2]), f"{prefix}/as_query/output_0")
+        both = self.make_node("And", [as_key, as_query], [f"{prefix}/both/output_0"])
+        both_4d = self.make_unsqueeze(both, self.get_constant([1]), f"{prefix}/both_4d/output_0")
+        invalid_f = self.make_node(
+            "Cast",
+            [self.make_node("Not", [both_4d], [f"{prefix}/invalid/output_0"])],
+            [f"{prefix}/invalid_f/output_0"],
+            to=1,
+        )
+        # -1e4 zeroes the score through softmax and stays finite in fp16
+        attn_bias = self.make_mul(
+            invalid_f, self.get_constant(-1e4, dtype=np.float32), f"{prefix}/attn_bias/output_0"
+        )
+        return conv_mask, attn_bias
+
+    def build_conformer_block(
+        self,
+        layer_idx: int,
+        hidden_state: str,
+        pos_emb_name: str,
+        conv_mask: str,
+        attn_bias: str,
+    ) -> str:
         """Build a single Conformer block.
 
         Structure:
@@ -214,11 +293,11 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         hidden_state = self.make_add(hidden_state, ffn1_scaled, f"{prefix}/ffn1/Add/output_0")
 
         # === Self-Attention with relative position encoding ===
-        attn_out = self.build_self_attention(hidden_state, layer_idx, pos_emb_name)
+        attn_out = self.build_self_attention(hidden_state, layer_idx, pos_emb_name, attn_bias)
         hidden_state = self.make_add(hidden_state, attn_out, f"{prefix}/attn/Add/output_0")
 
         # === Convolution module ===
-        conv_out = self.build_conv_module(hidden_state, layer_idx)
+        conv_out = self.build_conv_module(hidden_state, layer_idx, conv_mask)
         hidden_state = self.make_add(hidden_state, conv_out, f"{prefix}/conv/Add/output_0")
 
         # === Feed-forward 2 (half residual) ===
@@ -379,7 +458,9 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         )
         return self.make_reshape(sliced, final_shape, f"{prefix}/output_0")
 
-    def build_self_attention(self, hidden_state: str, layer_idx: int, pos_emb_name: str) -> str:
+    def build_self_attention(
+        self, hidden_state: str, layer_idx: int, pos_emb_name: str, attn_bias: str
+    ) -> str:
         """Build self-attention module with relative position encoding.
 
         Implements RelPositionMultiHeadAttention from liquid-audio:
@@ -524,6 +605,7 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         )
 
         # Softmax and attention
+        scores = self.make_add(scores, attn_bias, f"{prefix}/scores_masked/output_0")
         attn_weights = self.make_node("Softmax", [scores], [f"{prefix}/softmax/output_0"], axis=-1)
         attn_out = self.make_matmul(attn_weights, v_t, f"{prefix}/attn_out/output_0")
 
@@ -544,7 +626,7 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             bias_name=f"encoder.layers.{layer_idx}.self_attn.out.bias",
         )
 
-    def build_conv_module(self, hidden_state: str, layer_idx: int) -> str:
+    def build_conv_module(self, hidden_state: str, layer_idx: int, conv_mask: str) -> str:
         """Build convolution module: LayerNorm → Conv1d (pointwise) → GLU → DepthConv → BN → SiLU → Conv1d."""
         prefix = f"/encoder/layers.{layer_idx}/conv"
 
@@ -586,6 +668,9 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         glu_out = self.make_mul(
             f"{prefix}/glu/Split/output_0", glu_sigmoid, f"{prefix}/glu/Mul/output_0"
         )
+
+        # Zero padded frames before the depthwise conv (reference: x.masked_fill(pad_mask, 0))
+        glu_out = self.make_mul(glu_out, conv_mask, f"{prefix}/glu/masked/output_0")
 
         # Depthwise conv
         dw = self.make_node(
@@ -668,7 +753,7 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             bias_name="encoder.adapter.linear2.bias",
         )
 
-    def build_length_output(self) -> str:
+    def build_length_output(self, len_after_conv2: str) -> str:
         """Compute output lengths after subsampling.
 
         The subsampling consists of 3 strided convolutions (stride=2 each).
@@ -678,27 +763,27 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
                        = (input_len - 1) // 2 + 1
 
         Applied 3 times, this is NOT the same as input_len // 8.
+
+        Args:
+            len_after_conv2: Float [B] length after the first two stride-2 convs,
+                as built by build_subsampling(); only the third step is added here.
+
+        Returns:
+            len_after_conv5, the float [B] encoder output length, also emitted as the
+            int64 audio_lengths graph output
         """
-        # Step 1: After conv0 (stride 2)
-        len_after_conv0 = self._compute_conv_length(
-            "mel_lengths", kernel=3, stride=2, pad=1, prefix="/encoder/len_out/conv0"
-        )
-        # Step 2: After conv2 (stride 2)
-        len_after_conv2 = self._compute_conv_length(
-            len_after_conv0, kernel=3, stride=2, pad=1, prefix="/encoder/len_out/conv2"
-        )
         # Step 3: After conv5 (stride 2)
         len_after_conv5 = self._compute_conv_length(
             len_after_conv2, kernel=3, stride=2, pad=1, prefix="/encoder/len_out/conv5"
         )
-        # Cast back to int64 for output
-        return self.make_node(
+        self.make_node(
             "Cast",
             [len_after_conv5],
             ["audio_lengths"],
             to=7,  # int64
             name="/encoder/len_out/Cast",
         )
+        return len_after_conv5
 
     def _compute_conv_length(
         self, input_length: str, kernel: int, stride: int, pad: int, prefix: str
@@ -740,7 +825,7 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
 
         Args:
             tensor: Input tensor of shape [B, C, T, F]
-            valid_length: Scalar or [B] tensor with valid lengths
+            valid_length: Float [B] tensor with per-batch valid lengths
             prefix: Prefix for node names
 
         Returns:
@@ -762,22 +847,26 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             "Range", [zeros_scalar, T_int, ones_scalar], [f"{prefix}/range/output_0"]
         )
 
-        # Cast to float for comparison
+        # [T] int64 → [1, 1, T, 1] float
         time_range_float = self.make_node(
             "Cast",
             [time_range],
             [f"{prefix}/range_float/output_0"],
             to=1,  # float32
         )
-
-        # valid_length might be [B], reshape to [B, 1] for broadcasting
-        # But for batch=1 case, it's just a scalar
-        # Create mask: time_range < valid_length → [T] bool mask
-        mask_bool = self.make_node(
-            "Less", [time_range_float, valid_length], [f"{prefix}/mask_bool/output_0"]
+        time_range_4d = self.make_reshape(
+            time_range_float, self.get_constant([1, 1, -1, 1]), f"{prefix}/range_4d/output_0"
         )
 
-        # Cast to float
+        # [B] → [B, 1, 1, 1]
+        valid_length_4d = self.make_reshape(
+            valid_length, self.get_constant([-1, 1, 1, 1]), f"{prefix}/len_4d/output_0"
+        )
+
+        # mask = time_range < valid_length → [B, 1, T, 1] bool
+        mask_bool = self.make_node(
+            "Less", [time_range_4d, valid_length_4d], [f"{prefix}/mask_bool/output_0"]
+        )
         mask_float = self.make_node(
             "Cast",
             [mask_bool],
@@ -785,14 +874,8 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             to=1,  # float32
         )
 
-        # Reshape mask from [T] to [1, 1, T, 1] for broadcasting with [B, C, T, F]
-        mask_reshaped = self.make_reshape(
-            mask_float, self.get_constant([1, 1, -1, 1]), f"{prefix}/mask_reshape/output_0"
-        )
-
-        # Apply mask
-        masked = self.make_mul(tensor, mask_reshaped, f"{prefix}/masked/output_0")
-        return masked
+        # Broadcast [B, 1, T, 1] against [B, C, T, F]
+        return self.make_mul(tensor, mask_float, f"{prefix}/masked/output_0")
 
     def prepare_weights(self):
         """Register all weights as initializers."""
@@ -1000,7 +1083,7 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         self.prepare_weights()
 
         # Build subsampling
-        hidden_state = self.build_subsampling("mel_spectrogram")
+        hidden_state, len_after_conv2 = self.build_subsampling("mel_spectrogram")
 
         # Note: xscale (sqrt(d_model)) is optional in RelPositionalEncoding
         # LFM2.5-Audio has xscale=None, so we don't apply it
@@ -1008,19 +1091,21 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         # Build positional encoding (sliced based on sequence length)
         pos_emb = self.build_pos_encoding_slice(hidden_state)
 
-        # Build conformer layers
+        # Encoder output lengths, also used to mask padded frames in every layer
+        len_after_conv5 = self.build_length_output(len_after_conv2)
+        conv_mask, attn_bias = self.build_pad_masks(hidden_state, len_after_conv5)
+
         for layer_idx in range(self.config.n_layers):
             logger.info(f"Building conformer layer {layer_idx}...")
-            hidden_state = self.build_conformer_block(layer_idx, hidden_state, pos_emb)
+            hidden_state = self.build_conformer_block(
+                layer_idx, hidden_state, pos_emb, conv_mask, attn_bias
+            )
 
         # Build adapter (projects to LFM2 hidden size)
         hidden_state = self.build_adapter(hidden_state)
 
         # Final output assignment
         self.make_node("Identity", [hidden_state], ["audio_embeddings"], name="/encoder/output")
-
-        # Build length output
-        self.build_length_output()
 
         model = self.build_graph("conformer_encoder")
         logger.info(f"Model built: {len(self.nodes)} nodes")

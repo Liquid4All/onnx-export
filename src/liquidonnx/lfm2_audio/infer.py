@@ -49,7 +49,8 @@ import pathlib
 import time
 
 import numpy as np
-import onnxruntime as ort
+
+from liquidonnx.session import load_onnx_session as load_session
 
 logger = logging.getLogger(__name__)
 
@@ -94,14 +95,6 @@ def resolve_precision_files(precision: str | None) -> dict[str, str | None]:
         "audio_detokenizer": f"audio_detokenizer_{precision}.onnx",
         "vocoder_depthformer": f"vocoder_depthformer_{precision}.onnx",
     }
-
-
-def load_session(model_path: pathlib.Path) -> ort.InferenceSession:
-    """Load ONNX model as inference session."""
-    providers = ["CPUExecutionProvider"]
-    sess_options = ort.SessionOptions()
-    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    return ort.InferenceSession(str(model_path), sess_options, providers=providers)
 
 
 def load_embed_tokens_weight(onnx_dir: pathlib.Path) -> np.ndarray:
@@ -213,7 +206,13 @@ class LFM2AudioInference:
 
         # Resolve file paths (use provided or default)
         decoder_path = self.onnx_dir / (decoder_file or "decoder.onnx")
+        # audio_embedding has no quantized variants (it is a Gather, not a MatMul),
+        # so fall back to the fp32 table when a precision-specific file is requested.
         audio_embedding_path = self.onnx_dir / (audio_embedding_file or "audio_embedding.onnx")
+        if not audio_embedding_path.exists():
+            fallback = self.onnx_dir / "audio_embedding.onnx"
+            logger.info(f"{audio_embedding_path.name} not found, using {fallback.name}")
+            audio_embedding_path = fallback
         audio_encoder_path = self.onnx_dir / (audio_encoder_file or "audio_encoder.onnx")
         audio_detokenizer_path = self.onnx_dir / (
             audio_detokenizer_file or "audio_detokenizer.onnx"
