@@ -19,7 +19,9 @@ import pytest
 from helpers import get_onnx_dir
 from PIL import Image
 
+from liquidonnx.embeddings import embed
 from liquidonnx.lfm2_vl import VISION_MODE_CONV2D
+from liquidonnx.lfm2_vl.export import bundle
 from liquidonnx.lfm2_vl.preprocessing import (
     detect_vision_format,
     get_image_token_id,
@@ -129,7 +131,7 @@ def run_benchmark(
     # Warmup runs
     for _ in range(warmup):
         _ = get_image_embeddings(embed_images_sess, image, processor)
-        _ = embed_tokens_sess.run(None, {"input_ids": input_ids})[0]
+        _ = embed(embed_tokens_sess, input_ids)
 
     # Timed image encoding
     start = time.perf_counter()
@@ -138,7 +140,7 @@ def run_benchmark(
 
     # Timed text encoding
     start = time.perf_counter()
-    text_embeds = embed_tokens_sess.run(None, {"input_ids": input_ids})[0][0]
+    text_embeds = embed(embed_tokens_sess, input_ids)[0]
     text_encode_ms = (time.perf_counter() - start) * 1000
 
     # Merge embeddings
@@ -175,7 +177,7 @@ def run_benchmark(
             pos = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
         else:
             last_token = np.array([[generated_tokens[-1]]], dtype=np.int64)
-            embeds = embed_tokens_sess.run(None, {"input_ids": last_token})[0]
+            embeds = embed(embed_tokens_sess, last_token)
             pos = np.array([[cur_len - 1]], dtype=np.int64)
 
         attn_mask = np.ones((1, cur_len), dtype=np.int64)
@@ -236,12 +238,12 @@ def test_benchmark(
     if not onnx_dir.exists():
         pytest.skip(f"Export not found: {onnx_dir}")
 
-    embed_tokens_file = onnx_dir / "embed_tokens.onnx"
+    embed_tokens_file = onnx_dir / bundle(decoder_type or "fp32")["embedding"]
     embed_images_file = get_onnx_file(onnx_dir, vision_type, "embed_images")
     decoder_file = get_onnx_file(onnx_dir, decoder_type, "decoder")
 
     if not embed_tokens_file.exists():
-        pytest.skip(f"embed_tokens not found: {embed_tokens_file}")
+        pytest.skip(f"Embedding model not found: {embed_tokens_file}")
     if not embed_images_file.exists():
         pytest.skip(f"embed_images not found: {embed_images_file}")
     if not decoder_file.exists():

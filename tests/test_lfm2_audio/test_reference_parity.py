@@ -18,14 +18,16 @@ import pytest
 import torch
 from torch import nn
 
+from liquidonnx.genai_builder import export_decoder
 from liquidonnx.lfm2_audio.builder.config import ConformerConfig
 from liquidonnx.lfm2_audio.builder.conformer_builder import ConformerEncoderBuilder
 from liquidonnx.lfm2_audio.builder.depthformer_builder import DepthformerUnifiedBuilder
 from liquidonnx.lfm2_audio.builder.detokenizer_builder import AudioDetokenizerBuilder
-from liquidonnx.lfm2_audio.export import export_decoder, save_mel_config
+from liquidonnx.lfm2_audio.export import DECODER_OPTIONS, save_mel_config
 from liquidonnx.lfm2_audio.infer import _istft_same_padding, compute_mel_spectrogram_numpy
+from liquidonnx.session import initialize_cache, update_cache
 
-from .synthetic import write_wav
+from .synthetic import write_checkpoint, write_wav
 
 liquid_audio = pytest.importorskip("liquid_audio")
 
@@ -343,14 +345,16 @@ def test_decoder_matches_reference(tmp_path):
         "max_position_embeddings": 4096,
         "norm_eps": 1e-5,
         "rope_theta": 1e6,
+        "block_auto_adjust_ff_dim": False,
     }
-    ref = Lfm2Model(Lfm2Config(**lfm, block_auto_adjust_ff_dim=False)).eval()
+    ref = Lfm2Model(Lfm2Config(**lfm)).eval()
     randomize_(ref)
 
-    onnx_dir = tmp_path / "onnx"
-    onnx_dir.mkdir()
-    export_decoder(to_numpy(ref, prefix="lfm."), {"lfm": lfm}, onnx_dir)
-    sess = ort.InferenceSession(str(onnx_dir / "decoder.onnx"), providers=["CPUExecutionProvider"])
+    checkpoint = write_checkpoint(
+        tmp_path / "checkpoint", to_numpy(ref, prefix="lfm."), {"lfm": lfm}
+    )
+    decoder = export_decoder(str(checkpoint), tmp_path / "export", "decoder.onnx", DECODER_OPTIONS)
+    sess = ort.InferenceSession(str(decoder), providers=["CPUExecutionProvider"])
     outputs = [o.name for o in sess.get_outputs()]
 
     prefill = torch.randn(1, 7, lfm["hidden_size"])
@@ -363,35 +367,17 @@ def test_decoder_matches_reference(tmp_path):
         ]
         ref_hidden = [o.last_hidden_state.numpy() for o in (first, second)]
 
-    cache = {
-        "past_conv.0": np.zeros((1, 64, 3), np.float32),
-        "past_conv.2": np.zeros((1, 64, 3), np.float32),
-        "past_key_values.1.key": np.zeros((1, 2, 0, 16), np.float32),
-        "past_key_values.1.value": np.zeros((1, 2, 0, 16), np.float32),
-    }
+    cache = initialize_cache(sess)
     got = []
     for embeds, total in ((prefill, 7), (step, 8)):
-        out = dict(
-            zip(
-                outputs,
-                sess.run(
-                    None,
-                    {
-                        "inputs_embeds": embeds.numpy(),
-                        "attention_mask": np.ones((1, total), np.int64),
-                        **cache,
-                    },
-                ),
-                strict=True,
-            )
-        )
-        got.append(out)
-        cache = {
-            "past_conv.0": out["present_conv.0"],
-            "past_conv.2": out["present_conv.2"],
-            "past_key_values.1.key": out["present.1.key"],
-            "past_key_values.1.value": out["present.1.value"],
+        feed = {
+            "inputs_embeds": embeds.numpy(),
+            "attention_mask": np.ones((1, total), np.int64),
+            **cache,
         }
+        result = sess.run(None, feed)
+        got.append(dict(zip(outputs, result, strict=True)))
+        update_cache(cache, result, sess.get_outputs())
 
     for i in range(2):
         np.testing.assert_allclose(got[i]["hidden_states"], ref_hidden[i], rtol=1e-4, atol=1e-4)

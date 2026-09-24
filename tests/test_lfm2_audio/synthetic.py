@@ -2,7 +2,9 @@
 
 Builds every artifact `LFM2AudioInference` needs - decoder, conformer encoder,
 detokenizer, depthformer, embedding binaries, mel config, tokenizer and config.json -
-from small random weights. Shapes that infer.py hard-codes (8 codebooks, 2049 codebook
+from small random weights, plus the embedding models and genai_config.json of an
+onnxruntime-genai folder. The decoder comes from the genai builder, run on a checkpoint
+holding the random decoder weights. Shapes that infer.py hard-codes (8 codebooks, 2049 codebook
 vocab, depthformer dim 1024 / 6 layers / 8 KV heads, detokenizer output 1282) are kept;
 everything else is shrunk.
 """
@@ -13,18 +15,24 @@ import pathlib
 import numpy as np
 import onnx
 import scipy.io.wavfile
+from safetensors.numpy import save_file
 from tokenizers import Regex, Tokenizer, decoders, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
+from liquidonnx.embeddings import build_embeddings
+from liquidonnx.genai_builder import export_decoder
 from liquidonnx.lfm2_audio.builder.config import ConformerConfig
 from liquidonnx.lfm2_audio.builder.conformer_builder import ConformerEncoderBuilder
 from liquidonnx.lfm2_audio.builder.depthformer_builder import DepthformerUnifiedBuilder
 from liquidonnx.lfm2_audio.builder.detokenizer_builder import AudioDetokenizerBuilder
 from liquidonnx.lfm2_audio.export import (
+    AUDIO_TOKEN_ID,
+    DECODER_OPTIONS,
+    export_audio_embedding,
     export_audio_embedding_binary,
-    export_decoder,
     export_embed_tokens,
     save_mel_config,
+    write_genai_config,
 )
 
 # Decoder (LFM2 backbone) - small everything
@@ -47,6 +55,7 @@ SPECIAL_TOKENS = {
     "<|text_end|>": 130,
     "<|mixed_start|>": 131,
     "<|mixed_end|>": 132,
+    "<|reserved_123|>": 133,
 }
 CHAR_BASE = 8  # printable ASCII 32..126 → 8..102, "\n" → 103
 
@@ -290,6 +299,22 @@ def save_tokenizer(model_dir: pathlib.Path) -> None:
 # === Full export directory ===
 
 
+def write_checkpoint(
+    path: pathlib.Path, weights: dict[str, np.ndarray], config: dict | None = None
+) -> pathlib.Path:
+    """The decoder half of an LFM2.5-Audio checkpoint, as the onnxruntime-genai builder reads it."""
+    path.mkdir(parents=True)
+    config = {
+        **(config or decoder_config()),
+        "architectures": ["Lfm2AudioForConditionalGeneration"],
+    }
+    with open(path / "config.json", "w") as f:
+        json.dump(config, f)
+    save_file(weights, str(path / "model.safetensors"))
+    save_tokenizer(path)
+    return path
+
+
 def build_model_dir(root: pathlib.Path, seed: int = 0) -> pathlib.Path:
     """Write a complete synthetic export under root and return its path."""
     rng = np.random.default_rng(seed)
@@ -299,7 +324,15 @@ def build_model_dir(root: pathlib.Path, seed: int = 0) -> pathlib.Path:
 
     config = decoder_config()
     weights = decoder_weights(rng)
-    export_decoder(weights, config, onnx_dir)
+    checkpoint = write_checkpoint(root / "checkpoint", weights)
+    export_decoder(str(checkpoint), model_dir, "decoder.onnx", DECODER_OPTIONS)
+    build_embeddings(
+        weights["lfm.embed_tokens.weight"],
+        AUDIO_TOKEN_ID,
+        "audio_features",
+        onnx_dir / "embeddings.onnx",
+    )
+    export_audio_embedding(weights, config, onnx_dir)
     export_audio_embedding_binary(weights, config, onnx_dir)
     export_embed_tokens(weights, config, onnx_dir)
     save_mel_config(onnx_dir)
@@ -314,6 +347,7 @@ def build_model_dir(root: pathlib.Path, seed: int = 0) -> pathlib.Path:
     with open(model_dir / "config.json", "w") as f:
         json.dump(config, f)
     save_tokenizer(model_dir)
+    write_genai_config(model_dir, "fp32")
     return model_dir
 
 

@@ -1,16 +1,11 @@
 """
-LFM2-VL Builder for ONNX export.
-
-This package contains builder classes for exporting LFM2-VL models to ONNX:
+LFM2-VL vision encoder builder.
 
 - config.py: SigLIP2Config, LFM2VLConfig
-- vision_builder.py: VisionEmbedBuilder
-- embed_tokens_builder.py: EmbedTokensBuilder
+- vision_builder.py: VisionEmbedBuilder (SigLIP2 NaViT tower + MLP projector, fused)
 
-The LFM2-VL model exports as three ONNX models:
-- embed_tokens.onnx: Token embedding lookup (input_ids -> inputs_embeds)
-- embed_images.onnx: SigLIP2 vision encoder + MLP projector (fused)
-- decoder.onnx: LFM2 language model backbone (takes inputs_embeds, not input_ids)
+The decoder comes from the onnxruntime-genai model builder and the embedding model from
+liquidonnx.embeddings.
 
 Vision Input Formats:
 - Tiled (-T): Input [batch, num_patches, 768] with pre-extracted patches
@@ -18,12 +13,10 @@ Vision Input Formats:
 """
 
 from liquidonnx.lfm2_vl.builder.config import LFM2VLConfig, SigLIP2Config
-from liquidonnx.lfm2_vl.builder.embed_tokens_builder import EmbedTokensBuilder
 from liquidonnx.lfm2_vl.builder.vision_builder import VisionEmbedBuilder
 
 __all__ = [
     "SigLIP2Config",
     "LFM2VLConfig",
     "VisionEmbedBuilder",
-    "EmbedTokensBuilder",
 ]

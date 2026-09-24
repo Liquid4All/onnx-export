@@ -50,6 +50,8 @@ import time
 
 import numpy as np
 
+from liquidonnx.lfm2_audio.export import bundle
+from liquidonnx.session import cache_input_name, initialize_cache
 from liquidonnx.session import load_onnx_session as load_session
 
 logger = logging.getLogger(__name__)
@@ -66,53 +68,33 @@ DEFAULT_MAX_TOKENS_AUDIO = 1024  # TTS and interleaved modes
 DEFAULT_MAX_TOKENS_TEXT = 100  # ASR and text modes
 
 
-def resolve_precision_files(precision: str | None) -> dict[str, str | None]:
-    """Resolve file names from precision shorthand.
-
-    Args:
-        precision: One of "fp16", "q4", "q8", or None for default (fp32)
-
-    Returns:
-        Dict mapping component name to filename (or None for default)
-    """
-    if precision is None:
-        return {
-            "decoder": None,
-            "audio_embedding": None,
-            "audio_encoder": None,
-            "audio_detokenizer": None,
-            "vocoder_depthformer": None,
-        }
-
-    precision = precision.lower()
-    if precision not in ("fp16", "q4", "q8"):
+def resolve_precision_files(precision: str | None) -> dict[str, str]:
+    """Component file names for a precision shorthand (fp16, q4, q8; None for fp32)."""
+    precision = (precision or "fp32").lower()
+    if precision not in ("fp32", "fp16", "q4", "q8"):
         raise ValueError(f"Invalid precision: {precision}. Use fp16, q4, or q8.")
 
+    files = bundle(precision)
     return {
-        "decoder": f"decoder_{precision}.onnx",
-        "audio_embedding": f"audio_embedding_{precision}.onnx",
-        "audio_encoder": f"audio_encoder_{precision}.onnx",
-        "audio_detokenizer": f"audio_detokenizer_{precision}.onnx",
-        "vocoder_depthformer": f"vocoder_depthformer_{precision}.onnx",
+        "decoder": files["decoder"],
+        "audio_embedding": files["audio_embedding"],
+        "audio_encoder": files["speech"],
+        "audio_detokenizer": files["detokenizer"],
+        "vocoder_depthformer": files["depthformer"],
     }
 
 
 def load_embed_tokens_weight(onnx_dir: pathlib.Path) -> np.ndarray:
     """Load embed_tokens.weight from exported binary file.
 
-    Why load from binary instead of extracting from decoder.onnx?
-
-    While Python CAN extract weights via `onnx.load()` + graph.initializer,
-    JavaScript CANNOT - ONNX Runtime Web only exposes inference APIs.
-
-    By loading from the same binary file, both Python and JS use identical
-    artifacts and code paths, ensuring consistent behavior across platforms.
+    JavaScript cannot read initializers out of an ONNX file (ONNX Runtime Web only
+    exposes inference), so Python and JS both index this raw table.
 
     Files:
         embed_tokens.bin - raw float32 binary [vocab_size * hidden_size]
         embed_tokens.json - metadata {vocab_size, hidden_size, dtype}
 
-    Falls back to extracting from decoder.onnx for backwards compatibility.
+    Falls back to the table in embeddings.onnx.
     """
     import json
 
@@ -129,16 +111,13 @@ def load_embed_tokens_weight(onnx_dir: pathlib.Path) -> np.ndarray:
         logger.info(f"Loaded embed_tokens from {bin_path.name}: {weight.shape}")
         return weight
 
-    # Fallback: extract from decoder.onnx (for backwards compatibility)
-    logger.warning("embed_tokens.bin not found, extracting from decoder.onnx")
+    logger.warning("embed_tokens.bin not found, reading the table from embeddings.onnx")
     import onnx
 
-    decoder_path = onnx_dir / "decoder.onnx"
-    model = onnx.load(str(decoder_path), load_external_data=True)
-
+    model = onnx.load(str(onnx_dir / "embeddings.onnx"), load_external_data=True)
     for initializer in model.graph.initializer:
-        if initializer.name == "model.embed_tokens.weight":
-            return onnx.numpy_helper.to_array(initializer)
+        if initializer.name == "embed_tokens.weight":
+            return onnx.numpy_helper.to_array(initializer).astype(np.float32)
 
     raise ValueError("embed_tokens.weight not found")
 
@@ -277,12 +256,7 @@ class LFM2AudioInference:
             config = json.load(f)
 
         lfm_config = config.get("lfm", {})
-        self.hidden_size = lfm_config.get("hidden_size", 2048)
         self.num_layers = lfm_config.get("num_hidden_layers", 16)
-        self.num_kv_heads = lfm_config.get("num_key_value_heads", 8)
-        self.head_dim = self.hidden_size // lfm_config.get("num_attention_heads", 32)
-        self.conv_L = lfm_config.get("conv_L_cache", 3)
-        self.layer_types = lfm_config.get("layer_types", [])
         self.vocab_size = lfm_config.get("vocab_size", 65536)
 
         # Audio config
@@ -305,34 +279,15 @@ class LFM2AudioInference:
         logger.info("ONNX vocoder ready for TTS")
 
     def _init_cache(self, batch_size: int = 1) -> dict[str, np.ndarray]:
-        """Initialize KV cache for generation."""
-        cache = {}
-
-        for idx, layer_type in enumerate(self.layer_types):
-            if layer_type == "conv":
-                cache[f"past_conv.{idx}"] = np.zeros(
-                    (batch_size, self.hidden_size, self.conv_L), dtype=np.float32
-                )
-            else:
-                cache[f"past_key_values.{idx}.key"] = np.zeros(
-                    (batch_size, self.num_kv_heads, 0, self.head_dim), dtype=np.float32
-                )
-                cache[f"past_key_values.{idx}.value"] = np.zeros(
-                    (batch_size, self.num_kv_heads, 0, self.head_dim), dtype=np.float32
-                )
-
-        return cache
+        """Empty conv and KV caches, shaped and typed as the decoder declares them."""
+        cache = initialize_cache(self.decoder_session)
+        return {name: np.repeat(value, batch_size, axis=0) for name, value in cache.items()}
 
     def _update_cache(self, cache: dict, outputs: dict) -> dict:
-        for key in cache:
-            if key.startswith("past_conv."):
-                idx = int(key.split(".")[1])
-                cache[key] = outputs[f"present_conv.{idx}"]
-            elif key.startswith("past_key_values."):
-                parts = key.split(".")
-                idx = int(parts[1])
-                kv_type = parts[2]
-                cache[key] = outputs[f"present.{idx}.{kv_type}"]
+        for name, value in outputs.items():
+            cache_name = cache_input_name(name)
+            if cache_name in cache:
+                cache[cache_name] = value
         return cache
 
     def _sample(
@@ -415,8 +370,10 @@ class LFM2AudioInference:
         output_names = [o.name for o in self.decoder_session.get_outputs()]
         output_dict = dict(zip(output_names, outputs, strict=True))
 
-        logits = output_dict["logits"]
+        logits = output_dict["logits"].astype(np.float32)
         hidden_states = output_dict.get("hidden_states")
+        if hidden_states is not None:
+            hidden_states = hidden_states.astype(np.float32)
         cache = self._update_cache(cache, output_dict)
 
         return logits, hidden_states, cache

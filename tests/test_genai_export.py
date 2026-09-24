@@ -24,12 +24,9 @@ from transformers import (
     Lfm2MoeForCausalLM,
 )
 
-from liquidonnx.lfm2.export import (
-    ALL_PRECISIONS,
-    derive_precision,
-    export_model,
-    set_default_decoder,
-)
+from liquidonnx.genai_builder import export_decoder
+from liquidonnx.lfm2.export import ALL_PRECISIONS, set_default_decoder
+from liquidonnx.quantize import derive_precision
 from liquidonnx.session import decoder_inputs, initialize_cache, load_onnx_session, update_cache
 
 TOKENS = np.array([[1, 5, 77, 300, 42, 9, 128, 64, 3, 250]], dtype=np.int64)
@@ -90,7 +87,7 @@ def export(request, tmp_path_factory):
     model = make_checkpoint(request.param, root / "checkpoint")
     output_dir = root / "export"
     output_dir.mkdir()
-    export_model(str(root / "checkpoint"), output_dir)
+    export_decoder(str(root / "checkpoint"), output_dir)
     for precision in ALL_PRECISIONS:
         derive_precision(output_dir / "onnx", precision)
     set_default_decoder(output_dir, list(ALL_PRECISIONS))

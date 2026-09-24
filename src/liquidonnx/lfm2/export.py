@@ -46,24 +46,10 @@ import argparse
 import json
 import logging
 import pathlib
-import shutil
-import tempfile
-
-import onnx
 
 from liquidonnx.external_data import split_external_data
-from liquidonnx.genai_builder import build_decoder, resolve_checkpoint
-from liquidonnx.quantize import (
-    DEFAULT_BLOCK_SIZE,
-    convert_to_fp16,
-    find_router_nodes,
-    get_total_model_size_mb,
-    load_model,
-    moe_to_qmoe,
-    quantize_matmuls,
-    save_model,
-    tie_embedding_int4,
-)
+from liquidonnx.genai_builder import export_decoder
+from liquidonnx.quantize import DEFAULT_BLOCK_SIZE, derive_precision
 
 logger = logging.getLogger(__name__)
 
@@ -71,110 +57,11 @@ TEXT_PRECISIONS = ("fp16", "q4", "q4f32", "q8")
 MOE_PRECISIONS = ("fp16", "q4", "q4f16", "q8")
 ALL_PRECISIONS = ("fp16", "q4", "q4f16", "q4f32", "q8")
 DEFAULT_ORDER = ("q4", "q4f16", "q8", "fp16", "q4f32")
-CHECKPOINT_FILES = ("config.json", "generation_config.json")
 
 
 def get_model_name(model_path: str) -> str:
     """Extract model name from HF slug or local path."""
     return pathlib.Path(model_path).name
-
-
-def pin_kv_head_size(model: onnx.ModelProto, head_size: int):
-    """Replace the builder's symbolic `kv_cache_dim` with the head size on the cache I/O.
-
-    genai leaves it symbolic so one graph can serve quantized KV caches; fixing it lets plain
-    onnxruntime callers allocate empty caches from the graph signature.
-    """
-    for value in [*model.graph.input, *model.graph.output]:
-        for dim in value.type.tensor_type.shape.dim:
-            if dim.dim_param == "kv_cache_dim":
-                dim.Clear()
-                dim.dim_value = head_size
-
-
-def export_model(model_path: str, output_dir: pathlib.Path) -> pathlib.Path:
-    """Build the fp32 decoder into output_dir/onnx/model.onnx plus genai_config and tokenizer."""
-    onnx_dir = output_dir / "onnx"
-    onnx_dir.mkdir(parents=True, exist_ok=True)
-
-    with tempfile.TemporaryDirectory(dir=output_dir, prefix=".genai-build-") as tmp:
-        build_dir = pathlib.Path(tmp)
-        built = build_decoder(model_path, build_dir)
-
-        genai_config = json.loads((build_dir / "genai_config.json").read_text())
-        model = load_model(built)
-        pin_kv_head_size(model, genai_config["model"]["decoder"]["head_size"])
-        output_path = save_model(model, onnx_dir / "model.onnx")
-        del model
-
-        for f in build_dir.iterdir():
-            if f.is_file() and not f.name.startswith("model.onnx"):
-                shutil.copy2(f, output_dir / f.name)
-
-    checkpoint = resolve_checkpoint(model_path)
-    for name in CHECKPOINT_FILES:
-        if (checkpoint / name).exists():
-            shutil.copy2(checkpoint / name, output_dir / name)
-
-    logger.info(f"Model saved to {output_path} ({get_total_model_size_mb(output_path):.1f} MB)")
-    return output_path
-
-
-def derive_precision(
-    onnx_dir: pathlib.Path,
-    precision: str,
-    block_size: int = DEFAULT_BLOCK_SIZE,
-    q4_symmetric: bool = True,
-) -> pathlib.Path:
-    """Write onnx_dir/model_{precision}.onnx from onnx_dir/model.onnx."""
-    base = onnx_dir / "model.onnx"
-    output_path = onnx_dir / f"model_{precision}.onnx"
-
-    if precision == "fp16":
-        return convert_to_fp16(base, output_path)
-
-    if precision == "q4f16":
-        q4 = onnx_dir / "model_q4.onnx"
-        if q4.exists():
-            return convert_to_fp16(q4, output_path)
-        with tempfile.TemporaryDirectory(dir=onnx_dir) as tmp:
-            q4 = _quantize(
-                base, pathlib.Path(tmp) / "model_q4.onnx", "q4", block_size, q4_symmetric
-            )
-            return convert_to_fp16(q4, output_path)
-
-    return _quantize(base, output_path, precision, block_size, q4_symmetric)
-
-
-def _quantize(
-    base: pathlib.Path,
-    output_path: pathlib.Path,
-    precision: str,
-    block_size: int,
-    q4_symmetric: bool,
-) -> pathlib.Path:
-    model = load_model(base)
-    exclude = ["/lm_head/MatMul", *find_router_nodes(model)]
-    if precision == "q8":
-        experts = moe_to_qmoe(model, bits=8, block_size=block_size)
-        model = quantize_matmuls(
-            model, bits=8, block_size=block_size, symmetric=False, exclude=exclude
-        )
-    elif precision in ("q4", "q4f32"):
-        tied = precision == "q4" and tie_embedding_int4(model, block_size)
-        experts = moe_to_qmoe(model, bits=4, block_size=block_size)
-        model = quantize_matmuls(
-            model, bits=4, block_size=block_size, symmetric=q4_symmetric, exclude=exclude
-        )
-        if tied:
-            logger.info("  embedding and lm_head share one int4 table")
-    else:
-        raise ValueError(f"Unknown precision: {precision}")
-    if experts:
-        logger.info(f"  {experts} MoE layers -> QMoE")
-    save_model(model, output_path)
-    logger.info(f"  {output_path.name}: {get_total_model_size_mb(output_path):.1f} MB")
-    return output_path
 
 
 def set_default_decoder(output_dir: pathlib.Path, precisions: list[str]):
@@ -271,7 +158,7 @@ def main(default_precisions: tuple[str, ...] = TEXT_PRECISIONS, description: str
         logger.info(f"Exporting {args.model} (fp32) to {output_dir}")
         logger.info("=" * 60)
         output_dir.mkdir(parents=True, exist_ok=True)
-        export_model(args.model, output_dir)
+        export_decoder(args.model, output_dir)
 
     for precision in precisions:
         logger.info("=" * 60)

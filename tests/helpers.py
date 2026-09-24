@@ -150,22 +150,6 @@ def get_community_vl_files(
     }
 
 
-def get_local_vl_files(onnx_dir: pathlib.Path, use_fp16: bool = False) -> dict[str, pathlib.Path]:
-    """Get local VL model files.
-
-    Local VL models use:
-    - embed_tokens.onnx / embed_tokens_fp16.onnx
-    - vision_encoder.onnx / vision_encoder_fp16.onnx
-    - decoder_model_merged.onnx / decoder_model_merged_fp16.onnx
-    """
-    suffix = "_fp16" if use_fp16 else ""
-    return {
-        "embed_tokens": onnx_dir / f"embed_tokens{suffix}.onnx",
-        "vision_encoder": onnx_dir / f"vision_encoder{suffix}.onnx",
-        "decoder": onnx_dir / f"decoder_model_merged{suffix}.onnx",
-    }
-
-
 def get_community_vl_model_id(model_id: str) -> str | None:
     """Get onnx-community HF repo for a VL model, or None if not available."""
     return COMMUNITY_VL_MODELS.get(model_id)

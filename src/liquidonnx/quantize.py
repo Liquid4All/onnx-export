@@ -8,10 +8,13 @@ turn an fp32 onnxruntime-genai LFM2 decoder into the published precisions:
                         sharing one int4 table
     moe_to_qmoe         com.microsoft MoE -> QMoE with int4/int8 block-quantized experts
     convert_to_fp16     fp16 weights, activations and caches; logits kept fp32
+
+derive_precision chains them into the recipe for each published precision.
 """
 
 import logging
 import pathlib
+import tempfile
 
 import numpy as np
 import onnx
@@ -331,15 +334,18 @@ def moe_to_qmoe(model: onnx.ModelProto, bits: int, block_size: int = DEFAULT_BLO
 def convert_to_fp16(
     input_path: pathlib.Path,
     output_path: pathlib.Path,
-    keep_io: tuple[str, ...] = ("logits", "hidden_states"),
+    keep_io: tuple[str, ...] | bool = ("logits", "hidden_states", "inputs_embeds"),
 ) -> pathlib.Path:
-    """fp16 weights, activations and cache I/O; the named graph I/O stays fp32."""
+    """fp16 weights, activations and cache I/O; the named graph I/O (all of it if True) stays fp32.
+
+    Keeping inputs_embeds fp32 lets one embedding model feed a decoder of any precision.
+    """
     from onnxruntime.transformers.float16 import convert_float_to_float16
 
     logger.info(f"Converting {input_path.name} to FP16...")
     model_fp16 = convert_float_to_float16(
         load_model(input_path),
-        keep_io_types=list(keep_io),
+        keep_io_types=keep_io if isinstance(keep_io, bool) else list(keep_io),
         force_fp16_initializers=True,
         disable_shape_infer=True,
     )
@@ -466,3 +472,61 @@ def quantize_model(
     )
     logger.info(f"Saving to {output_path}...")
     return save_model(quantized, output_path)
+
+
+def derive_precision(
+    onnx_dir: pathlib.Path,
+    precision: str,
+    name: str = "model",
+    block_size: int = DEFAULT_BLOCK_SIZE,
+    q4_symmetric: bool = True,
+) -> pathlib.Path:
+    """Write onnx_dir/{name}_{precision}.onnx from the fp32 decoder onnx_dir/{name}.onnx."""
+    base = onnx_dir / f"{name}.onnx"
+    output_path = onnx_dir / f"{name}_{precision}.onnx"
+
+    if precision == "fp16":
+        return convert_to_fp16(base, output_path)
+
+    if precision == "q4f16":
+        q4 = onnx_dir / f"{name}_q4.onnx"
+        if q4.exists():
+            return convert_to_fp16(q4, output_path)
+        with tempfile.TemporaryDirectory(dir=onnx_dir) as tmp:
+            q4 = _quantize_decoder(
+                base, pathlib.Path(tmp) / q4.name, "q4", block_size, q4_symmetric
+            )
+            return convert_to_fp16(q4, output_path)
+
+    return _quantize_decoder(base, output_path, precision, block_size, q4_symmetric)
+
+
+def _quantize_decoder(
+    base: pathlib.Path,
+    output_path: pathlib.Path,
+    precision: str,
+    block_size: int,
+    q4_symmetric: bool,
+) -> pathlib.Path:
+    model = load_model(base)
+    exclude = ["/lm_head/MatMul", *find_router_nodes(model)]
+    if precision == "q8":
+        experts = moe_to_qmoe(model, bits=8, block_size=block_size)
+        model = quantize_matmuls(
+            model, bits=8, block_size=block_size, symmetric=False, exclude=exclude
+        )
+    elif precision in ("q4", "q4f32"):
+        tied = precision == "q4" and tie_embedding_int4(model, block_size)
+        experts = moe_to_qmoe(model, bits=4, block_size=block_size)
+        model = quantize_matmuls(
+            model, bits=4, block_size=block_size, symmetric=q4_symmetric, exclude=exclude
+        )
+        if tied:
+            logger.info("  embedding and lm_head share one int4 table")
+    else:
+        raise ValueError(f"Unknown precision: {precision}")
+    if experts:
+        logger.info(f"  {experts} MoE layers -> QMoE")
+    save_model(model, output_path)
+    logger.info(f"  {output_path.name}: {get_total_model_size_mb(output_path):.1f} MB")
+    return output_path

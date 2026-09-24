@@ -18,10 +18,11 @@ import torch
 from helpers import get_onnx_dir
 from PIL import Image
 
+from liquidonnx.embeddings import embed
 from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
+from liquidonnx.lfm2_vl.export import bundle
 from liquidonnx.lfm2_vl.preprocessing import (
     detect_vision_format,
-    get_image_token_id,
     pad_to_square,
     preprocess_conv2d,
 )
@@ -182,28 +183,10 @@ def generate_onnx(
         input_ids = inputs["input_ids"].numpy().astype(np.int64)
 
         image_embeds_list = get_onnx_image_embeddings(embed_images_sess, images, processor)
-        all_image_embeds = np.concatenate(image_embeds_list, axis=0)
-
-        text_embeds = embed_tokens_sess.run(None, {"input_ids": input_ids})[0][0]
-
-        image_token_id = get_image_token_id(tokenizer)
-        image_mask = input_ids[0] == image_token_id
-
-        if image_mask.sum() > 0 and len(all_image_embeds) > 0:
-            result_embeds = []
-            img_idx = 0
-            for i, is_image in enumerate(image_mask):
-                if is_image and img_idx < len(all_image_embeds):
-                    result_embeds.append(all_image_embeds[img_idx])
-                    img_idx += 1
-                else:
-                    result_embeds.append(text_embeds[i])
-            inputs_embeds = np.stack(result_embeds, axis=0)[np.newaxis, ...].astype(np.float32)
-        else:
-            inputs_embeds = text_embeds[np.newaxis, ...].astype(np.float32)
+        inputs_embeds = embed(embed_tokens_sess, input_ids, np.concatenate(image_embeds_list))
     else:
         input_ids = np.array([tokenizer.encode(text, add_special_tokens=False)], dtype=np.int64)
-        inputs_embeds = embed_tokens_sess.run(None, {"input_ids": input_ids})[0]
+        inputs_embeds = embed(embed_tokens_sess, input_ids)
 
     seq_len = inputs_embeds.shape[1]
     input_names = {inp.name for inp in decoder_sess.get_inputs()}
@@ -219,7 +202,7 @@ def generate_onnx(
             pos = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
         else:
             last_token = np.array([[generated_tokens[-1]]], dtype=np.int64)
-            embeds = embed_tokens_sess.run(None, {"input_ids": last_token})[0]
+            embeds = embed(embed_tokens_sess, last_token)
             pos = np.array([[cur_len - 1]], dtype=np.int64)
 
         attn_mask = np.ones((1, cur_len), dtype=np.int64)
@@ -334,9 +317,9 @@ def test_coherence(
     if not embed_images_file.exists():
         pytest.skip(f"Vision encoder not found: {embed_images_file}")
 
-    embed_tokens_file = onnx_dir / "embed_tokens.onnx"
+    embed_tokens_file = onnx_dir / bundle(decoder_type or "fp32")["embedding"]
     if not embed_tokens_file.exists():
-        pytest.skip(f"embed_tokens not found: {embed_tokens_file}")
+        pytest.skip(f"Embedding model not found: {embed_tokens_file}")
 
     embed_tokens_sess = load_onnx_session(embed_tokens_file)
     embed_images_sess = load_onnx_session(embed_images_file)

@@ -48,9 +48,10 @@ function decoderFeeds(m) {
     { name: 'inputs_embeds', type: 'float32', dims: [1, SEQ, m.hidden], fill: 'randn' },
     { name: 'attention_mask', type: 'int64', dims: [1, SEQ], fill: 'ones' },
   ];
+  // onnxruntime-genai decoder layout: the conv state keeps the last L - 1 inputs
   m.layer_types.forEach((type, i) => {
     if (type === 'conv') {
-      feeds.push({ name: `past_conv.${i}`, type: 'float32', dims: [1, m.hidden, m.conv_L] });
+      feeds.push({ name: `past.${i}.conv`, type: 'float32', dims: [1, m.hidden, m.conv_L - 1] });
     } else {
       for (const kv of ['key', 'value']) {
         feeds.push({ name: `past_key_values.${i}.${kv}`, type: 'float32', dims: [1, m.num_kv_heads, 0, m.head_dim] });

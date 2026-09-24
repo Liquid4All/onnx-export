@@ -21,6 +21,7 @@ import onnxruntime as ort
 from PIL import Image
 from transformers import AutoProcessor
 
+from liquidonnx.embeddings import embed, embedding_feed
 from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.preprocessing import (
     build_inputs_embeds,
@@ -132,8 +133,8 @@ class VLBenchmark:
         self.image_token_id = get_image_token_id(self.tokenizer)
 
         logger.info("Loading ONNX models...")
-        # Handle both local and community naming conventions
-        embed_tokens_path = self._find_onnx_file("embed_tokens.onnx")
+        # Local exports (embeddings.onnx) and community ones (embed_tokens.onnx)
+        embed_tokens_path = self._find_onnx_file("embeddings.onnx", "embed_tokens.onnx")
         embed_images_path = self._find_onnx_file("embed_images.onnx", "vision_encoder.onnx")
         decoder_path = self._find_onnx_file("decoder.onnx", "decoder_model_merged.onnx")
 
@@ -151,7 +152,7 @@ class VLBenchmark:
         total = 0.0
         # Try both local and community naming
         file_options = [
-            ["embed_tokens.onnx"],
+            ["embeddings.onnx", "embed_tokens.onnx"],
             ["embed_images.onnx", "vision_encoder.onnx"],
             ["decoder.onnx", "decoder_model_merged.onnx"],
         ]
@@ -168,7 +169,7 @@ class VLBenchmark:
         counts = {}
         # Map component names to possible file names
         components = {
-            "embed_tokens": ["embed_tokens.onnx"],
+            "embed_tokens": ["embeddings.onnx", "embed_tokens.onnx"],
             "embed_images": ["embed_images.onnx", "vision_encoder.onnx"],
             "decoder": ["decoder.onnx", "decoder_model_merged.onnx"],
         }
@@ -219,8 +220,7 @@ class VLBenchmark:
 
     def _get_text_embeddings(self, input_ids: np.ndarray) -> np.ndarray:
         """Get text embeddings."""
-        outputs = self.embed_tokens_sess.run(None, {"input_ids": input_ids.astype(np.int64)})
-        return outputs[0]
+        return embed(self.embed_tokens_sess, input_ids)
 
     def benchmark_components(
         self, image: Image.Image | None = None, num_runs: int = 10
@@ -231,7 +231,7 @@ class VLBenchmark:
 
         # Embed tokens
         embed_tokens_ms = benchmark_component(
-            self.embed_tokens_sess, {"input_ids": dummy_ids}, num_runs
+            self.embed_tokens_sess, embedding_feed(self.embed_tokens_sess, dummy_ids), num_runs
         )
 
         # Embed images

@@ -18,6 +18,8 @@ import torch
 from helpers import download_community_vl_onnx, get_onnx_dir
 from PIL import Image
 
+from liquidonnx.embeddings import embed
+from liquidonnx.lfm2_vl.export import bundle
 from liquidonnx.lfm2_vl.preprocessing import get_image_token_id, pad_to_square
 from liquidonnx.session import get_onnx_file, initialize_cache, load_onnx_session
 
@@ -118,7 +120,7 @@ def run_local_onnx_vl(embed_tokens_sess, embed_images_sess, decoder_sess, proces
     image_embeds_flat = image_outputs[0]
 
     # Get text embeddings
-    text_embeds = embed_tokens_sess.run(None, {"input_ids": input_ids})[0][0]
+    text_embeds = embed(embed_tokens_sess, input_ids)[0]
 
     # Merge embeddings
     image_token_id = get_image_token_id(processor.tokenizer)
@@ -183,7 +185,7 @@ def run_community_onnx_vl(
     image_embeds_flat = image_outputs[0]
 
     # Get text embeddings
-    text_embeds = embed_tokens_sess.run(None, {"input_ids": input_ids})[0][0]
+    text_embeds = embed(embed_tokens_sess, input_ids)[0]
 
     # Merge embeddings
     image_token_id = get_image_token_id(processor.tokenizer)
@@ -263,7 +265,7 @@ def run_local_onnx_vl_multi(
     image_embeds_flat = image_outputs[0]
 
     # Get text embeddings
-    text_embeds = embed_tokens_sess.run(None, {"input_ids": input_ids})[0][0]
+    text_embeds = embed(embed_tokens_sess, input_ids)[0]
 
     # Merge embeddings
     image_token_id = get_image_token_id(processor.tokenizer)
@@ -329,7 +331,7 @@ def run_community_onnx_vl_multi(
     image_embeds_flat = image_outputs[0]
 
     # Get text embeddings
-    text_embeds = embed_tokens_sess.run(None, {"input_ids": input_ids})[0][0]
+    text_embeds = embed(embed_tokens_sess, input_ids)[0]
 
     # Merge embeddings
     image_token_id = get_image_token_id(processor.tokenizer)
@@ -393,9 +395,9 @@ def test_community_comparison(
     if not local_vision_file.exists():
         pytest.skip(f"Local vision encoder not found: {local_vision_file}")
 
-    local_embed_tokens_file = local_onnx_dir / "embed_tokens.onnx"
+    local_embed_tokens_file = local_onnx_dir / bundle(decoder_type or "fp32")["embedding"]
     if not local_embed_tokens_file.exists():
-        pytest.skip(f"Local embed_tokens not found: {local_embed_tokens_file}")
+        pytest.skip(f"Local embedding model not found: {local_embed_tokens_file}")
 
     # Download community models from HuggingFace
     community_embed_tokens_file = download_community_vl_onnx(model_id, "embed_tokens", use_fp16)
@@ -514,9 +516,9 @@ def test_community_comparison_multi_image(
     if not local_vision_file.exists():
         pytest.skip(f"Local vision encoder not found: {local_vision_file}")
 
-    local_embed_tokens_file = local_onnx_dir / "embed_tokens.onnx"
+    local_embed_tokens_file = local_onnx_dir / bundle(decoder_type or "fp32")["embedding"]
     if not local_embed_tokens_file.exists():
-        pytest.skip(f"Local embed_tokens not found: {local_embed_tokens_file}")
+        pytest.skip(f"Local embedding model not found: {local_embed_tokens_file}")
 
     # Download community models from HuggingFace
     community_embed_tokens_file = download_community_vl_onnx(model_id, "embed_tokens", use_fp16)
