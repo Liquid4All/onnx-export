@@ -1,10 +1,9 @@
 """
 Build LFM2 decoders (text, MoE, VL, audio) with the onnxruntime-genai model builder.
 
-liquidonnx tracks onnxruntime-genai main, where the LFM2-MoE, VL and audio builders live (0.16.0
-has only the text one). The builder runs from a source checkout of main at GENAI_COMMIT, fetched
-once into ~/.cache/liquidonnx; run the runtime built from the same commit. Set
-LIQUIDONNX_GENAI_BUILDER to a local `src/python/py/models` directory to use another copy.
+The builder runs from a source checkout of onnxruntime-genai main at GENAI_COMMIT (0.16.0 has
+only the text builder), fetched once into ~/.cache/liquidonnx. Set LIQUIDONNX_GENAI_BUILDER to a
+local `src/python/py/models` directory to use another copy.
 
 The decoder is always built as fp32 for the CPU EP; every other precision is derived from it by
 liquidonnx.quantize.

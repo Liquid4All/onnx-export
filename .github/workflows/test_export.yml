@@ -102,7 +102,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: genai-python
-          key: onnxruntime-genai-${{ runner.os }}-${{ steps.genai.outputs.commit }}-ort${{ steps.genai.outputs.ort }}
+          # Bump the build<N> suffix whenever the build command below changes.
+          key: onnxruntime-genai-${{ runner.os }}-${{ steps.genai.outputs.commit }}-ort${{ steps.genai.outputs.ort }}-build1
 
       # The build leaves an importable Python package in build/Linux/Release/wheel (packaging
       # the wheel itself needs pip). It runs on the onnxruntime from uv.lock, so it is built
@@ -126,11 +127,18 @@ jobs:
             --ort_home "$GITHUB_WORKSPACE/onnxruntime-linux-x64-$ORT"
           mv build/Linux/Release/wheel "$GITHUB_WORKSPACE/genai-python"
 
+      # Fail if Python falls back to the 0.16 release from uv.lock; the versions look alike
+      # (0.16.0 vs 0.16.0-dev), so only the import path tells them apart.
       - name: Use the onnxruntime-genai build
         run: |
           echo "PYTHONPATH=$GITHUB_WORKSPACE/genai-python" >> "$GITHUB_ENV"
-          PYTHONPATH="$GITHUB_WORKSPACE/genai-python" uv run python -c \
-            'import onnxruntime_genai as og; print("onnxruntime-genai", og.__version__, og.__file__)'
+          PYTHONPATH="$GITHUB_WORKSPACE/genai-python" uv run python - "$GITHUB_WORKSPACE/genai-python/" <<'EOF'
+          import sys
+          import onnxruntime_genai as og
+          print("onnxruntime-genai", og.__version__, og.__file__)
+          if not og.__file__.startswith(sys.argv[1]):
+              sys.exit(f"onnxruntime_genai was not imported from {sys.argv[1]}")
+          EOF
 
       - name: Export to ONNX
         env:

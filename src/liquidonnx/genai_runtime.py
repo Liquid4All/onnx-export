@@ -5,8 +5,7 @@ An export folder is an onnxruntime-genai model: genai_config.json names the grap
 precision, and every other precision is loaded by overlaying its file names (each family's
 export module has genai_files(precision)).
 
-Expects a build of onnxruntime-genai main at liquidonnx.genai_builder.GENAI_COMMIT. The 0.16
-release runs the LFM2 text models only; lfm2_moe, lfm2_vl and lfm2_audio are on main.
+Expects onnxruntime-genai built from liquidonnx.genai_builder.GENAI_COMMIT (see README).
 """
 
 import json
