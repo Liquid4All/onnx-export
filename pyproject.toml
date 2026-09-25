@@ -7,20 +7,18 @@ requires-python = ">=3.12"
 dependencies = [
     "onnx>=1.22.0",
     "onnxruntime>=1.30.0",  # Audio graphs verified against 1.30; the old nightly index had no macOS wheels
+    "onnxruntime-genai>=0.16.0",  # Inference CLIs; lfm2_moe, lfm2_vl and lfm2_audio need a newer build
     "transformers>=5.17.0",
     "numpy>=2.2.0,<2.6",  # numba (via librosa) requires numpy < 2.6
     "torch>=2.0.0",
     "pillow",
     "torchvision>=0.24.1",
     "onnx-ir>=1.0.0",
-    "scipy>=1.12.0",  # For ISTFT in audio decoding
+    "scipy>=1.12.0",  # WAV output of lfm2-audio-infer
     "onnxscript>=0.7.2",
 ]
 
 [project.optional-dependencies]
-gpu = [
-    "onnxruntime-gpu>=1.30.0",  # CUDA support (replaces onnxruntime)
-]
 dev = [
     "pytest",
     "ruff",
@@ -39,11 +37,14 @@ lfm2-vl-infer = "liquidonnx.lfm2_vl.infer:main"
 
 # LFM2-MoE (Mixture of Experts) model tools
 lfm2-moe-export = "liquidonnx.lfm2_moe.export:main"
-lfm2-moe-infer = "liquidonnx.lfm2_moe.infer:main"
+lfm2-moe-infer = "liquidonnx.lfm2.infer:main"
 
 # LFM2.5-Audio multimodal audio model tools
 lfm2-audio-export = "liquidonnx.lfm2_audio.export:main"
 lfm2-audio-infer = "liquidonnx.lfm2_audio.infer:main"
+
+# Exports against their reference models
+lfm2-compare = "liquidonnx.compare:main"
 
 [build-system]
 requires = ["hatchling"]

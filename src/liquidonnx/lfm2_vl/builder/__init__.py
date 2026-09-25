@@ -6,10 +6,6 @@ LFM2-VL vision encoder builder.
 
 The decoder comes from the onnxruntime-genai model builder and the embedding model from
 liquidonnx.embeddings.
-
-Vision Input Formats:
-- Tiled (-T): Input [batch, num_patches, 768] with pre-extracted patches
-- Conv2d (-C): Input [batch, 3, H, W] with raw normalized image
 """
 
 from liquidonnx.lfm2_vl.builder.config import LFM2VLConfig, SigLIP2Config

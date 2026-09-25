@@ -5,7 +5,8 @@ name: Test Export
 #
 #   1. `export`         — run an export CLI for a model family, assert it
 #                         produced an ONNX graph, then run one short inference
-#                         ("hello") inline and record whether it passed.
+#                         ("hello") through onnxruntime-genai inline and record
+#                         whether it passed.
 #   2. `run-inference`  — a lightweight gate that re-publishes that inline
 #                         inference result as its own pass/fail check.
 #
@@ -17,6 +18,10 @@ name: Test Export
 # Triggers:
 #   * push to main / PRs against main that touch export code (default model)
 #   * manual dispatch (pick the model, family, and precision)
+#
+# Released onnxruntime-genai runs the text models only; for the moe, vl and audio
+# families the job builds onnxruntime-genai at the commit the model builder is
+# pinned to (liquidonnx.genai_builder.GENAI_COMMIT), cached per commit and onnxruntime version.
 #
 # Large checkpoints may exceed the runner's disk/RAM — keep to a small model
 # (the defaults export in a few minutes). CPU inference on a hosted runner is
@@ -83,6 +88,51 @@ jobs:
       - uses: astral-sh/setup-uv@v8.2.0
       - run: uv python install 3.12
       - run: uv sync
+
+      - name: Resolve the onnxruntime-genai commit and onnxruntime version
+        id: genai
+        if: (inputs.family || 'text') != 'text'
+        run: |
+          commit=$(uv run python -c 'from liquidonnx.genai_builder import GENAI_COMMIT; print(GENAI_COMMIT)')
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          ort=$(uv run python -c 'import onnxruntime; print(onnxruntime.__version__)')
+          echo "ort=$ort" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the onnxruntime-genai build
+        id: genai-cache
+        if: steps.genai.outputs.commit
+        uses: actions/cache@v4
+        with:
+          path: genai-python
+          key: onnxruntime-genai-${{ runner.os }}-${{ steps.genai.outputs.commit }}-ort${{ steps.genai.outputs.ort }}
+
+      # The build leaves an importable Python package in build/Linux/Release/wheel (packaging
+      # the wheel itself needs pip). It runs on the onnxruntime from uv.lock, so it is built
+      # against that release's headers.
+      - name: Build onnxruntime-genai
+        if: steps.genai.outputs.commit && steps.genai-cache.outputs.cache-hit != 'true'
+        env:
+          COMMIT: ${{ steps.genai.outputs.commit }}
+          ORT: ${{ steps.genai.outputs.ort }}
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/microsoft/onnxruntime/releases/download/v$ORT/onnxruntime-linux-x64-$ORT.tgz" | tar xz
+          git init -q genai-src
+          git -C genai-src fetch -q --depth 1 https://github.com/microsoft/onnxruntime-genai.git "$COMMIT"
+          git -C genai-src checkout -q FETCH_HEAD
+          uv pip install pip
+          cd genai-src
+          "$GITHUB_WORKSPACE/.venv/bin/python" build.py --config Release --parallel \
+            --skip_tests --skip_examples --cmake_extra_defines ENABLE_TESTS=OFF \
+            --ort_home "$GITHUB_WORKSPACE/onnxruntime-linux-x64-$ORT"
+          mv build/Linux/Release/wheel "$GITHUB_WORKSPACE/genai-python"
+
+      - name: Use the onnxruntime-genai build
+        if: steps.genai.outputs.commit
+        run: |
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/genai-python" >> "$GITHUB_ENV"
+          PYTHONPATH="$GITHUB_WORKSPACE/genai-python" uv run python -c \
+            'import onnxruntime_genai as og; print("onnxruntime-genai", og.__version__, og.__file__)'
 
       - name: Export to ONNX
         env:
@@ -154,21 +204,6 @@ jobs:
           echo "Model dir: $MODEL_DIR"
           ls -la "$ONNX_DIR"
 
-          # Prefer the smallest/fastest precision present (quantized first) so the
-          # CPU smoke test stays cheap.
-          pick_file() {  # echoes the first existing onnx file from the candidates
-            for f in "$@"; do
-              if [ -f "$ONNX_DIR/$f" ]; then echo "$ONNX_DIR/$f"; return 0; fi
-            done
-            return 1
-          }
-          pick_precision() {  # echoes a --precision shorthand for dir-based CLIs
-            for p in q4 q8 fp16; do
-              if ls "$ONNX_DIR"/*_"$p".onnx >/dev/null 2>&1; then echo "$p"; return 0; fi
-            done
-            # No quantized variant -> fall back to fp32 (no --precision flag).
-          }
-
           run() {  # bound a single generation; map success/timeout/error to the output
             echo "+ timeout ${INFER_TIMEOUT}s: $*"
             if timeout "$INFER_TIMEOUT" "$@" </dev/null; then
@@ -184,35 +219,23 @@ jobs:
             fi
           }
 
+          # Each CLI loads the precision genai_config.json points at (quantized first).
           case "$FAMILY" in
-            text)
-              FILE=$(pick_file model_q4.onnx model_q4f32.onnx model_q8.onnx model_fp16.onnx model.onnx) \
-                || fail "no text model file found in $ONNX_DIR"
-              run uv run lfm2-infer --model "$FILE" --prompt "$PROMPT" \
-                --cpu --no-stream --max-tokens "$MAX_TOKENS"
-              # Released onnxruntime-genai runs lfm2; lfm2_moe needs a newer build.
-              run uv run --with onnxruntime-genai lfm2-infer --model "$MODEL_DIR" --genai \
-                --prompt "$PROMPT" --no-stream --max-tokens "$MAX_TOKENS"
-              ;;
-            moe)
-              FILE=$(pick_file model_q4.onnx model_q4f16.onnx model_q4f32.onnx model_q8.onnx model_fp16.onnx model.onnx) \
-                || fail "no moe model file found in $ONNX_DIR"
-              run uv run lfm2-moe-infer --model "$FILE" --prompt "$PROMPT" \
-                --cpu --no-stream --max-tokens "$MAX_TOKENS"
+            text|moe)
+              CLI=lfm2-infer; [ "$FAMILY" = moe ] && CLI=lfm2-moe-infer
+              run uv run "$CLI" --model "$MODEL_DIR" --prompt "$PROMPT" \
+                --no-stream --max-tokens "$MAX_TOKENS"
               ;;
             vl)
-              # VL takes the model directory + a precision shorthand (text-only,
-              # no --images). It auto-selects CPU when no CUDA is present.
-              PREC=$(pick_precision)
-              run uv run lfm2-vl-infer --model "$MODEL_DIR" ${PREC:+--precision "$PREC"} \
-                --prompt "$PROMPT" --no-stream --max-tokens "$MAX_TOKENS"
+              run uv run lfm2-vl-infer --model "$MODEL_DIR" \
+                --images tests/test_lfm2_vl/assets/cardinal.jpg --prompt "$PROMPT" \
+                --no-stream --max-tokens "$MAX_TOKENS"
               ;;
             audio)
-              # Text mode keeps the smoke test to a plain text generation (no
-              # audio in/out). Auto-selects CPU when no CUDA is present.
-              PREC=$(pick_precision)
-              run uv run lfm2-audio-infer "$MODEL_DIR" --mode text ${PREC:+--precision "$PREC"} \
-                --prompt "$PROMPT" --max-tokens "$MAX_TOKENS"
+              run uv run lfm2-audio-infer "$MODEL_DIR" --mode asr \
+                --audio samples/audio/woodworks_question.wav --no-stream --max-tokens "$MAX_TOKENS"
+              run uv run lfm2-audio-infer "$MODEL_DIR" --mode tts --prompt "$PROMPT" \
+                --output "$RUNNER_TEMP/tts.wav" --no-stream --max-tokens "$MAX_TOKENS"
               ;;
             *) fail "unknown family '$FAMILY'" ;;
           esac

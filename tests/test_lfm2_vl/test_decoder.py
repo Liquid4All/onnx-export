@@ -82,9 +82,7 @@ def test_decoder(
     logger.info(f"  PyTorch logits: shape={pytorch_logits.shape}")
 
     onnx_embeds = embed(embeddings_sess, input_ids.numpy())
-    onnx_inputs = decoder_inputs(
-        decoder_sess, onnx_embeds, initialize_cache(decoder_sess), past_len=0
-    )
+    onnx_inputs = decoder_inputs(onnx_embeds, initialize_cache(decoder_sess), past_len=0)
     onnx_logits = decoder_sess.run(None, onnx_inputs)[0]
     logger.info(f"  ONNX logits: shape={onnx_logits.shape}")
 

@@ -19,8 +19,7 @@ Output Structure:
             └── embeddings_fp16.onnx     # fp16 table, used with every other precision
 
 genai_config.json uses the first exported precision of q4, q8, fp16, fp32; bundle() lists the
-files each precision loads. onnxruntime-genai needs the tiled vision encoder, so a conv2d export
-has no genai_config.json.
+files each precision loads.
 
 Usage:
     # Export from HuggingFace (fp32 only)
@@ -34,9 +33,6 @@ Usage:
 
     # Derive precisions from an existing fp32 export
     uv run lfm2-vl-export LiquidAI/LFM2-VL-450M --precision q8 --skip-export
-
-    # Export with conv2d vision format (instead of default tiled), for plain onnxruntime
-    uv run lfm2-vl-export LiquidAI/LFM2-VL-450M --vision-format conv2d
 """
 
 import argparse
@@ -48,9 +44,14 @@ import pathlib
 import onnx
 
 from liquidonnx.embeddings import build_embeddings, embeddings_to_fp16
-from liquidonnx.external_data import split_external_data
+from liquidonnx.export_cli import (
+    add_export_arguments,
+    finish,
+    log_step,
+    output_dir,
+    parse_precisions,
+)
 from liquidonnx.genai_builder import export_decoder
-from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.builder import LFM2VLConfig, VisionEmbedBuilder
 from liquidonnx.quantize import (
     DEFAULT_BLOCK_SIZE,
@@ -87,6 +88,11 @@ def bundle(precision: str) -> dict[str, str]:
         "vision": f"vision_encoder{suffix}.onnx",
         "embedding": "embeddings.onnx" if precision == "fp32" else "embeddings_fp16.onnx",
     }
+
+
+def genai_files(precision: str) -> dict:
+    """genai_config.json model entries that load one precision."""
+    return {name: {"filename": f"onnx/{file}"} for name, file in bundle(precision).items()}
 
 
 def convert_vision_to_fp16(input_path: pathlib.Path, output_path: pathlib.Path) -> pathlib.Path:
@@ -133,15 +139,7 @@ def convert_vision_to_fp16(input_path: pathlib.Path, output_path: pathlib.Path) 
     return output_path
 
 
-def get_model_name(model_path: str) -> str:
-    return pathlib.Path(model_path).name
-
-
-def export_vl_model(
-    model_path: str,
-    output_dir: pathlib.Path,
-    vision_input_format: str = VISION_MODE_TILED,
-):
+def export_vl_model(model_path: str, output_dir: pathlib.Path):
     """fp32 decoder, vision encoder and embedding model, plus config, processor and tokenizer."""
     import torch
     from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor
@@ -161,8 +159,8 @@ def export_vl_model(
     gc.collect()
 
     # === 1. Vision encoder (SigLIP2 + projector) ===
-    logger.info(f"Exporting vision_encoder [{vision_input_format} mode]...")
-    vision_builder = VisionEmbedBuilder(vl_config, vision_input_format=vision_input_format)
+    logger.info("Exporting vision_encoder...")
+    vision_builder = VisionEmbedBuilder(vl_config)
     vision_builder.load_weights(weights)
     save_model(vision_builder.build(), onnx_dir / "vision_encoder.onnx")
     del vision_builder
@@ -275,19 +273,19 @@ def write_genai_config(output_dir: pathlib.Path, precision: str):
         json.dumps(genai_processor_config(image_processor), indent=4)
     )
 
-    files = {k: f"onnx/{v}" for k, v in bundle(precision).items()}
+    files = genai_files(precision)
     config_path = output_dir / "genai_config.json"
     config = json.loads(config_path.read_text())
     model = config["model"]
-    model["decoder"]["filename"] = files["decoder"]
+    model["decoder"].update(files["decoder"])
     model["embedding"] = {
-        "filename": files["embedding"],
+        **files["embedding"],
         "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
         "outputs": {"inputs_embeds": "inputs_embeds"},
     }
     merge = image_processor.downsample_factor
     model["vision"] = {
-        "filename": files["vision"],
+        **files["vision"],
         "config_filename": GENAI_PROCESSOR_CONFIG,
         "patch_size": image_processor.encoder_patch_size,
         "spatial_merge_size": merge,
@@ -300,7 +298,7 @@ def write_genai_config(output_dir: pathlib.Path, precision: str):
         "outputs": {"image_features": "image_features"},
     }
     config_path.write_text(json.dumps(config, indent=4))
-    logger.info(f"genai_config.json -> {precision}: {', '.join(files.values())}")
+    logger.info(f"genai_config.json -> {precision}: {', '.join(bundle(precision).values())}")
 
 
 def main():
@@ -309,128 +307,50 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument(
-        "model",
-        help="HuggingFace model ID or local path (e.g., LiquidAI/LFM2-VL-450M)",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=pathlib.Path,
-        default=pathlib.Path("."),
-        help="Output base directory (default: current directory)",
-    )
-    parser.add_argument(
-        "--output-name",
-        type=str,
-        help="Output folder name (default: {model-name}-ONNX)",
-    )
-    parser.add_argument(
-        "--precision",
-        nargs="*",
-        metavar="PRECISION",
-        help=f"Output precisions: {', '.join(PRECISIONS)} (no value: all)",
-    )
+    add_export_arguments(parser, PRECISIONS, PRECISIONS, "LiquidAI/LFM2.5-VL-1.6B")
     parser.add_argument(
         "--skip-export",
         action="store_true",
         help="Reuse the existing fp32 graphs instead of rebuilding them",
     )
     parser.add_argument(
-        "--block-size",
-        type=int,
-        default=DEFAULT_BLOCK_SIZE,
-        help=f"Block size for quantization (default: {DEFAULT_BLOCK_SIZE})",
-    )
-    parser.add_argument(
         "--q4-asymmetric",
         action="store_true",
         help="Use asymmetric int4 for MatMul weights. Default is symmetric",
     )
-    parser.add_argument(
-        "--vision-format",
-        choices=[VISION_MODE_TILED, VISION_MODE_CONV2D],
-        default=VISION_MODE_TILED,
-        help="Vision encoder format: tiled (default) or conv2d (plain onnxruntime only)",
-    )
-    parser.add_argument(
-        "--split-data",
-        type=float,
-        default=2.0,
-        metavar="GB",
-        help="Split external data into chunks (default: 2GB per chunk)",
-    )
-    parser.add_argument(
-        "--no-split-data",
-        action="store_true",
-        help="Disable external data splitting",
-    )
-
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
 
-    precisions = [] if args.precision is None else [p.lower() for p in args.precision]
-    if args.precision == []:
-        precisions = list(PRECISIONS)
-    for p in precisions:
-        if p not in PRECISIONS:
-            parser.error(f"Invalid precision: {p}. Use {', '.join(PRECISIONS)}.")
-
-    model_name = get_model_name(args.model)
-    vision_suffix = f"-{args.vision_format}" if args.vision_format != VISION_MODE_TILED else ""
-    output_name = args.output_name or f"{model_name}-ONNX{vision_suffix}"
-    output_dir = args.output_dir / "exports" / output_name
-    onnx_dir = output_dir / "onnx"
+    precisions = parse_precisions(parser, args, PRECISIONS, PRECISIONS)
+    export_dir = output_dir(args)
+    onnx_dir = export_dir / "onnx"
 
     if args.skip_export:
         required = [onnx_dir / f for f in bundle("fp32").values()]
-        if args.vision_format == VISION_MODE_TILED:
-            required.append(output_dir / "genai_config.json")
+        required.append(export_dir / "genai_config.json")
         for path in required:
             if not path.exists():
                 parser.error(f"--skip-export needs an existing {path}")
     else:
-        logger.info("=" * 60)
-        logger.info(f"Exporting {args.model} (fp32) to {output_dir}")
-        logger.info("=" * 60)
-        export_vl_model(args.model, output_dir, args.vision_format)
+        log_step(f"Exporting {args.model} (fp32) to {export_dir}")
+        export_vl_model(args.model, export_dir)
 
     for precision in precisions:
-        logger.info("=" * 60)
-        logger.info(f"Deriving {precision}")
-        logger.info("=" * 60)
+        log_step(f"Deriving {precision}")
         derive_precision_files(
             onnx_dir, precision, block_size=args.block_size, q4_symmetric=not args.q4_asymmetric
         )
 
-    genai_config = output_dir / "genai_config.json"
-    if args.vision_format == VISION_MODE_TILED:
-        # Rebuilding fp32 makes precisions from earlier runs stale; --skip-export keeps them valid.
-        available = precisions
-        if args.skip_export:
-            available = [
-                p for p in PRECISIONS if all((onnx_dir / f).exists() for f in bundle(p).values())
-            ]
-        write_genai_config(output_dir, next((p for p in DEFAULT_ORDER if p in available), "fp32"))
-    elif genai_config.exists():
-        genai_config.unlink()
-        logger.warning("onnxruntime-genai needs the tiled vision encoder; no genai_config.json")
+    # Rebuilding fp32 makes precisions from earlier runs stale; --skip-export keeps them valid.
+    available = precisions
+    if args.skip_export:
+        available = [
+            p for p in PRECISIONS if all((onnx_dir / f).exists() for f in bundle(p).values())
+        ]
+    write_genai_config(export_dir, next((p for p in DEFAULT_ORDER if p in available), "fp32"))
 
-    if not args.no_split_data:
-        chunk_size_bytes = int(args.split_data * 1024 * 1024 * 1024)
-        for onnx_file in onnx_dir.glob("*.onnx"):
-            data_file = onnx_file.with_suffix(".onnx_data")
-            if data_file.exists() and data_file.stat().st_size > chunk_size_bytes:
-                logger.info(f"Splitting {onnx_file.name} ({args.split_data:.1f} GB chunks)")
-                split_external_data(onnx_file, chunk_size=chunk_size_bytes)
-
-    logger.info("=" * 60)
-    logger.info("Output summary")
-    logger.info("=" * 60)
-    files = ", ".join(f.name for f in sorted(onnx_dir.glob("*.onnx")))
-    total_size = sum(f.stat().st_size for f in output_dir.rglob("*") if f.is_file())
-    logger.info(f"  {output_dir} ({total_size / 1e9:.2f} GB)")
-    logger.info(f"    Files: {files}")
+    finish(args, export_dir)
 
 
 if __name__ == "__main__":

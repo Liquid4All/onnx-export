@@ -15,12 +15,8 @@ import pytest
 import torch
 from helpers import get_model_name, get_onnx_dir
 
-from liquidonnx.session import (
-    decoder_inputs,
-    get_onnx_file,
-    initialize_cache,
-    load_onnx_session,
-)
+from liquidonnx.lfm2.export import model_file
+from liquidonnx.session import decoder_inputs, initialize_cache, load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, compare_top_k, get_tolerances
 
 logger = logging.getLogger(__name__)
@@ -58,7 +54,7 @@ def test_decoder(
     logger.info(f"Testing {model_name}/{precision or 'fp32'}: '{prompt}'")
 
     onnx_dir = get_onnx_dir(exports_dir, model_id)
-    onnx_file = get_onnx_file(onnx_dir, precision)
+    onnx_file = onnx_dir / model_file(precision or "fp32")
 
     if not onnx_file.exists():
         precision_arg = f" --precision {precision}" if precision else ""
@@ -67,10 +63,7 @@ def test_decoder(
             f"Export with: uv run lfm2-moe-export {model_id}{precision_arg}"
         )
 
-    try:
-        onnx_sess = load_onnx_session(onnx_file)
-    except Exception as e:
-        pytest.skip(f"ONNX model failed to load (may need CUDA for {precision}): {e}")
+    onnx_sess = load_onnx_session(onnx_file)
 
     input_ids = tokenizer.encode(prompt, return_tensors="pt")
     seq_len = input_ids.shape[1]
@@ -87,9 +80,7 @@ def test_decoder(
         pytorch_logits = outputs.logits.numpy()
     logger.info(f"  PyTorch logits: shape={pytorch_logits.shape}")
 
-    onnx_inputs = decoder_inputs(
-        onnx_sess, input_ids.numpy(), initialize_cache(onnx_sess), past_len=0
-    )
+    onnx_inputs = decoder_inputs(input_ids.numpy(), initialize_cache(onnx_sess), past_len=0)
     onnx_logits = onnx_sess.run(None, onnx_inputs)[0]
     logger.info(f"  ONNX logits: shape={onnx_logits.shape}")
 

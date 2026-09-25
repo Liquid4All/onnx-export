@@ -15,7 +15,6 @@ import torch
 from helpers import get_model_name, get_onnx_dir
 
 from liquidonnx.embeddings import embed
-from liquidonnx.lfm2_vl.preprocessing import get_image_token_id
 from liquidonnx.session import load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, get_tolerances
 
@@ -55,7 +54,7 @@ def test_embeddings(
     session = load_onnx_session(onnx_dir / filename)
 
     # Two image placeholders mid-prompt
-    image_token_id = get_image_token_id(processor.tokenizer)
+    image_token_id = processor.tokenizer.convert_tokens_to_ids("<image>")
     text_ids = processor.tokenizer.encode(prompt)
     input_ids = np.array([text_ids[:2] + [image_token_id] * 2 + text_ids[2:]], dtype=np.int64)
     features = np.random.default_rng(0).standard_normal((2, session.get_inputs()[1].shape[1]))

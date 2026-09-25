@@ -55,7 +55,7 @@ def run_full_inference(embeddings_sess, embed_images_sess, decoder_sess, process
     image_embeds = run_embed_images(embed_images_sess, processor, image)
     inputs_embeds = embed(embeddings_sess, input_ids, image_embeds)
 
-    feed = decoder_inputs(decoder_sess, inputs_embeds, initialize_cache(decoder_sess), past_len=0)
+    feed = decoder_inputs(inputs_embeds, initialize_cache(decoder_sess), past_len=0)
     return decoder_sess.run(None, feed)[0]
 
 

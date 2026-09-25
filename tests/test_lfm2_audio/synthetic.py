@@ -1,12 +1,11 @@
 """Synthetic LFM2.5-Audio export for tests that must not download a checkpoint.
 
-Builds every artifact `LFM2AudioInference` needs - decoder, conformer encoder,
-detokenizer, depthformer, embedding binaries, mel config, tokenizer and config.json -
-from small random weights, plus the embedding models and genai_config.json of an
-onnxruntime-genai folder. The decoder comes from the genai builder, run on a checkpoint
-holding the random decoder weights. Shapes that infer.py hard-codes (8 codebooks, 2049 codebook
-vocab, depthformer dim 1024 / 6 layers / 8 KV heads, detokenizer output 1282) are kept;
-everything else is shrunk.
+Builds every artifact of an export - decoder, conformer encoder, detokenizer, depthformer,
+embedding models and binaries, mel config, tokenizer, config.json and genai_config.json - from
+small random weights. The decoder comes from the genai builder, run on a checkpoint holding the
+random decoder weights. Shapes of the published model that the pipeline and the web harness rely
+on (8 codebooks, 2049 codebook vocab, depthformer dim 1024 / 6 layers / 8 KV heads, detokenizer
+output 1282) are kept; everything else is shrunk.
 """
 
 import json
@@ -16,7 +15,7 @@ import numpy as np
 import onnx
 import scipy.io.wavfile
 from safetensors.numpy import save_file
-from tokenizers import Regex, Tokenizer, decoders, models, pre_tokenizers
+from tokenizers import Tokenizer, decoders, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
 from liquidonnx.embeddings import build_embeddings
@@ -42,7 +41,7 @@ NUM_HEADS = 8
 NUM_KV_HEADS = 4
 LAYER_TYPES = ["conv", "full_attention"]
 
-# Ids infer.py relies on (LFM2AudioInference.*_TOKEN); must match the tokenizer below
+# The LFM2.5-Audio special-token ids the export and onnxruntime-genai rely on
 SPECIAL_TOKENS = {
     "<|pad|>": 0,
     "<|startoftext|>": 1,
@@ -275,16 +274,29 @@ def build_depthformer(rng, num_layers: int = 6, input_hidden: int = HIDDEN) -> o
 # === Tokenizer ===
 
 
-def save_tokenizer(model_dir: pathlib.Path) -> None:
-    """Char-level tokenizer whose special-token ids match LFM2AudioInference."""
-    vocab = dict(SPECIAL_TOKENS)
-    for ch in map(chr, range(32, 127)):
-        vocab[ch] = char_id(ch)
-    vocab["\n"] = char_id("\n")
+def byte_level(ch: str) -> str:
+    """GPT-2's printable stand-in for an ASCII character in byte-level BPE vocabularies."""
+    code = ord(ch)
+    if 33 <= code <= 126:
+        return ch
+    # Bytes without a printable character take 256, 257, ... in byte order; below 33 that is
+    # 256 + byte.
+    return chr(256 + code)
 
-    tok = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
-    tok.pre_tokenizer = pre_tokenizers.Split(Regex(r"[\s\S]"), "isolated")
-    tok.decoder = decoders.Fuse()
+
+def save_tokenizer(model_dir: pathlib.Path) -> None:
+    """Char-level tokenizer with the LFM2.5-Audio special-token ids.
+
+    A byte-level BPE without merges, so that onnxruntime-extensions reads it too: every
+    character is one token.
+    """
+    vocab = dict(SPECIAL_TOKENS)
+    for ch in [*map(chr, range(32, 127)), "\n"]:
+        vocab[byte_level(ch)] = char_id(ch)
+
+    tok = Tokenizer(models.BPE(vocab, merges=[]))
+    tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)
+    tok.decoder = decoders.ByteLevel()
     tok.add_special_tokens(list(SPECIAL_TOKENS))
 
     PreTrainedTokenizerFast(

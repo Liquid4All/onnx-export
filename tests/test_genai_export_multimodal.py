@@ -14,17 +14,20 @@ import pathlib
 
 import numpy as np
 import onnx
+import onnxruntime_genai as og
 import pytest
 import torch
-from packaging.version import Version
+from helpers import require_genai
 from PIL import Image
 from test_lfm2_audio.synthetic import HIDDEN, build_model_dir
 from tokenizers import Regex, Tokenizer, models, pre_tokenizers
 from transformers import AutoProcessor, Lfm2VlConfig, Lfm2VlForConditionalGeneration
 
 from liquidonnx.embeddings import embed
+from liquidonnx.genai_runtime import generate, load_model
 from liquidonnx.lfm2_audio import export as audio_export
 from liquidonnx.lfm2_vl import export as vl_export
+from liquidonnx.lfm2_vl.infer import VLChat
 from liquidonnx.session import decoder_inputs, initialize_cache, load_onnx_session, update_cache
 
 IMAGE = pathlib.Path(__file__).parent / "test_lfm2_vl/assets/cardinal.jpg"
@@ -114,9 +117,7 @@ def test_vl_logits_match_pytorch(vl, precision: str):
         expected = model(**inputs).logits[0].numpy()
 
     decoder = session(output_dir, vl_export.bundle(precision)["decoder"])
-    feed = decoder_inputs(
-        decoder, vl_embeds(output_dir, precision, inputs), initialize_cache(decoder), 0
-    )
+    feed = decoder_inputs(vl_embeds(output_dir, precision, inputs), initialize_cache(decoder), 0)
     actual = decoder.run(None, feed)[0][0].astype(np.float32)
 
     assert cosine(expected, actual) >= VL_MIN_COSINE[precision]
@@ -136,13 +137,13 @@ def test_vl_cached_decode_matches_prefill(vl, precision: str):
     prompt = vl_embeds(output_dir, precision, inputs)
     extra = np.array([[5, 77, 300]], dtype=np.int64)
     full = np.concatenate([prompt, embed(embeddings, extra)], axis=1)
-    expected = decoder.run(None, decoder_inputs(decoder, full, initialize_cache(decoder), 0))[0]
+    expected = decoder.run(None, decoder_inputs(full, initialize_cache(decoder), 0))[0]
 
     cache, outputs, n = initialize_cache(decoder), decoder.get_outputs(), prompt.shape[1]
-    update_cache(cache, decoder.run(None, decoder_inputs(decoder, prompt, cache, 0)), outputs)
+    update_cache(cache, decoder.run(None, decoder_inputs(prompt, cache, 0)), outputs)
     for i in range(extra.shape[1]):
         result = decoder.run(
-            None, decoder_inputs(decoder, embed(embeddings, extra[:, i : i + 1]), cache, n + i)
+            None, decoder_inputs(embed(embeddings, extra[:, i : i + 1]), cache, n + i)
         )
         update_cache(cache, result, outputs)
         np.testing.assert_allclose(result[0][0, -1], expected[0, n + i], atol=5e-3)
@@ -169,15 +170,12 @@ def test_vl_genai_config(vl):
     assert (resize["min_pixels"], resize["max_pixels"]) == (64 * 32**2, 256 * 32**2)
 
 
-def test_vl_genai_runtime(vl):
-    """The lfm2_vl pipeline on the q4 bundle, against the same files in plain onnxruntime."""
-    og = pytest.importorskip("onnxruntime_genai")
-    version = Version(og.__version__)
-    # lfm2_vl landed after the 0.16.0 release; builds of main report 0.16.0-dev.
-    if not version.is_devrelease and version <= Version("0.16.0"):
-        pytest.skip(f"onnxruntime-genai {og.__version__} has no lfm2_vl")
+@pytest.mark.parametrize("precision", ["fp32", "q4"])
+def test_vl_genai_runtime(vl, precision: str):
+    """The lfm2_vl pipeline, loaded as the CLI does, against the same files in plain onnxruntime."""
+    require_genai("lfm2_vl")
     _, processor, output_dir = vl
-    model = og.Model(str(output_dir))
+    model = load_model(output_dir, vl_export.genai_files(precision))
 
     messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Hi"}]}]
     prompt = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
@@ -186,21 +184,39 @@ def test_vl_genai_runtime(vl):
     reference_inputs = vl_inputs(processor)
     assert genai_ids.tolist() == reference_inputs["input_ids"][0].tolist()
 
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=len(genai_ids) + 4)
-    generator = og.Generator(model, params)
-    generator.set_inputs(inputs)
-    generator.generate_next_token()
-    actual = generator.get_output("logits")[0, -1]
-    while not generator.is_done():
-        generator.generate_next_token()
+    first = []
+
+    def step(generator):
+        if not first:
+            first.append(np.asarray(generator.get_output("logits"))[0, -1])
+
+    generator = generate(model, inputs, 4, step)
     assert len(generator.get_sequence(0)) > len(genai_ids)
 
     # genai resizes the image with onnxruntime-extensions, so its pixels differ slightly.
-    decoder = session(output_dir, vl_export.bundle("q4")["decoder"])
-    embeds = vl_embeds(output_dir, "q4", reference_inputs)
-    expected = decoder.run(None, decoder_inputs(decoder, embeds, initialize_cache(decoder), 0))[0]
-    assert cosine(expected[0, -1], actual) >= 0.999
+    decoder = session(output_dir, vl_export.bundle(precision)["decoder"])
+    embeds = vl_embeds(output_dir, precision, reference_inputs)
+    expected = decoder.run(None, decoder_inputs(embeds, initialize_cache(decoder), 0))[0]
+    assert cosine(expected[0, -1], first[0]) >= 0.999
+
+
+def test_vl_chat_keeps_images(vl, monkeypatch):
+    """lfm2-vl-infer re-sends an image with every turn after the one it came with."""
+    require_genai("lfm2_vl")
+    chat = VLChat(vl[2])
+    prompts, processor = [], chat.processor
+
+    def record(prompt, images=None):
+        prompts.append(prompt)
+        return processor(prompt, images=images)
+
+    monkeypatch.setattr(chat, "processor", record)
+    chat.attach([str(IMAGE)])
+    chat.send("Hi", 4, stream=False)
+    chat.send("And now?", 4, stream=False)
+
+    assert [prompt.count("<image>") for prompt in prompts] == [1, 1]
+    assert chat.images() == [str(IMAGE)]
 
 
 def pre_tokenize(pattern: str, text: str) -> list[str]:
@@ -303,7 +319,7 @@ def test_audio_decoder_precisions_follow_fp32(audio, precision: str):
 
     def run(filename):
         decoder = session(audio, filename)
-        feed = decoder_inputs(decoder, embeds, initialize_cache(decoder), 0)
+        feed = decoder_inputs(embeds, initialize_cache(decoder), 0)
         names = [o.name for o in decoder.get_outputs()]
         result = dict(zip(names, decoder.run(None, feed), strict=True))
         return result["logits"].astype(np.float32), result["hidden_states"].astype(np.float32)
