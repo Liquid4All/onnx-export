@@ -480,8 +480,13 @@ def derive_precision(
     name: str = "model",
     block_size: int = DEFAULT_BLOCK_SIZE,
     q4_symmetric: bool = True,
+    reuse_q4: bool = False,
 ) -> pathlib.Path:
-    """Write onnx_dir/{name}_{precision}.onnx from the fp32 decoder onnx_dir/{name}.onnx."""
+    """Write onnx_dir/{name}_{precision}.onnx from the fp32 decoder onnx_dir/{name}.onnx.
+
+    reuse_q4 lets q4f16 convert {name}_q4.onnx, which the caller has just derived from the same
+    fp32 graph; otherwise q4f16 quantizes afresh.
+    """
     base = onnx_dir / f"{name}.onnx"
     output_path = onnx_dir / f"{name}_{precision}.onnx"
 
@@ -490,7 +495,7 @@ def derive_precision(
 
     if precision == "q4f16":
         q4 = onnx_dir / f"{name}_q4.onnx"
-        if q4.exists():
+        if reuse_q4:
             return convert_to_fp16(q4, output_path)
         with tempfile.TemporaryDirectory(dir=onnx_dir) as tmp:
             q4 = _quantize_decoder(

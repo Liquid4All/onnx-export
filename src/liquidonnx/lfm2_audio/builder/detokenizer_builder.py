@@ -703,7 +703,6 @@ def export_audio_detokenizer_builder(model_path: str, onnx_dir: pathlib.Path) ->
     onnx.save_model(model, str(output_path))
     logger.info(f"audio_detokenizer saved to {output_path}")
 
-    # Note: ISTFT window is generated at runtime via np.hanning() in infer.py
-    # This makes inference compatible with transformers.js which cannot load numpy files
-
+    # The inverse STFT runs outside the graph (lfm2_audio.infer.Detokenizer), with its window
+    # computed at runtime.
     return output_path

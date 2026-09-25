@@ -21,7 +21,7 @@ Output Structure:
             ├── audio_embedding.onnx       # audio codes -> decoder input (+ .bin/.json table)
             ├── vocoder_depthformer.onnx   # decoder hidden state -> frame of 8 audio codes
             ├── audio_detokenizer.onnx     # audio codes -> STFT features (outside the runtime)
-            ├── embed_tokens.bin/.json     # text embedding table for plain onnxruntime / web
+            ├── embed_tokens.bin/.json     # text embedding table for web runtimes
             └── mel_config.json
 
     fp16, q4 and q8 add {graph}_{precision}.onnx; bundle() lists what each precision loads. The
@@ -47,7 +47,13 @@ import onnx
 from onnx import TensorProto, helper
 
 from liquidonnx.embeddings import build_embeddings, embeddings_to_fp16
-from liquidonnx.external_data import split_external_data
+from liquidonnx.export_cli import (
+    add_export_arguments,
+    finish,
+    log_step,
+    output_dir,
+    parse_precisions,
+)
 from liquidonnx.genai_builder import export_decoder
 from liquidonnx.lfm2_audio.builder.config import ConformerConfig
 from liquidonnx.lfm2_audio.builder.conformer_builder import ConformerEncoderBuilder
@@ -56,7 +62,6 @@ from liquidonnx.lfm2_audio.builder.detokenizer_builder import (
     export_audio_detokenizer_builder,
 )
 from liquidonnx.quantize import (
-    DEFAULT_BLOCK_SIZE,
     convert_to_fp16,
     derive_precision,
     get_model_size,
@@ -94,10 +99,18 @@ def bundle(precision: str) -> dict[str, str]:
     }
 
 
-def get_model_name(model_path: str) -> str:
-    if "/" in model_path:
-        return model_path.split("/")[-1]
-    return pathlib.Path(model_path).name
+def genai_files(precision: str) -> dict:
+    """genai_config.json model entries that load one precision (the detokenizer runs outside)."""
+    files = {name: {"filename": f"onnx/{file}"} for name, file in bundle(precision).items()}
+    return {
+        "decoder": files["decoder"],
+        "embedding": files["embedding"],
+        "speech": files["speech"],
+        "audio_output": {
+            "depthformer": files["depthformer"],
+            "embedding": files["audio_embedding"],
+        },
+    }
 
 
 def load_audio_model_weights(model_path: str) -> dict[str, np.ndarray]:
@@ -279,8 +292,8 @@ def export_audio_embedding_binary(
 
 # === 3c. Text Embedding Export ===
 #
-# onnxruntime-genai looks up text through embeddings.onnx. The plain onnxruntime (infer.py) and
-# web paths index this raw table instead, with the same code in Python and JavaScript:
+# onnxruntime-genai looks up text through embeddings.onnx. Web runtimes, which cannot read ONNX
+# initializers, index this raw table instead:
 #   weight = load_binary("embed_tokens.bin")
 #   embedding = weight[token_id]
 
@@ -293,8 +306,6 @@ def export_embed_tokens(
     Saves embed_tokens.weight as:
     1. embed_tokens.bin - raw float32 binary (vocab_size * hidden_size * 4 bytes)
     2. embed_tokens.json - metadata (vocab_size, hidden_size, dtype)
-
-    Both Python and JavaScript load this the same way for consistency.
     """
     embed_weight = weights["lfm.embed_tokens.weight"]  # [vocab_size, hidden_size]
     vocab_size, hidden_size = embed_weight.shape
@@ -364,11 +375,11 @@ def write_genai_config(output_dir: pathlib.Path, precision: str):
         found = {name: ids.get(name) for name in SPECIAL_TOKEN_IDS}
         raise ValueError(f"tokenizer.json has {found}; the export assumes {SPECIAL_TOKEN_IDS}")
 
-    files = {k: f"onnx/{v}" for k, v in bundle(precision).items()}
+    files = genai_files(precision)
     config_path = output_dir / "genai_config.json"
     config = json.loads(config_path.read_text())
     model = config["model"]
-    model["decoder"]["filename"] = files["decoder"]
+    model["decoder"].update(files["decoder"])
     model["audio_token_id"] = AUDIO_TOKEN_ID
     eos = (
         model["eos_token_id"]
@@ -377,12 +388,12 @@ def write_genai_config(output_dir: pathlib.Path, precision: str):
     )
     model["eos_token_id"] = [t for t in eos if t not in MODALITY_SWITCH_TOKEN_IDS]
     model["embedding"] = {
-        "filename": files["embedding"],
+        **files["embedding"],
         "inputs": {"input_ids": "input_ids", "audio_features": "audio_features"},
         "outputs": {"inputs_embeds": "inputs_embeds"},
     }
     model["speech"] = {
-        "filename": files["speech"],
+        **files["speech"],
         "inputs": {
             "audio_embeds": "mel_spectrogram",
             "audio_lengths": "mel_lengths",
@@ -390,10 +401,7 @@ def write_genai_config(output_dir: pathlib.Path, precision: str):
         },
         "outputs": {"audio_features": "audio_embeddings"},
     }
-    model["audio_output"] = {
-        "depthformer": {"filename": files["depthformer"]},
-        "embedding": {"filename": files["audio_embedding"]},
-    }
+    model["audio_output"] = files["audio_output"]
     config_path.write_text(json.dumps(config, indent=4))
     logger.info(f"genai_config.json -> {precision}")
 
@@ -402,14 +410,8 @@ def write_genai_config(output_dir: pathlib.Path, precision: str):
 
 
 def save_mel_config(onnx_dir: pathlib.Path):
-    """Save mel spectrogram configuration for ASR preprocessing.
-
-    The mel filterbank and window are generated at runtime using librosa,
-    making inference compatible with transformers.js which cannot load numpy files.
-
-    Parameters match liquid_audio's AudioToMelSpectrogramPreprocessor config.
-    """
-    # Mel spectrogram parameters from LFM2.5-Audio config
+    """Mel front-end parameters of liquid-audio's AudioToMelSpectrogramPreprocessor, for web
+    runtimes (onnxruntime-genai has the same settings built in)."""
     mel_config = {
         "sample_rate": 16000,
         "n_fft": 512,
@@ -424,7 +426,6 @@ def save_mel_config(onnx_dir: pathlib.Path):
         "mel_norm": "slaney",
     }
 
-    # Save config only - filterbank and window generated at runtime via librosa
     config_path = onnx_dir / "mel_config.json"
     with open(config_path, "w") as f:
         json.dump(mel_config, f, indent=2)
@@ -469,87 +470,25 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-
-    parser.add_argument(
-        "model",
-        help="HuggingFace model ID (e.g., LiquidAI/LFM2.5-Audio-1.5B)",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=pathlib.Path,
-        default=pathlib.Path("."),
-        help="Output base directory",
-    )
-    parser.add_argument(
-        "--output-name",
-        type=str,
-        help="Output folder name (default: {model-name}-ONNX)",
-    )
-    parser.add_argument(
-        "--precision",
-        nargs="*",
-        metavar="PRECISION",
-        help=f"Output precisions: {', '.join(PRECISIONS)} (no value: all)",
-    )
-    parser.add_argument(
-        "--block-size",
-        type=int,
-        default=DEFAULT_BLOCK_SIZE,
-        help=f"Block size for quantization (default: {DEFAULT_BLOCK_SIZE})",
-    )
-    parser.add_argument(
-        "--split-data",
-        type=float,
-        default=2.0,
-        metavar="GB",
-        help="Split external data into chunks (default: 2GB per chunk)",
-    )
-
+    add_export_arguments(parser, PRECISIONS, PRECISIONS, "LiquidAI/LFM2.5-Audio-1.5B")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
 
-    precisions = [] if args.precision is None else [p.lower() for p in args.precision]
-    if args.precision == []:
-        precisions = list(PRECISIONS)
-    for p in precisions:
-        if p not in PRECISIONS:
-            parser.error(f"Invalid precision: {p}. Use {', '.join(PRECISIONS)}.")
+    precisions = parse_precisions(parser, args, PRECISIONS, PRECISIONS)
+    export_dir = output_dir(args)
+    onnx_dir = export_dir / "onnx"
 
-    model_name = get_model_name(args.model)
-    output_name = args.output_name or f"{model_name}-ONNX"
-    output_dir = args.output_dir / "exports" / output_name
-    onnx_dir = output_dir / "onnx"
-
-    logger.info("=" * 60)
-    logger.info(f"Exporting {args.model} (fp32) to {output_dir}")
-    logger.info("=" * 60)
-    export_full_model(args.model, output_dir)
+    log_step(f"Exporting {args.model} (fp32) to {export_dir}")
+    export_full_model(args.model, export_dir)
 
     for precision in precisions:
-        logger.info("=" * 60)
-        logger.info(f"Deriving {precision}")
-        logger.info("=" * 60)
+        log_step(f"Deriving {precision}")
         derive_precision_files(onnx_dir, precision, args.block_size)
 
-    write_genai_config(output_dir, next((p for p in DEFAULT_ORDER if p in precisions), "fp32"))
+    write_genai_config(export_dir, next((p for p in DEFAULT_ORDER if p in precisions), "fp32"))
 
-    chunk_size_bytes = int(args.split_data * 1024 * 1024 * 1024)
-    for onnx_file in onnx_dir.glob("*.onnx"):
-        data_file = onnx_file.with_suffix(".onnx_data")
-        if data_file.exists() and data_file.stat().st_size > chunk_size_bytes:
-            logger.info(f"Splitting {onnx_file.name}...")
-            split_external_data(onnx_file, chunk_size=chunk_size_bytes)
-
-    logger.info("=" * 60)
-    logger.info("Output summary")
-    logger.info("=" * 60)
-    total_size = 0
-    for fpath in sorted(onnx_dir.iterdir()):
-        if fpath.is_file():
-            total_size += fpath.stat().st_size
-            logger.info(f"  {fpath.name}: {fpath.stat().st_size / 1e6:.1f} MB")
-    logger.info(f"  {output_dir} ({total_size / 1e9:.2f} GB)")
+    finish(args, export_dir)
 
 
 if __name__ == "__main__":

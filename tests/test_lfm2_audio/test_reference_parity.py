@@ -23,11 +23,11 @@ from liquidonnx.lfm2_audio.builder.config import ConformerConfig
 from liquidonnx.lfm2_audio.builder.conformer_builder import ConformerEncoderBuilder
 from liquidonnx.lfm2_audio.builder.depthformer_builder import DepthformerUnifiedBuilder
 from liquidonnx.lfm2_audio.builder.detokenizer_builder import AudioDetokenizerBuilder
-from liquidonnx.lfm2_audio.export import DECODER_OPTIONS, save_mel_config
-from liquidonnx.lfm2_audio.infer import _istft_same_padding, compute_mel_spectrogram_numpy
-from liquidonnx.session import initialize_cache, update_cache
+from liquidonnx.lfm2_audio.export import DECODER_OPTIONS
+from liquidonnx.lfm2_audio.infer import Detokenizer
+from liquidonnx.session import decoder_inputs, initialize_cache, update_cache
 
-from .synthetic import write_checkpoint, write_wav
+from .synthetic import write_checkpoint
 
 liquid_audio = pytest.importorskip("liquid_audio")
 
@@ -36,9 +36,6 @@ from liquid_audio.model.conformer.encoder import (  # noqa: E402
     ConformerEncoder,
     ConformerEncoderConfig,
 )
-from liquid_audio.model.conformer.processor import (  # noqa: E402
-    AudioToMelSpectrogramPreprocessor,
-)
 from liquid_audio.model.mlp import MLP  # noqa: E402
 from liquid_audio.model.transformer import (  # noqa: E402
     MHA,
@@ -46,7 +43,6 @@ from liquid_audio.model.transformer import (  # noqa: E402
     SharedEmbedding,
     StandardBlock,
 )
-from liquid_audio.processor import PreprocessorConfig  # noqa: E402
 from transformers import Lfm2Config, Lfm2Model  # noqa: E402
 
 torch.manual_seed(0)
@@ -119,7 +115,7 @@ def onnx_greedy_frame(
     head_dim: int,
     dim: int,
 ) -> tuple[list[int], list[np.ndarray]]:
-    """LFM2AudioInference._sample_audio_codes with greedy decoding, also returning logits."""
+    """One frame of the depthformer's 8-step loop, greedy, also returning the logits."""
     past_k = np.zeros((layers, 1, kv_heads, 0, head_dim), dtype=np.float32)
     past_v = np.zeros_like(past_k)
     depth_slices = np.zeros((1, CODEBOOKS, dim), dtype=np.float32)
@@ -314,9 +310,7 @@ def test_detokenizer_matches_reference(tmp_path):
     np.testing.assert_allclose(stft, ref_stft, rtol=1e-3, atol=1e-5 * np.abs(ref_stft).max())
 
     # exp() on the log-magnitudes and the numpy-vs-torch ISTFT widen this to ~0.2%.
-    n_bins = 1280 // 2 + 1
-    complex_stft = np.exp(stft[:, :n_bins]) * np.exp(1j * stft[:, n_bins:])
-    wave = _istft_same_padding(complex_stft.T, 1280, 320, 1280, np.hanning(1280).astype(np.float32))
+    wave = Detokenizer(tmp_path / "audio_detokenizer.onnx")(codes[0].T.numpy())
 
     assert wave.shape == ref_wave.shape
     np.testing.assert_allclose(wave, ref_wave, rtol=0, atol=5e-3 * np.abs(ref_wave).max())
@@ -369,54 +363,11 @@ def test_decoder_matches_reference(tmp_path):
 
     cache = initialize_cache(sess)
     got = []
-    for embeds, total in ((prefill, 7), (step, 8)):
-        feed = {
-            "inputs_embeds": embeds.numpy(),
-            "attention_mask": np.ones((1, total), np.int64),
-            **cache,
-        }
-        result = sess.run(None, feed)
+    for embeds, past in ((prefill, 0), (step, 7)):
+        result = sess.run(None, decoder_inputs(embeds.numpy(), cache, past))
         got.append(dict(zip(outputs, result, strict=True)))
         update_cache(cache, result, sess.get_outputs())
 
     for i in range(2):
         np.testing.assert_allclose(got[i]["hidden_states"], ref_hidden[i], rtol=1e-4, atol=1e-4)
         np.testing.assert_allclose(got[i]["logits"], ref_logits[i], rtol=1e-4, atol=1e-4)
-
-
-# === Mel front-end ===
-
-
-def test_mel_spectrogram_matches_reference(tmp_path):
-    preprocessor = PreprocessorConfig(
-        sample_rate=16000,
-        normalize="per_feature",
-        window_size=0.025,
-        window_stride=0.01,
-        window="hann",
-        features=128,
-        n_fft=512,
-        log=True,
-        frame_splicing=1,
-        dither=1e-5,
-        pad_to=0,
-        pad_value=0.0,
-    )
-    ref = AudioToMelSpectrogramPreprocessor(**dataclasses.asdict(preprocessor)).eval()
-
-    wav = write_wav(tmp_path / "tone.wav", seconds=1.3)
-    save_mel_config(tmp_path)
-    mel, mel_len = compute_mel_spectrogram_numpy(str(wav), tmp_path)
-
-    import scipy.io.wavfile
-
-    sr, pcm = scipy.io.wavfile.read(wav)
-    wave = torch.from_numpy(pcm.astype(np.float32) / 32768.0)[None]
-    with torch.no_grad():
-        ref_mel, ref_len = ref(wave, torch.tensor([wave.shape[1]]))  # [1, 128, T]
-
-    # ChatState.add_audio discards the processor's returned length and feeds the encoder
-    # mel.shape[1]; get_seq_len() is one frame shorter and unused by the pipeline.
-    assert mel_len.tolist() == [ref_mel.shape[2]]
-    assert ref_len.tolist() == [ref_mel.shape[2] - 1]
-    np.testing.assert_allclose(mel[0].T, ref_mel[0].numpy(), rtol=1e-3, atol=1e-3)

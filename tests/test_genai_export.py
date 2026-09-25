@@ -11,11 +11,13 @@ Run with:
 import collections
 import json
 import pathlib
+import shutil
 
 import numpy as np
 import onnx
 import pytest
 import torch
+from helpers import require_genai
 from transformers import (
     AutoTokenizer,
     Lfm2Config,
@@ -24,10 +26,12 @@ from transformers import (
     Lfm2MoeForCausalLM,
 )
 
+from liquidonnx.compare.metrics import greedy
 from liquidonnx.genai_builder import export_decoder
-from liquidonnx.lfm2.export import ALL_PRECISIONS, set_default_decoder
+from liquidonnx.genai_runtime import generate, load_model
+from liquidonnx.lfm2.export import ALL_PRECISIONS, genai_files, model_file, set_default_decoder
 from liquidonnx.quantize import derive_precision
-from liquidonnx.session import decoder_inputs, initialize_cache, load_onnx_session, update_cache
+from liquidonnx.session import cached_outputs, decoder_inputs, initialize_cache, load_onnx_session
 
 TOKENS = np.array([[1, 5, 77, 300, 42, 9, 128, 64, 3, 250]], dtype=np.int64)
 HEAD_SIZE = 16
@@ -89,27 +93,13 @@ def export(request, tmp_path_factory):
     output_dir.mkdir()
     export_decoder(str(root / "checkpoint"), output_dir)
     for precision in ALL_PRECISIONS:
-        derive_precision(output_dir / "onnx", precision)
+        derive_precision(output_dir / "onnx", precision, reuse_q4=True)
     set_default_decoder(output_dir, list(ALL_PRECISIONS))
     return request.param, model, output_dir
 
 
-def model_file(output_dir: pathlib.Path, precision: str) -> pathlib.Path:
-    name = "model.onnx" if precision == "fp32" else f"model_{precision}.onnx"
-    return output_dir / "onnx" / name
-
-
-def run_cached(session, tokens: np.ndarray, prefill: int) -> np.ndarray:
-    """Logits at positions prefill-1 .. end: prefill in one call, then one token per call."""
-    cache, outputs = initialize_cache(session), session.get_outputs()
-    result = session.run(None, decoder_inputs(session, tokens[:, :prefill], cache, 0))
-    update_cache(cache, result, outputs)
-    rows = [result[0][0, -1]]
-    for pos in range(prefill, tokens.shape[1]):
-        result = session.run(None, decoder_inputs(session, tokens[:, pos : pos + 1], cache, pos))
-        update_cache(cache, result, outputs)
-        rows.append(result[0][0, -1])
-    return np.stack(rows).astype(np.float32)
+def decoder(output_dir: pathlib.Path, precision: str):
+    return load_onnx_session(output_dir / "onnx" / model_file(precision), ["CPUExecutionProvider"])
 
 
 @pytest.mark.parametrize("precision", ["fp32", *ALL_PRECISIONS])
@@ -118,9 +108,9 @@ def test_logits_match_pytorch(export, precision: str):
     with torch.no_grad():
         expected = model(torch.from_numpy(TOKENS)).logits[0].numpy()
 
-    session = load_onnx_session(model_file(output_dir, precision), ["CPUExecutionProvider"])
-    feed = decoder_inputs(session, TOKENS, initialize_cache(session), 0)
-    actual = session.run(None, feed)[0][0].astype(np.float32)
+    session = decoder(output_dir, precision)
+    actual = session.run(None, decoder_inputs(TOKENS, initialize_cache(session), 0))[0][0]
+    actual = actual.astype(np.float32)
 
     cosine = (expected * actual).sum() / (np.linalg.norm(expected) * np.linalg.norm(actual))
     assert cosine >= MIN_COSINE[precision]
@@ -131,19 +121,19 @@ def test_logits_match_pytorch(export, precision: str):
 @pytest.mark.parametrize("precision", ["fp32", "fp16", "q8", "q4"])
 def test_cached_decode_matches_prefill(export, precision: str):
     _, _, output_dir = export
-    session = load_onnx_session(model_file(output_dir, precision), ["CPUExecutionProvider"])
-    feed = decoder_inputs(session, TOKENS, initialize_cache(session), 0)
-    prefill = session.run(None, feed)[0][0, 3:].astype(np.float32)
+    session = decoder(output_dir, precision)
+    prefill = session.run(None, decoder_inputs(TOKENS, initialize_cache(session), 0))[0][0, 3:]
     # MatMulNBits takes different kernels for one token and for a whole prompt.
     atol = 5e-3 if precision == "q4" else 1e-3
-    np.testing.assert_allclose(run_cached(session, TOKENS, prefill=4), prefill, atol=atol)
+    np.testing.assert_allclose(cached_outputs(session, TOKENS, 4)["logits"], prefill, atol=atol)
 
 
 def test_graph_layout(export):
     kind, _, output_dir = export
 
     def ops(precision):
-        graph = onnx.load(str(model_file(output_dir, precision)), load_external_data=False).graph
+        path = output_dir / "onnx" / model_file(precision)
+        graph = onnx.load(str(path), load_external_data=False).graph
         return graph, collections.Counter(node.op_type for node in graph.node)
 
     graph, fp32_ops = ops("fp32")
@@ -183,30 +173,31 @@ def test_genai_config(export):
         assert (output_dir / name).exists()
 
 
-def test_genai_runtime_matches_onnxruntime(export):
-    og = pytest.importorskip("onnxruntime_genai")
+def test_q4f16_ignores_a_stale_q4(export, tmp_path):
+    """Without reuse_q4, q4f16 quantizes the fp32 graph instead of converting model_q4.onnx."""
+    _, _, output_dir = export
+    for path in (output_dir / "onnx").glob("model.onnx*"):
+        shutil.copy(path, tmp_path)
+    (tmp_path / "model_q4.onnx").write_bytes(b"left over from another checkpoint")
+
+    derive_precision(tmp_path, "q4f16")
+
+    def logits(path: pathlib.Path) -> np.ndarray:
+        session = load_onnx_session(path, ["CPUExecutionProvider"])
+        return session.run(None, decoder_inputs(TOKENS, initialize_cache(session), 0))[0]
+
+    expected = logits(output_dir / "onnx" / "model_q4f16.onnx")
+    np.testing.assert_array_equal(logits(tmp_path / "model_q4f16.onnx"), expected)
+
+
+@pytest.mark.parametrize("precision", ["fp32", "q4"])
+def test_genai_runtime_matches_onnxruntime(export, precision: str):
+    """Greedy answers through liquidonnx.genai_runtime (the CLIs' path) and plain onnxruntime."""
     kind, _, output_dir = export
-    try:
-        model = og.Model(str(output_dir))
-    except RuntimeError as e:
-        pytest.skip(f"onnxruntime-genai {og.__version__} cannot load {kind}: {e}")
+    require_genai("lfm2" if kind == "dense" else "lfm2_moe")
 
-    max_new = 8
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=TOKENS.shape[1] + max_new)
-    generator = og.Generator(model, params)
-    generator.append_tokens(TOKENS.astype(np.int32))
-    while not generator.is_done():
-        generator.generate_next_token()
-    genai_tokens = list(generator.get_sequence(0)[TOKENS.shape[1] :])
+    model = load_model(output_dir, genai_files(precision))
+    genai_tokens = generate(model, TOKENS[0], 8).get_sequence(0)[TOKENS.shape[1] :].tolist()
 
-    session = load_onnx_session(output_dir / "onnx/model_q4.onnx", ["CPUExecutionProvider"])
-    cache, outputs = initialize_cache(session), session.get_outputs()
-    tokens, past, ort_tokens = TOKENS, 0, []
-    for _ in range(len(genai_tokens)):
-        result = session.run(None, decoder_inputs(session, tokens, cache, past))
-        update_cache(cache, result, outputs)
-        past += tokens.shape[1]
-        ort_tokens.append(int(result[0][0, -1].argmax()))
-        tokens = np.array([[ort_tokens[-1]]], dtype=np.int64)
-    assert genai_tokens == ort_tokens
+    session = decoder(output_dir, precision)
+    assert genai_tokens == greedy(session, TOKENS[0], len(genai_tokens), eos=set())

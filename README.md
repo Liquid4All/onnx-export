@@ -22,7 +22,7 @@ ONNX export and inference tools for [LFM2](https://www.liquid.ai/liquid-foundati
 | **LFM2.5-8B-A1B**, **LFM2-8B-A1B** | fp32, fp16, q4, q4f16, q8 |
 | **LFM2.5-Audio** | fp32, fp16, q4, q8 |
 
-Every export is an [onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai) model folder. The decoders come from the onnxruntime-genai model builder; this repository builds the vision encoder, the audio graphs and the embedding models that splice image or audio features into the token embeddings, and derives every precision. The exports are not loadable by Transformers.js.
+Every export is an [onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai) model folder, and the inference CLIs run on onnxruntime-genai. The decoders come from the onnxruntime-genai model builder; this repository builds the vision encoder, the audio graphs and the embedding models that splice image or audio features into the token embeddings, and derives every precision. The exports are not loadable by Transformers.js.
 
 
 ## 2. Installation
@@ -32,11 +32,19 @@ git clone https://github.com/Liquid4All/onnx-export.git
 cd onnx-export
 uv sync
 
-# For GPU inference support
-uv sync --extra gpu
-
-# For development (testing, benchmarking)
+# For development (testing, benchmarking, lfm2-compare audio)
 uv sync --extra dev
+```
+
+`uv sync` installs onnxruntime-genai 0.16, which runs the LFM2 text models. The MoE, VL and audio pipelines (`lfm2_moe`, `lfm2_vl`, `lfm2_audio`) are in onnxruntime-genai `main` ([#2575](https://github.com/microsoft/onnxruntime-genai/pull/2575), [#2571](https://github.com/microsoft/onnxruntime-genai/pull/2571), [#2601](https://github.com/microsoft/onnxruntime-genai/pull/2601)) but not yet in a release. Until then, build it at the commit the model builder is pinned to and put its Python package first on the path:
+
+```bash
+git clone https://github.com/microsoft/onnxruntime-genai.git && cd onnxruntime-genai
+git checkout $(uv run --project ../onnx-export python -c "from liquidonnx.genai_builder import GENAI_COMMIT; print(GENAI_COMMIT)")
+uv pip install --python ../onnx-export/.venv/bin/python pip  # the build packages a wheel with pip
+../onnx-export/.venv/bin/python build.py --config Release --parallel --skip_tests \
+    --cmake_extra_defines ENABLE_TESTS=OFF
+export PYTHONPATH=$PWD/build/Linux/Release/wheel  # build/macOS/Release/wheel on macOS
 ```
 
 ## 3. Export
@@ -74,9 +82,6 @@ The first export fetches the onnxruntime-genai model builder at a pinned commit 
 ```bash
 # All precisions (fp16, q4, q8)
 uv run lfm2-vl-export LiquidAI/LFM2.5-VL-1.6B --precision
-
-# Conv2d vision format (alternative to default tiled), for plain onnxruntime only
-uv run lfm2-vl-export LiquidAI/LFM2.5-VL-1.6B --vision-format conv2d
 ```
 
 Output:
@@ -93,7 +98,7 @@ exports/LFM2.5-VL-1.6B-ONNX/
     └── embeddings_fp16.onnx     # fp16 table, used with fp16, q4 and q8
 ```
 
-onnxruntime-genai resizes each image once instead of tiling it, as the upstream processor does with `do_image_splitting=False`. The image preprocessing follows the checkpoint's own processor (bilinear for LFM2.5-VL-450M/1.6B, bicubic for the others). A conv2d export has no `genai_config.json`, because onnxruntime-genai needs the tiled encoder.
+onnxruntime-genai resizes each image once instead of tiling it, as the upstream processor does with `do_image_splitting=False`. The image preprocessing follows the checkpoint's own processor (bilinear for LFM2.5-VL-450M/1.6B, bicubic for the others).
 
 ### 3.3 LFM2-MoE Mixture of Experts
 
@@ -127,37 +132,28 @@ exports/LFM2.5-Audio-1.5B-ONNX/
     ├── audio_embedding.onnx     # audio codes -> decoder input
     ├── vocoder_depthformer.onnx # decoder hidden state -> frame of 8 audio codes
     ├── audio_detokenizer.onnx   # audio codes -> STFT features, run after generation
-    └── ...                      # {graph}_{fp16,q4,q8}.onnx, embed_tokens.bin, mel_config.json
+    └── ...                      # {graph}_{fp16,q4,q8}.onnx; embed_tokens.bin, mel_config.json for web runtimes
 ```
 
 The q4 and q8 configs keep the depthformer and audio embedding at fp16, because a quantized depthformer changes most audio codes.
 
 ## 4. Inference
 
-All inference commands provide interactive multi-turn chat with streaming output. They automatically detect CUDA availability and fall back to CPU if needed.
+The inference CLIs run the export folder on onnxruntime-genai, with interactive multi-turn chat and streaming output. They load the precision `genai_config.json` points at; `--precision` picks another one, and `--ep cuda` runs on CUDA (needs `onnxruntime-genai-cuda`).
 
 ### 4.1 Text Generation
 
 ```bash
-# Interactive chat with the precision genai_config.json points at
+# Interactive chat
 uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX
 
-# A specific precision
-uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx
-
-# Single prompt (non-interactive)
-uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx \
+# A specific precision, starting with a prompt
+uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX --precision q8 \
     --prompt "Explain quantum computing"
 
-# Force CPU execution
-uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx --cpu
-
-# Run through onnxruntime-genai instead of plain onnxruntime (always CPU; --cpu has no effect)
-uv pip install onnxruntime-genai
-uv run lfm2-infer --model ./exports/LFM2.5-1.2B-Instruct-ONNX --genai
+# Load, prefill and decode speed
+uv run lfm2-bench --model ./exports/LFM2.5-1.2B-Instruct-ONNX --max-tokens 50
 ```
-
-> **Note:** onnxruntime-genai 0.16 runs the text models. The MoE, VL and audio model types (`lfm2_moe`, `lfm2_vl`, `lfm2_audio`) need a build that includes [#2575](https://github.com/microsoft/onnxruntime-genai/pull/2575), [#2571](https://github.com/microsoft/onnxruntime-genai/pull/2571) and [#2601](https://github.com/microsoft/onnxruntime-genai/pull/2601).
 
 > **Note:** Batched inputs to the decoders must be right-padded: GroupQueryAttention takes each row's length from the attention mask sum.
 
@@ -169,63 +165,52 @@ uv run lfm2-vl-infer --model ./exports/LFM2.5-VL-1.6B-ONNX \
     --images photo.jpg \
     --prompt "What do you see in this image?"
 
-# Multi-image comparison (up to 2 images)
+# Multi-image comparison
 uv run lfm2-vl-infer --model ./exports/LFM2.5-VL-1.6B-ONNX \
     --images image1.jpg image2.jpg \
     --prompt "Compare these two images"
 
-# Text-only (no images)
-uv run lfm2-vl-infer --model ./exports/LFM2.5-VL-1.6B-ONNX \
+# Text-only, fp16
+uv run lfm2-vl-infer --model ./exports/LFM2.5-VL-1.6B-ONNX --precision fp16 \
     --prompt "Hello, how are you?"
 ```
 
-> **Note:** VL inference requires the model directory path (not a single .onnx file) since it loads multiple components: `embeddings.onnx`, `vision_encoder.onnx` and `decoder.onnx`. Use `--precision` to select fp16, q4 or q8.
+In the chat, `images <path> [<path> ...]` attaches images to the next message; they stay in the conversation for later turns.
 
 ### 4.3 MoE
 
 ```bash
-# Interactive chat
-uv run lfm2-moe-infer --model ./exports/LFM2.5-8B-A1B-ONNX/onnx/model_q4.onnx
-
-# Force CPU (when model does not fit VRAM)
-uv run lfm2-moe-infer --model ./exports/LFM2.5-8B-A1B-ONNX/onnx/model_q4.onnx --cpu
-
-# Through onnxruntime-genai
-uv run lfm2-moe-infer --model ./exports/LFM2.5-8B-A1B-ONNX --genai
+uv run lfm2-moe-infer --model ./exports/LFM2.5-8B-A1B-ONNX
+uv run lfm2-moe-infer --model ./exports/LFM2.5-8B-A1B-ONNX --precision q8 --prompt "Hello"
 ```
 
 ### 4.4 Audio (ASR, TTS, Interleaved)
 
-LFM2.5-Audio is a multimodal audio-language model supporting three modes:
-- **ASR** (Automatic Speech Recognition): Transcribe audio to text
-- **TTS** (Text-to-Speech): Generate audio from text
-- **Interleaved**: Mixed text and audio input/output for conversational audio
+LFM2.5-Audio has four modes, picked with `--mode`:
+- **text** (default): chat without a system prompt
+- **asr**: transcribe audio to text
+- **tts**: generate speech from text
+- **interleaved**: answer a spoken or typed question with text and speech
 
-Plain onnxruntime inference uses 5 ONNX components:
-- `decoder.onnx` - LFM2 language model backbone
-- `audio_encoder.onnx` - Conformer encoder for ASR input
-- `audio_embedding.onnx` - Audio code embeddings for TTS/interleaved
-- `audio_detokenizer.onnx` - Converts audio codes to STFT features
-- `vocoder_depthformer.onnx` - Autoregressive audio codebook prediction
+onnxruntime-genai runs the speech encoder, the decoder and the depthformer and returns the audio codes; `audio_detokenizer.onnx` and an inverse STFT turn them into a 24 kHz WAV. Text is decoded greedily, as in liquid-audio, and the audio codes are sampled with the model card's settings (`--audio-temperature`, `--audio-top-k` and `--seed` change them).
 
 ```bash
 # ASR: Transcribe audio to text
-uv run lfm2-audio-infer LFM2.5-Audio-1.5B-ONNX --mode asr \
-    --audio input.wav --precision q4
+uv run lfm2-audio-infer ./exports/LFM2.5-Audio-1.5B-ONNX --mode asr --audio input.wav
 
 # TTS: Generate speech from text
-uv run lfm2-audio-infer LFM2.5-Audio-1.5B-ONNX --mode tts \
+uv run lfm2-audio-infer ./exports/LFM2.5-Audio-1.5B-ONNX --mode tts \
     --prompt "Hello, how are you today?" \
     --system "Perform TTS. Use the UK female voice." \
-    --output output.wav --precision q4
+    --output output.wav
 
-# Interleaved: Audio input with text+audio response
-uv run lfm2-audio-infer LFM2.5-Audio-1.5B-ONNX --mode interleaved \
-    --audio question.wav --output response.wav --precision q4
+# Interleaved: Audio input with text+audio response, at q8
+uv run lfm2-audio-infer ./exports/LFM2.5-Audio-1.5B-ONNX --mode interleaved \
+    --audio question.wav --output response.wav --precision q8
 
-# Interactive chat mode (multi-turn with stateful KV cache)
-uv run lfm2-audio-infer LFM2.5-Audio-1.5B-ONNX --mode interleaved --chat \
-    --output output.wav --precision q4
+# Interactive multi-turn chat (each turn re-sends the conversation, earlier answers as text)
+uv run lfm2-audio-infer ./exports/LFM2.5-Audio-1.5B-ONNX --mode interleaved --chat \
+    --output output.wav
 # Commands in chat mode:
 #   /audio <file> [text] - Send audio with optional text
 #   <text>               - Send text message
@@ -233,11 +218,9 @@ uv run lfm2-audio-infer LFM2.5-Audio-1.5B-ONNX --mode interleaved --chat \
 #   quit                 - Exit
 ```
 
-> **Note:** Audio inference requires the model directory path (not a single .onnx file) since it loads multiple components. Use `--precision` to select quantization level (fp16, q4, q8).
-
 ## 5. Testing
 
-Tests verify ONNX exports against PyTorch reference models.
+Tests verify ONNX exports against the PyTorch reference models. Tests that run a pipeline on onnxruntime-genai skip when the installed build does not have its model type.
 
 ```bash
 # Install dev dependencies
@@ -246,6 +229,7 @@ uv sync --extra dev
 # Export pipelines on tiny random checkpoints (no model download)
 uv run pytest tests/test_genai_export.py -v
 uv run pytest tests/test_genai_export_multimodal.py -v
+uv run pytest tests/test_lfm2_audio/test_modes_synthetic.py tests/test_lfm2_audio/test_reference_parity.py -v
 
 # LFM2 text model tests
 uv run pytest tests/test_lfm2/test_decoder.py -v -k "q4"
@@ -257,13 +241,19 @@ uv run pytest tests/test_lfm2_vl/test_vision_encoder.py -v
 # LFM2-MoE tests
 uv run pytest tests/test_lfm2_moe/test_decoder.py -v
 uv run pytest tests/test_lfm2_moe/test_tokenizer.py -v
+
+# LFM2.5-Audio tests
+uv run pytest tests/test_lfm2_audio/test_asr.py -v -k "q4"
 ```
 
-Benchmarking, compare the CPU
+### 5.1 Comparing an export with its reference model
+
+`lfm2-compare` scores every precision of an export folder against the PyTorch model (liquid-audio for audio): teacher-forced KL of the decoder over the reference's greedy answers, greedy answers on plain onnxruntime and on onnxruntime-genai, and for VL the vision encoder and embedding model. It writes a JSON file and a markdown table.
+
 ```bash
-# Text model benchmark
-uv run lfm2-bench --model LiquidAI/LFM2.5-1.2B-Instruct \
-    --onnx ./exports/LFM2.5-1.2B-Instruct-ONNX/onnx/model_q4.onnx
+uv run lfm2-compare text --model LiquidAI/LFM2.5-1.2B-Instruct --export ./exports/LFM2.5-1.2B-Instruct-ONNX
+uv run lfm2-compare vl --model LiquidAI/LFM2.5-VL-1.6B --export ./exports/LFM2.5-VL-1.6B-ONNX
+uv run lfm2-compare audio --model LiquidAI/LFM2.5-Audio-1.5B --export ./exports/LFM2.5-Audio-1.5B-ONNX
 ```
 
 ## 6. Pre-exported Models
