@@ -36,14 +36,16 @@ uv sync
 uv sync --extra dev
 ```
 
-`uv sync` installs onnxruntime-genai 0.16, which runs the LFM2 text models. The MoE, VL and audio pipelines (`lfm2_moe`, `lfm2_vl`, `lfm2_audio`) are in onnxruntime-genai `main` ([#2575](https://github.com/microsoft/onnxruntime-genai/pull/2575), [#2571](https://github.com/microsoft/onnxruntime-genai/pull/2571), [#2601](https://github.com/microsoft/onnxruntime-genai/pull/2601)) but not yet in a release. Until then, build it at the commit the model builder is pinned to and put its Python package first on the path:
+This repository tracks onnxruntime-genai `main`. The model builder runs at a pinned commit of `main` (`liquidonnx.genai_builder.GENAI_COMMIT`), and the inference CLIs and tests expect the runtime built from that same commit. `uv sync` installs the 0.16 release, which runs only the LFM2 text models; the MoE, VL and audio pipelines (`lfm2_moe`, `lfm2_vl`, `lfm2_audio`) are only on `main`. Build it and put its Python package first on the path:
 
 ```bash
 git clone https://github.com/microsoft/onnxruntime-genai.git && cd onnxruntime-genai
 git checkout $(uv run --project ../onnx-export python -c "from liquidonnx.genai_builder import GENAI_COMMIT; print(GENAI_COMMIT)")
 uv pip install --python ../onnx-export/.venv/bin/python pip  # the build packages a wheel with pip
-../onnx-export/.venv/bin/python build.py --config Release --parallel --skip_tests \
-    --cmake_extra_defines ENABLE_TESTS=OFF
+# On Apple silicon, append CMAKE_OSX_ARCHITECTURES=arm64 to --cmake_extra_defines
+# (build.py --parallel would start every compile at once; the variable caps it at the core count)
+CMAKE_BUILD_PARALLEL_LEVEL=$(getconf _NPROCESSORS_ONLN) ../onnx-export/.venv/bin/python build.py \
+    --config Release --skip_tests --skip_examples --no_telemetry --cmake_extra_defines ENABLE_TESTS=OFF
 export PYTHONPATH=$PWD/build/Linux/Release/wheel  # build/macOS/Release/wheel on macOS
 ```
 

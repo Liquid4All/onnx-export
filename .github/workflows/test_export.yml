@@ -19,9 +19,9 @@ name: Test Export
 #   * push to main / PRs against main that touch export code (default model)
 #   * manual dispatch (pick the model, family, and precision)
 #
-# Released onnxruntime-genai runs the text models only; for the moe, vl and audio
-# families the job builds onnxruntime-genai at the commit the model builder is
-# pinned to (liquidonnx.genai_builder.GENAI_COMMIT), cached per commit and onnxruntime version.
+# liquidonnx tracks onnxruntime-genai main: the job builds onnxruntime-genai at the
+# commit the model builder is pinned to (liquidonnx.genai_builder.GENAI_COMMIT), cached
+# per commit and onnxruntime version, and runs every family on it.
 #
 # Large checkpoints may exceed the runner's disk/RAM — keep to a small model
 # (the defaults export in a few minutes). CPU inference on a hosted runner is
@@ -91,7 +91,6 @@ jobs:
 
       - name: Resolve the onnxruntime-genai commit and onnxruntime version
         id: genai
-        if: (inputs.family || 'text') != 'text'
         run: |
           commit=$(uv run python -c 'from liquidonnx.genai_builder import GENAI_COMMIT; print(GENAI_COMMIT)')
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
@@ -100,7 +99,6 @@ jobs:
 
       - name: Restore the onnxruntime-genai build
         id: genai-cache
-        if: steps.genai.outputs.commit
         uses: actions/cache@v4
         with:
           path: genai-python
@@ -108,9 +106,10 @@ jobs:
 
       # The build leaves an importable Python package in build/Linux/Release/wheel (packaging
       # the wheel itself needs pip). It runs on the onnxruntime from uv.lock, so it is built
-      # against that release's headers.
+      # against that release's headers. build.py --parallel means an unbounded make -j, which
+      # runs the runner out of memory; CMAKE_BUILD_PARALLEL_LEVEL caps it at the core count.
       - name: Build onnxruntime-genai
-        if: steps.genai.outputs.commit && steps.genai-cache.outputs.cache-hit != 'true'
+        if: steps.genai-cache.outputs.cache-hit != 'true'
         env:
           COMMIT: ${{ steps.genai.outputs.commit }}
           ORT: ${{ steps.genai.outputs.ort }}
@@ -122,13 +121,12 @@ jobs:
           git -C genai-src checkout -q FETCH_HEAD
           uv pip install pip
           cd genai-src
-          "$GITHUB_WORKSPACE/.venv/bin/python" build.py --config Release --parallel \
-            --skip_tests --skip_examples --cmake_extra_defines ENABLE_TESTS=OFF \
+          CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) "$GITHUB_WORKSPACE/.venv/bin/python" build.py --config Release \
+            --skip_tests --skip_examples --no_telemetry --cmake_extra_defines ENABLE_TESTS=OFF \
             --ort_home "$GITHUB_WORKSPACE/onnxruntime-linux-x64-$ORT"
           mv build/Linux/Release/wheel "$GITHUB_WORKSPACE/genai-python"
 
       - name: Use the onnxruntime-genai build
-        if: steps.genai.outputs.commit
         run: |
           echo "PYTHONPATH=$GITHUB_WORKSPACE/genai-python" >> "$GITHUB_ENV"
           PYTHONPATH="$GITHUB_WORKSPACE/genai-python" uv run python -c \
