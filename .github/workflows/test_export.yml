@@ -75,7 +75,7 @@ jobs:
     outputs:
       inference_passed: ${{ steps.infer.outputs.inference_passed }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       # ONNX exports (fp32 base + quantized copies) are large; reclaim the disk
       # the GitHub image spends on toolchains this job doesn't use.
@@ -101,7 +101,7 @@ jobs:
       - name: Restore the onnxruntime-genai build
         id: genai-cache
         if: steps.genai.outputs.commit
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: genai-python
           key: onnxruntime-genai-${{ runner.os }}-${{ steps.genai.outputs.commit }}-ort${{ steps.genai.outputs.ort }}
