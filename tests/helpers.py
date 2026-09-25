@@ -1,32 +1,15 @@
 """Shared test utilities."""
 
+import logging
 import pathlib
 
+import numpy as np
+import onnxruntime_genai as og
 import pytest
+from packaging.version import Version
+from PIL import Image
 
-# === LFM2 Model Mappings ===
-
-# HuggingFace model ID -> onnx-community repo
-COMMUNITY_MODELS = {
-    "LiquidAI/LFM2-350M": "onnx-community/LFM2-350M-ONNX",
-    "LiquidAI/LFM2-700M": "onnx-community/LFM2-700M-ONNX",
-    "LiquidAI/LFM2-1.2B": "onnx-community/LFM2-1.2B-ONNX",
-    "LiquidAI/LFM2-2.6B": "onnx-community/LFM2-2.6B-ONNX",
-}
-
-# === LFM2-MoE Model Mappings ===
-
-COMMUNITY_MOE_MODELS = {
-    "LiquidAI/LFM2-8B-A1B": "onnx-community/LFM2-8B-A1B-ONNX",
-}
-
-# === LFM2-VL Model Mappings ===
-
-COMMUNITY_VL_MODELS = {
-    "LiquidAI/LFM2-VL-450M": "onnx-community/LFM2-VL-450M-ONNX",
-    "LiquidAI/LFM2-VL-1.6B": "onnx-community/LFM2-VL-1.6B-ONNX",
-    "LiquidAI/LFM2-VL-3B": "onnx-community/LFM2-VL-3B-ONNX",
-}
+logger = logging.getLogger(__name__)
 
 
 def get_model_name(model_id: str) -> str:
@@ -34,198 +17,122 @@ def get_model_name(model_id: str) -> str:
     return model_id.split("/")[-1]
 
 
-def get_community_model_id(model_id: str) -> str | None:
-    """Get onnx-community HF repo for a model, or None if not available."""
-    return COMMUNITY_MODELS.get(model_id)
+def get_export_dir(exports_dir: pathlib.Path, model_id: str) -> pathlib.Path:
+    return exports_dir / f"{get_model_name(model_id)}-ONNX"
 
 
 def get_onnx_dir(exports_dir: pathlib.Path, model_id: str) -> pathlib.Path:
-    """Get ONNX directory for a model."""
-    model_name = get_model_name(model_id)
-    return exports_dir / f"{model_name}-ONNX" / "onnx"
+    return get_export_dir(exports_dir, model_id) / "onnx"
 
 
-def skip_if_missing(path: pathlib.Path, reason: str = "File not found"):
-    """Skip test if path doesn't exist."""
-    if not path.exists():
-        pytest.skip(f"{reason}: {path}")
+def require_genai(model_type: str):
+    """Skip unless the installed onnxruntime-genai runs model_type.
 
-
-def get_community_onnx_dir(community_dir: pathlib.Path, model_id: str) -> pathlib.Path:
-    """Get onnx-community model directory for a HF model ID."""
-    model_name = get_model_name(model_id)
-    return community_dir / f"{model_name}-ONNX" / "onnx"
-
-
-def get_community_onnx_file(onnx_dir: pathlib.Path, precision: str | None) -> pathlib.Path:
-    """Get onnx-community model file."""
-    if precision is None:
-        return onnx_dir / "model.onnx"
-    return onnx_dir / f"model_{precision}.onnx"
-
-
-def download_community_onnx(model_id: str, precision: str | None) -> pathlib.Path | None:
-    """Download community ONNX file from HuggingFace if available.
-
-    Returns path to downloaded file, or None if not found.
+    0.16.0 runs lfm2 only; lfm2_moe, lfm2_vl and lfm2_audio landed after it, and builds of main
+    report 0.16.0-dev.
     """
-    from huggingface_hub import hf_hub_download, list_repo_files
-    from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
-
-    community_id = get_community_model_id(model_id)
-    if not community_id:
-        return None
-
-    filename = "model.onnx" if precision is None else f"model_{precision}.onnx"
-    onnx_path = f"onnx/{filename}"
-
-    try:
-        local_path = hf_hub_download(repo_id=community_id, filename=onnx_path)
-    except (EntryNotFoundError, RepositoryNotFoundError):
-        return None
-
-    # Download all associated data files (model.onnx_data, model.onnx_data_1, etc.)
-    repo_files = list_repo_files(repo_id=community_id)
-    data_files = [f for f in repo_files if f.startswith(f"{onnx_path}_data")]
-    for data_file in data_files:
-        hf_hub_download(repo_id=community_id, filename=data_file)
-
-    return pathlib.Path(local_path)
+    version = Version(og.__version__)
+    if model_type != "lfm2" and not version.is_devrelease and version <= Version("0.16.0"):
+        pytest.skip(f"onnxruntime-genai {og.__version__} has no {model_type}")
 
 
-def get_community_moe_model_id(model_id: str) -> str | None:
-    """Get onnx-community HF repo for a MoE model, or None if not available."""
-    return COMMUNITY_MOE_MODELS.get(model_id)
+def generate_with_logits(model, inputs, max_new_tokens: int) -> tuple[list[int], np.ndarray]:
+    """Greedy answer through onnxruntime-genai (stop token included, as transformers does) and
+    the logits that chose each token."""
+    from liquidonnx.genai_runtime import generate
+
+    tokens, logits = [], []
+
+    def step(generator):
+        tokens.append(int(generator.get_next_tokens()[0]))
+        logits.append(np.asarray(generator.get_output("logits"))[0, -1].astype(np.float32))
+
+    generate(model, inputs, max_new_tokens, step)
+    return tokens, np.stack(logits)
 
 
-def download_community_moe_onnx(model_id: str, precision: str | None) -> pathlib.Path | None:
-    """Download community MoE ONNX file from HuggingFace if available.
+def generate_pytorch(model, inputs: dict, max_new_tokens: int) -> tuple[list[int], np.ndarray]:
+    """Greedy answer of a transformers model and the logits that chose each token."""
+    import torch
 
-    Returns path to downloaded file, or None if not found.
+    with torch.no_grad():
+        output = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            return_dict_in_generate=True,
+            output_logits=True,
+        )
+    tokens = output.sequences[0, inputs["input_ids"].shape[1] :].tolist()
+    return tokens, np.stack([step[0].float().numpy() for step in output.logits])
+
+
+def generate_pytorch_cached(model, input_ids: list[int], max_new_tokens: int, eos: int):
+    """Greedy answer of a transformers causal LM, one cached step at a time, and its logits.
+
+    Unlike generate(), the steps match the ONNX decoder's; for LFM2-MoE, generate()'s expert
+    routing drifts from a plain forward pass.
     """
-    from huggingface_hub import hf_hub_download, list_repo_files
-    from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
+    import torch
 
-    community_id = get_community_moe_model_id(model_id)
-    if not community_id:
-        return None
-
-    filename = "model.onnx" if precision is None else f"model_{precision}.onnx"
-    onnx_path = f"onnx/{filename}"
-
-    try:
-        local_path = hf_hub_download(repo_id=community_id, filename=onnx_path)
-    except (EntryNotFoundError, RepositoryNotFoundError):
-        return None
-
-    # Download all associated data files (model.onnx_data, model.onnx_data_1, etc.)
-    repo_files = list_repo_files(repo_id=community_id)
-    data_files = [f for f in repo_files if f.startswith(f"{onnx_path}_data")]
-    for data_file in data_files:
-        hf_hub_download(repo_id=community_id, filename=data_file)
-
-    return pathlib.Path(local_path)
-
-
-def get_community_vl_onnx_dir(community_dir: pathlib.Path, size: str) -> pathlib.Path:
-    """Get onnx-community VL model directory."""
-    return community_dir / f"LFM2-VL-{size}-ONNX" / "onnx"
+    tokens, logits, past = [], [], None
+    ids = torch.tensor([input_ids])
+    with torch.no_grad():
+        for _ in range(max_new_tokens):
+            length = len(input_ids) + len(tokens)
+            output = model(
+                input_ids=ids,
+                attention_mask=torch.ones(1, length, dtype=torch.long),
+                position_ids=torch.arange(length - ids.shape[1], length)[None],
+                past_key_values=past,
+                use_cache=True,
+            )
+            past = output.past_key_values
+            logits.append(output.logits[0, -1].float().numpy())
+            tokens.append(int(logits[-1].argmax()))
+            if tokens[-1] == eos:
+                break
+            ids = torch.tensor([[tokens[-1]]])
+    return tokens, np.stack(logits)
 
 
-def get_community_vl_files(
-    onnx_dir: pathlib.Path, use_fp16: bool = False
-) -> dict[str, pathlib.Path]:
-    """Get onnx-community VL model files.
+def text_coherence(model, tokenizer, genai_model, prompts: list[str], max_new_tokens: int) -> float:
+    """Mean logit cosine of a multi-turn chat; each side answers its own conversation."""
+    from liquidonnx.verify import compare_logits_similarity
 
-    Community VL models use different naming:
-    - embed_tokens.onnx / embed_tokens_fp16.onnx
-    - vision_encoder.onnx / vision_encoder_fp16.onnx
-    - decoder_model_merged.onnx / decoder_model_merged_fp16.onnx
-    """
-    suffix = "_fp16" if use_fp16 else ""
-    return {
-        "embed_tokens": onnx_dir / f"embed_tokens{suffix}.onnx",
-        "vision_encoder": onnx_dir / f"vision_encoder{suffix}.onnx",
-        "decoder": onnx_dir / f"decoder_model_merged{suffix}.onnx",
-    }
-
-
-def get_local_vl_files(onnx_dir: pathlib.Path, use_fp16: bool = False) -> dict[str, pathlib.Path]:
-    """Get local VL model files.
-
-    Local VL models use:
-    - embed_tokens.onnx / embed_tokens_fp16.onnx
-    - vision_encoder.onnx / vision_encoder_fp16.onnx
-    - decoder_model_merged.onnx / decoder_model_merged_fp16.onnx
-    """
-    suffix = "_fp16" if use_fp16 else ""
-    return {
-        "embed_tokens": onnx_dir / f"embed_tokens{suffix}.onnx",
-        "vision_encoder": onnx_dir / f"vision_encoder{suffix}.onnx",
-        "decoder": onnx_dir / f"decoder_model_merged{suffix}.onnx",
-    }
+    conversations = {"pytorch": [], "genai": []}
+    similarities = []
+    for turn, prompt in enumerate(prompts, 1):
+        answers = {}
+        for side, messages in conversations.items():
+            messages.append({"role": "user", "content": prompt})
+            text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            ids = tokenizer.encode(text, add_special_tokens=False)
+            if side == "pytorch":
+                answers[side] = generate_pytorch_cached(
+                    model, ids, max_new_tokens, tokenizer.eos_token_id
+                )
+            else:
+                answers[side] = generate_with_logits(genai_model, np.array(ids), max_new_tokens)
+            tokens = answers[side][0]
+            messages.append(
+                {"role": "assistant", "content": tokenizer.decode(tokens, skip_special_tokens=True)}
+            )
+        similarities.append(compare_logits_similarity(answers["pytorch"][1], answers["genai"][1]))
+        logger.info(f"  Turn {turn}: similarity={similarities[-1]:.4f}")
+        for side, messages in conversations.items():
+            logger.info(f"    {side}: {messages[-1]['content'][:80]}")
+    return float(np.mean(similarities))
 
 
-def get_community_vl_model_id(model_id: str) -> str | None:
-    """Get onnx-community HF repo for a VL model, or None if not available."""
-    return COMMUNITY_VL_MODELS.get(model_id)
-
-
-def download_community_vl_onnx(
-    model_id: str, component: str, use_fp16: bool = False
-) -> pathlib.Path | None:
-    """Download community VL ONNX component from HuggingFace if available.
-
-    Args:
-        model_id: HuggingFace model ID (e.g., 'LiquidAI/LFM2-VL-450M')
-        component: One of 'embed_tokens', 'vision_encoder', 'decoder'
-        use_fp16: Whether to download fp16 version
-
-    Returns path to downloaded file, or None if not found.
-    """
-    from huggingface_hub import hf_hub_download, list_repo_files
-    from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
-
-    community_id = get_community_vl_model_id(model_id)
-    if not community_id:
-        return None
-
-    # Community uses different naming for decoder
-    if component == "decoder":
-        base_name = "decoder_model_merged"
-    else:
-        base_name = component
-
-    suffix = "_fp16" if use_fp16 else ""
-    filename = f"{base_name}{suffix}.onnx"
-    onnx_path = f"onnx/{filename}"
-
-    try:
-        local_path = hf_hub_download(repo_id=community_id, filename=onnx_path)
-    except (EntryNotFoundError, RepositoryNotFoundError):
-        return None
-
-    # Download all associated data files
-    repo_files = list_repo_files(repo_id=community_id)
-    data_files = [f for f in repo_files if f.startswith(f"{onnx_path}_data")]
-    for data_file in data_files:
-        hf_hub_download(repo_id=community_id, filename=data_file)
-
-    return pathlib.Path(local_path)
-
-
-def get_community_moe_onnx_dir(community_dir: pathlib.Path, size: str) -> pathlib.Path:
-    """Get onnx-community MoE model directory."""
-    return community_dir / f"LFM2-{size}-ONNX" / "onnx"
-
-
-def get_community_moe_onnx_file(onnx_dir: pathlib.Path, precision: str | None) -> pathlib.Path:
-    """Get onnx-community MoE model file.
-
-    Args:
-        onnx_dir: ONNX directory
-        precision: None for fp32, "fp16", "q4", "q4f16"
-    """
-    if precision is None:
-        return onnx_dir / "model.onnx"
-    return onnx_dir / f"model_{precision}.onnx"
+def pad_to_square(image: Image.Image) -> Image.Image:
+    """Pad image to square with black borders, centered."""
+    w, h = image.size
+    if w == h:
+        return image
+    size = max(w, h)
+    square = Image.new("RGB", (size, size), (0, 0, 0))
+    square.paste(image, ((size - w) // 2, (size - h) // 2))
+    return square

@@ -11,7 +11,6 @@ import onnx
 from onnx import TensorProto, helper
 
 from liquidonnx.builder_base import ONNXBuilderBase
-from liquidonnx.lfm2_vl import VISION_MODE_CONV2D, VISION_MODE_TILED
 from liquidonnx.lfm2_vl.builder.config import LFM2VLConfig
 
 logger = logging.getLogger(__name__)
@@ -26,7 +25,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
     - MLP projector with pixel unshuffle
 
     Graph structure:
-        pixel_values [B, N, 768] or [B, 3, H, W]
+        pixel_values [B, N, 768]
             ↓
         ┌─────────────────────────────────────┐
         │  Patch Embedding                    │
@@ -47,31 +46,17 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         └─────────────────────────────────────┘
             ↓
         image_embeddings [B, N/4, text_hidden]
-
-    Supports two input formats:
-    - "tiled": [batch, num_patches, 768] pre-extracted patches (HuggingFace style)
-    - "conv2d": [batch, 3, H, W] raw image pixels (llama.cpp style)
     """
 
-    def __init__(
-        self,
-        config: LFM2VLConfig,
-        vision_input_format: str = VISION_MODE_TILED,
-    ):
-        """
-        Args:
-            config: Model configuration
-            vision_input_format: "tiled" for [B, N, 768] or "conv2d" for [B, 3, H, W]
-        """
+    def __init__(self, config: LFM2VLConfig):
         super().__init__()
         self.config = config
         self.vision_config = config.vision_config
         self.head_dim = config.vision_config.hidden_size // config.vision_config.num_attention_heads
-        self.vision_input_format = vision_input_format
 
         # Projector dimensions
         self.vision_hidden = config.vision_config.hidden_size
-        self.text_hidden = config.text_config.hidden_size
+        self.text_hidden = config.text_hidden_size
         self.proj_hidden = config.projector_hidden_size
         self.downsample = config.downsample_factor
 
@@ -495,87 +480,45 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         return output_name
 
     def build_inputs(self):
-        """Create model inputs based on vision_input_format."""
-        if self.vision_input_format == VISION_MODE_CONV2D:
-            # Conv2d mode: raw image input [batch, channels, height, width]
-            # Simpler preprocessing (just resize + normalize), like llama.cpp
-            self.inputs.append(
-                helper.make_tensor_value_info(
-                    "pixel_values",
-                    TensorProto.FLOAT,
-                    ["batch_size", self.vision_config.num_channels, "height", "width"],
-                )
+        """Create model inputs: pre-extracted patches [batch, num_patches, patch_dim]."""
+        patch_dim = (
+            self.vision_config.num_channels
+            * self.vision_config.patch_size
+            * self.vision_config.patch_size
+        )
+        self.inputs.append(
+            helper.make_tensor_value_info(
+                "pixel_values", TensorProto.FLOAT, ["batch_size", "num_patches", patch_dim]
             )
-            # Spatial dimensions after n_merge (for projector reshape)
-            # spatial_h = height / patch_size / n_merge
-            # spatial_w = width / patch_size / n_merge
-            self.inputs.append(
-                helper.make_tensor_value_info(
-                    "spatial_h",
-                    TensorProto.INT64,
-                    [],  # scalar
-                )
-            )
-            self.inputs.append(
-                helper.make_tensor_value_info(
-                    "spatial_w",
-                    TensorProto.INT64,
-                    [],  # scalar
-                )
-            )
-        else:
-            # Tiled mode: pre-extracted patches [batch, num_patches, patch_dim]
-            # Requires complex preprocessing (tiling, patch extraction)
-            patch_dim = (
-                self.vision_config.num_channels
-                * self.vision_config.patch_size
-                * self.vision_config.patch_size
-            )
-            self.inputs.append(
-                helper.make_tensor_value_info(
-                    "pixel_values", TensorProto.FLOAT, ["batch_size", "num_patches", patch_dim]
-                )
-            )
+        )
 
-            # pixel_attention_mask: 1=valid, 0=padded (matches onnx-community naming)
-            self.inputs.append(
-                helper.make_tensor_value_info(
-                    "pixel_attention_mask", TensorProto.INT64, ["batch_size", "num_patches"]
-                )
+        # pixel_attention_mask: 1=valid, 0=padded (matches onnx-community naming)
+        self.inputs.append(
+            helper.make_tensor_value_info(
+                "pixel_attention_mask", TensorProto.INT64, ["batch_size", "num_patches"]
             )
+        )
 
-            # spatial_shapes: [batch_size, 2] with (height, width) in patch units
-            # Allows non-square images (matches community ONNX and PyTorch)
-            self.inputs.append(
-                helper.make_tensor_value_info(
-                    "spatial_shapes", TensorProto.INT64, ["batch_size", 2]
-                )
-            )
+        # spatial_shapes: [batch_size, 2] with (height, width) in patch units
+        # Allows non-square images (matches community ONNX and PyTorch)
+        self.inputs.append(
+            helper.make_tensor_value_info("spatial_shapes", TensorProto.INT64, ["batch_size", 2])
+        )
 
     def build_outputs(self):
         """Create model outputs."""
-        if self.vision_input_format == VISION_MODE_TILED:
-            # Tiled mode: 2D output after Compress [total_tokens, hidden]
-            # Supports different-sized images in same batch (tokens concatenated)
-            self.outputs.append(
-                helper.make_tensor_value_info(
-                    "image_features",
-                    TensorProto.FLOAT,
-                    ["num_image_tokens", self.text_hidden],
-                )
+        # 2D output after Compress [total_tokens, hidden]
+        # Supports different-sized images in same batch (tokens concatenated)
+        self.outputs.append(
+            helper.make_tensor_value_info(
+                "image_features",
+                TensorProto.FLOAT,
+                ["num_image_tokens", self.text_hidden],
             )
-        else:
-            # Conv2d mode: 3D output [batch, num_image_tokens, hidden]
-            self.outputs.append(
-                helper.make_tensor_value_info(
-                    "image_features",
-                    TensorProto.FLOAT,
-                    ["batch_size", "num_image_tokens", self.text_hidden],
-                )
-            )
+        )
 
     def build_attention_mask(self):
-        """Build attention mask preprocessing for tiled mode.
+        """Build attention mask preprocessing.
 
         Converts pixel_attention_mask to additive attention bias:
             - Input: 1=valid, 0=padded [B, N] int64
@@ -584,9 +527,6 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         Matches the community ONNX approach which uses attention_bias (6th input)
         to MultiHeadAttention rather than key_padding_mask (5th input).
         """
-        if self.vision_input_format != VISION_MODE_TILED:
-            return
-
         p = "/model/attn_mask_reformat_full"
         num_heads = self.vision_config.num_attention_heads
 
@@ -657,8 +597,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 ↓
             ┌─────────────────────────────────────┐
             │  Patch Projection                   │
-            │  Conv2d: [B,3,H,W] → Conv2d(16,16)  │
-            │  Tiled:  [B,N,768] → Linear         │
+            │  [B,N,768] → Linear                 │
             └─────────────────────────────────────┘
                 ↓
             patch_embeds [B, N, hidden]
@@ -676,319 +615,193 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             patch_embeddings [B, N, hidden]
 
         Position embeddings are stored as 16x16 learned embeddings and bilinearly
-        interpolated to match the input spatial size (sqrt(N) x sqrt(N) for tiled,
-        H/P x W/P for conv2d where P=patch_size).
+        interpolated to match the input spatial size.
         """
         # Community naming: model.embeddings.patch_embedding
         pytorch_prefix = "vision_model.embeddings.patch_embedding"
         H = self.vision_config.hidden_size
-        P = self.vision_config.patch_size
-        C = self.vision_config.num_channels
 
         linear_weight = self.weights[f"{pytorch_prefix}.weight"]
         linear_bias = self.weights[f"{pytorch_prefix}.bias"]
 
-        if self.vision_input_format == VISION_MODE_CONV2D:
-            # === Conv2d mode ===
-            # Reshape Linear weights to Conv2d format
-            # Linear: [hidden_size, C*P*P] → Conv2d: [hidden_size, C, P, P]
-            # Linear weight is [out_features, in_features] = [768, 768]
-            # The original model flattens patches as HWC (P*P*C = 16*16*3 = 768)
-            # So we first reshape to [H, P, P, C] then transpose to [H, C, P, P]
-            # This matches the GGUF converter: view(H, 16, 16, 3).permute(0, 3, 1, 2)
-            conv_weight = linear_weight.reshape(H, P, P, C).transpose(0, 3, 1, 2)  # [H, C, P, P]
-            self.add_initializer("model.embeddings.patch_embedding.Conv.weight", conv_weight)
-            self.add_initializer("model.embeddings.patch_embedding.Conv.bias", linear_bias)
+        self.add_initializer(
+            "model.embeddings.patch_embedding.MatMul.weight", linear_weight.T
+        )  # Transpose for MatMul
+        self.add_initializer("model.embeddings.patch_embedding.Add.bias", linear_bias)
 
-            # Conv2d: [B, C, H, W] -> [B, hidden, H/P, W/P]
-            conv_out = self.make_node(
-                "Conv",
-                [
-                    "pixel_values",
-                    "model.embeddings.patch_embedding.Conv.weight",
-                    "model.embeddings.patch_embedding.Conv.bias",
-                ],
-                ["/model/embeddings/patch_embedding/Conv/output_0"],
-                kernel_shape=[P, P],
-                strides=[P, P],
-                pads=[0, 0, 0, 0],
-            )
-
-            # [B, H, h, w] → [B, h, w, H] → [B, N, H]
-            transposed = self.make_node(
-                "Transpose",
-                [conv_out],
-                ["/model/embeddings/patch_embedding/Transpose/output_0"],
-                perm=[0, 2, 3, 1],
-            )
-            patch_embeds = self.make_node(
-                "Reshape",
-                [transposed, self.get_constant("INT64", [0, -1, H])],
-                ["/model/embeddings/patch_embedding/Reshape/output_0"],
-            )
-        else:
-            # === Tiled mode ===
-            # Linear projection (original)
-            self.add_initializer(
-                "model.embeddings.patch_embedding.MatMul.weight", linear_weight.T
-            )  # Transpose for MatMul
-            self.add_initializer("model.embeddings.patch_embedding.Add.bias", linear_bias)
-
-            # MatMul: [B, N, patch_dim] x [patch_dim, H] -> [B, N, H]
-            matmul_out = self.make_node(
-                "MatMul",
-                ["pixel_values", "model.embeddings.patch_embedding.MatMul.weight"],
-                ["/model/embeddings/patch_embedding/MatMul/output_0"],
-            )
-            patch_embeds = self.make_node(
-                "Add",
-                [matmul_out, "model.embeddings.patch_embedding.Add.bias"],
-                ["/model/embeddings/patch_embedding/Add/output_0"],
-            )
-
+        # MatMul: [B, N, patch_dim] x [patch_dim, H] -> [B, N, H]
+        matmul_out = self.make_node(
+            "MatMul",
+            ["pixel_values", "model.embeddings.patch_embedding.MatMul.weight"],
+            ["/model/embeddings/patch_embedding/MatMul/output_0"],
+        )
+        patch_embeds = self.make_node(
+            "Add",
+            [matmul_out, "model.embeddings.patch_embedding.Add.bias"],
+            ["/model/embeddings/patch_embedding/Add/output_0"],
+        )
         # === Position embeddings ===
         pe = "/model/embeddings/pos_embed"
         input_shape = self.make_node("Shape", ["pixel_values"], [f"{pe}/input_shape/output_0"])
 
-        if self.vision_input_format == VISION_MODE_CONV2D:
-            # Conv2d mode: use Resize (simpler, matches llama.cpp style)
-            pos_emb_prefix = "vision_model.embeddings.position_embedding"
-            pos_emb_weight = self.weights[f"{pos_emb_prefix}.weight"]
-            pos_emb_4d = pos_emb_weight.reshape(16, 16, H).transpose(2, 0, 1)
-            pos_emb_4d = pos_emb_4d[np.newaxis, ...]
-            self.add_initializer(f"{pe}/base_weight", pos_emb_4d)
+        # === Position embedding interpolation ===
+        # Strategy: Size position embeddings for the largest image in the batch,
+        # then filter/slice for each image. This trades memory (unused positions
+        # for smaller images) for simplicity (single Resize op instead of per-image).
+        # The Compress operator later removes padding tokens, so extra positions
+        # don't affect the final output.
+        pe = "/model/embeddings/pos_embed"
+        spatial_h, spatial_w = self._extract_max_spatial_dims(pe)
 
-            n_merge = self.downsample
-            self.add_initializer(f"{pe}/n_merge", np.array(n_merge, dtype=np.int64))
+        # Use Resize for position embedding interpolation
+        pos_emb_prefix = "vision_model.embeddings.position_embedding"
+        pos_emb_weight = self.weights[f"{pos_emb_prefix}.weight"]
+        pos_emb_4d = pos_emb_weight.reshape(16, 16, H).transpose(2, 0, 1)
+        pos_emb_4d = pos_emb_4d[np.newaxis, ...]  # [1, H, 16, 16]
+        self.add_initializer(f"{pe}/base_weight", pos_emb_4d)
 
-            axes_0 = self.get_constant("INT64", [0])
-            pre_merge_h = self.make_node(
-                "Mul", ["spatial_h", f"{pe}/n_merge"], [f"{pe}/pre_merge_h/output_0"]
-            )
-            pre_merge_w = self.make_node(
-                "Mul", ["spatial_w", f"{pe}/n_merge"], [f"{pe}/pre_merge_w/output_0"]
-            )
+        axes_0 = self.get_constant("INT64", [0])
+        spatial_h_unsq = self.make_node("Unsqueeze", [spatial_h, axes_0], [f"{pe}/h_unsq/output_0"])
+        spatial_w_unsq = self.make_node("Unsqueeze", [spatial_w, axes_0], [f"{pe}/w_unsq/output_0"])
 
-            spatial_h_unsq = self.make_node(
-                "Unsqueeze", [pre_merge_h, axes_0], [f"{pe}/h_unsq/output_0"]
-            )
-            spatial_w_unsq = self.make_node(
-                "Unsqueeze", [pre_merge_w, axes_0], [f"{pe}/w_unsq/output_0"]
-            )
+        sizes = self.make_node(
+            "Concat",
+            [
+                self.get_constant("INT64", [1]),
+                self.get_constant("INT64", [H]),
+                spatial_h_unsq,
+                spatial_w_unsq,
+            ],
+            [f"{pe}/sizes/output_0"],
+            axis=0,
+        )
 
-            sizes = self.make_node(
-                "Concat",
-                [
-                    self.get_constant("INT64", [1]),
-                    self.get_constant("INT64", [H]),
-                    spatial_h_unsq,
-                    spatial_w_unsq,
-                ],
-                [f"{pe}/sizes/output_0"],
-                axis=0,
-            )
+        self.add_initializer(f"{pe}/empty_roi", np.array([], dtype=np.float32))
+        resized = self.make_node(
+            "Resize",
+            [f"{pe}/base_weight", f"{pe}/empty_roi", "", sizes],
+            [f"{pe}/resized/output_0"],
+            mode="linear",
+            coordinate_transformation_mode="half_pixel",
+        )
 
-            self.add_initializer(f"{pe}/empty_roi", np.array([], dtype=np.float32))
-            resized = self.make_node(
-                "Resize",
-                [f"{pe}/base_weight", f"{pe}/empty_roi", "", sizes],
-                [f"{pe}/resized/output_0"],
-                mode="linear",
-                coordinate_transformation_mode="half_pixel",
-            )
+        transposed = self.make_node(
+            "Transpose", [resized], [f"{pe}/transposed/output_0"], perm=[0, 2, 3, 1]
+        )
+        pos_emb_final = self.make_node(
+            "Reshape",
+            [transposed, self.get_constant("INT64", [1, -1, H])],
+            [f"{pe}/final/output_0"],
+        )
 
-            transposed = self.make_node(
-                "Transpose", [resized], [f"{pe}/transposed/output_0"], perm=[0, 2, 3, 1]
-            )
-            pos_emb_final = self.make_node(
-                "Reshape",
-                [transposed, self.get_constant("INT64", [1, -1, H])],
-                [f"{pe}/final/output_0"],
-            )
+        # Get batch size and num_patches from input shape
+        batch_size = self.make_node(
+            "Gather",
+            [input_shape, self.get_constant("INT64", 0)],
+            [f"{pe}/batch_size/output_0"],
+            axis=0,
+        )
+        num_patches = self.make_node(
+            "Gather",
+            [input_shape, self.get_constant("INT64", 1)],
+            [f"{pe}/num_patches/output_0"],
+            axis=0,
+        )
 
-            # Get batch size for tiling
-            batch_size = self.make_node(
-                "Gather",
-                [input_shape, self.get_constant("INT64", 0)],
-                [f"{pe}/batch_size/output_0"],
-                axis=0,
-            )
-            batch_unsq = self.make_node(
-                "Unsqueeze", [batch_size, axes_0], [f"{pe}/batch_unsq/output_0"]
-            )
-            tile_repeats = self.make_node(
-                "Concat",
-                [batch_unsq, self.get_constant("INT64", [1, 1])],
-                [f"{pe}/tile_repeats/output_0"],
-                axis=0,
-            )
-            pos_emb_tiled = self.make_node(
-                "Tile", [pos_emb_final, tile_repeats], [f"{pe}/tiled/output_0"]
-            )
-        else:
-            # === Position embedding interpolation (tiled mode) ===
-            # Strategy: Size position embeddings for the largest image in the batch,
-            # then filter/slice for each image. This trades memory (unused positions
-            # for smaller images) for simplicity (single Resize op instead of per-image).
-            # The Compress operator later removes padding tokens, so extra positions
-            # don't affect the final output.
-            pe = "/model/embeddings/pos_embed"
-            spatial_h, spatial_w = self._extract_max_spatial_dims(pe)
+        # Handle padding (input may have more patches than H*W)
+        # Fill padded positions with first token's position embedding
+        first_token = self.make_node(
+            "Slice",
+            [
+                pos_emb_final,
+                self.get_constant("INT64", [0]),
+                self.get_constant("INT64", [1]),
+                self.get_constant("INT64", [1]),
+            ],
+            [f"{pe}/padding/slice_first_token/output_0"],
+        )
 
-            # Use Resize for position embedding interpolation
-            pos_emb_prefix = "vision_model.embeddings.position_embedding"
-            pos_emb_weight = self.weights[f"{pos_emb_prefix}.weight"]
-            pos_emb_4d = pos_emb_weight.reshape(16, 16, H).transpose(2, 0, 1)
-            pos_emb_4d = pos_emb_4d[np.newaxis, ...]  # [1, H, 16, 16]
-            self.add_initializer(f"{pe}/base_weight", pos_emb_4d)
+        actual_num_patches = self.make_node(
+            "Mul", [spatial_h, spatial_w], [f"{pe}/padding/actual_num_patches/output_0"]
+        )
 
-            axes_0 = self.get_constant("INT64", [0])
-            spatial_h_unsq = self.make_node(
-                "Unsqueeze", [spatial_h, axes_0], [f"{pe}/h_unsq/output_0"]
-            )
-            spatial_w_unsq = self.make_node(
-                "Unsqueeze", [spatial_w, axes_0], [f"{pe}/w_unsq/output_0"]
-            )
+        indices = self.make_node(
+            "Range",
+            [
+                self.get_constant("INT64", 0),
+                num_patches,
+                self.get_constant("INT64", 1),
+            ],
+            [f"{pe}/padding/indices/output_0"],
+        )
 
-            sizes = self.make_node(
-                "Concat",
-                [
-                    self.get_constant("INT64", [1]),
-                    self.get_constant("INT64", [H]),
-                    spatial_h_unsq,
-                    spatial_w_unsq,
-                ],
-                [f"{pe}/sizes/output_0"],
-                axis=0,
-            )
+        # Valid mask: indices < actual_num_patches
+        is_valid = self.make_node(
+            "Less", [indices, actual_num_patches], [f"{pe}/padding/is_valid_mask/output_0"]
+        )
+        is_valid_3d = self.make_node(
+            "Unsqueeze",
+            [is_valid, self.get_constant("INT64", [0, 2])],
+            [f"{pe}/padding/unsqueeze_mask/output_0"],
+        )
 
-            self.add_initializer(f"{pe}/empty_roi", np.array([], dtype=np.float32))
-            resized = self.make_node(
-                "Resize",
-                [f"{pe}/base_weight", f"{pe}/empty_roi", "", sizes],
-                [f"{pe}/resized/output_0"],
-                mode="linear",
-                coordinate_transformation_mode="half_pixel",
-            )
+        num_patches_unsq = self.make_node(
+            "Unsqueeze", [num_patches, axes_0], [f"{pe}/padding/num_patches_unsq/output_0"]
+        )
+        expand_shape = self.make_node(
+            "Concat",
+            [
+                self.get_constant("INT64", [1]),
+                num_patches_unsq,
+                self.get_constant("INT64", [H]),
+            ],
+            [f"{pe}/padding/expand_shape/output_0"],
+            axis=0,
+        )
+        first_token_expanded = self.make_node(
+            "Expand",
+            [first_token, expand_shape],
+            [f"{pe}/padding/first_token_expanded/output_0"],
+        )
 
-            transposed = self.make_node(
-                "Transpose", [resized], [f"{pe}/transposed/output_0"], perm=[0, 2, 3, 1]
-            )
-            pos_emb_final = self.make_node(
-                "Reshape",
-                [transposed, self.get_constant("INT64", [1, -1, H])],
-                [f"{pe}/final/output_0"],
-            )
+        padding_size = self.make_node(
+            "Sub", [num_patches, actual_num_patches], [f"{pe}/padding/padding_size/output_0"]
+        )
+        padding_size_unsq = self.make_node(
+            "Unsqueeze", [padding_size, axes_0], [f"{pe}/padding/padding_size_unsq/output_0"]
+        )
+        pads = self.make_node(
+            "Concat",
+            [
+                self.get_constant("INT64", [0, 0, 0, 0]),
+                padding_size_unsq,
+                self.get_constant("INT64", [0]),
+            ],
+            [f"{pe}/padding/pads/output_0"],
+            axis=0,
+        )
+        pos_emb_padded = self.make_node(
+            "Pad", [pos_emb_final, pads], [f"{pe}/padding/padded/output_0"], mode="constant"
+        )
 
-            # Get batch size and num_patches from input shape
-            batch_size = self.make_node(
-                "Gather",
-                [input_shape, self.get_constant("INT64", 0)],
-                [f"{pe}/batch_size/output_0"],
-                axis=0,
-            )
-            num_patches = self.make_node(
-                "Gather",
-                [input_shape, self.get_constant("INT64", 1)],
-                [f"{pe}/num_patches/output_0"],
-                axis=0,
-            )
+        pos_emb_with_padding = self.make_node(
+            "Where",
+            [is_valid_3d, pos_emb_padded, first_token_expanded],
+            [f"{pe}/padding/with_padding/output_0"],
+        )
 
-            # Handle padding (input may have more patches than H*W)
-            # Fill padded positions with first token's position embedding
-            first_token = self.make_node(
-                "Slice",
-                [
-                    pos_emb_final,
-                    self.get_constant("INT64", [0]),
-                    self.get_constant("INT64", [1]),
-                    self.get_constant("INT64", [1]),
-                ],
-                [f"{pe}/padding/slice_first_token/output_0"],
-            )
-
-            actual_num_patches = self.make_node(
-                "Mul", [spatial_h, spatial_w], [f"{pe}/padding/actual_num_patches/output_0"]
-            )
-
-            indices = self.make_node(
-                "Range",
-                [
-                    self.get_constant("INT64", 0),
-                    num_patches,
-                    self.get_constant("INT64", 1),
-                ],
-                [f"{pe}/padding/indices/output_0"],
-            )
-
-            # Valid mask: indices < actual_num_patches
-            is_valid = self.make_node(
-                "Less", [indices, actual_num_patches], [f"{pe}/padding/is_valid_mask/output_0"]
-            )
-            is_valid_3d = self.make_node(
-                "Unsqueeze",
-                [is_valid, self.get_constant("INT64", [0, 2])],
-                [f"{pe}/padding/unsqueeze_mask/output_0"],
-            )
-
-            num_patches_unsq = self.make_node(
-                "Unsqueeze", [num_patches, axes_0], [f"{pe}/padding/num_patches_unsq/output_0"]
-            )
-            expand_shape = self.make_node(
-                "Concat",
-                [
-                    self.get_constant("INT64", [1]),
-                    num_patches_unsq,
-                    self.get_constant("INT64", [H]),
-                ],
-                [f"{pe}/padding/expand_shape/output_0"],
-                axis=0,
-            )
-            first_token_expanded = self.make_node(
-                "Expand",
-                [first_token, expand_shape],
-                [f"{pe}/padding/first_token_expanded/output_0"],
-            )
-
-            padding_size = self.make_node(
-                "Sub", [num_patches, actual_num_patches], [f"{pe}/padding/padding_size/output_0"]
-            )
-            padding_size_unsq = self.make_node(
-                "Unsqueeze", [padding_size, axes_0], [f"{pe}/padding/padding_size_unsq/output_0"]
-            )
-            pads = self.make_node(
-                "Concat",
-                [
-                    self.get_constant("INT64", [0, 0, 0, 0]),
-                    padding_size_unsq,
-                    self.get_constant("INT64", [0]),
-                ],
-                [f"{pe}/padding/pads/output_0"],
-                axis=0,
-            )
-            pos_emb_padded = self.make_node(
-                "Pad", [pos_emb_final, pads], [f"{pe}/padding/padded/output_0"], mode="constant"
-            )
-
-            pos_emb_with_padding = self.make_node(
-                "Where",
-                [is_valid_3d, pos_emb_padded, first_token_expanded],
-                [f"{pe}/padding/with_padding/output_0"],
-            )
-
-            batch_unsq = self.make_node(
-                "Unsqueeze", [batch_size, axes_0], [f"{pe}/batch_unsq/output_0"]
-            )
-            tile_repeats = self.make_node(
-                "Concat",
-                [batch_unsq, self.get_constant("INT64", [1, 1])],
-                [f"{pe}/tile_repeats/output_0"],
-                axis=0,
-            )
-            pos_emb_tiled = self.make_node(
-                "Tile", [pos_emb_with_padding, tile_repeats], [f"{pe}/tiled/output_0"]
-            )
-
+        batch_unsq = self.make_node(
+            "Unsqueeze", [batch_size, axes_0], [f"{pe}/batch_unsq/output_0"]
+        )
+        tile_repeats = self.make_node(
+            "Concat",
+            [batch_unsq, self.get_constant("INT64", [1, 1])],
+            [f"{pe}/tile_repeats/output_0"],
+            axis=0,
+        )
+        pos_emb_tiled = self.make_node(
+            "Tile", [pos_emb_with_padding, tile_repeats], [f"{pe}/tiled/output_0"]
+        )
         return self.make_node(
             "Add", [patch_embeds, pos_emb_tiled], ["/model/embeddings/Add/output_0"]
         )
@@ -1153,14 +966,9 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         # Fused MultiHeadAttention (com.microsoft)
         # Inputs: query, key, value, bias, key_padding_mask, attention_bias, past_key, past_value
         # attention_bias: 4D additive mask [B, num_heads, N, N] with 0=valid, -inf=masked
-        attn_bias = (
-            "/model/attn_mask_reformat_full/Expand/output_0"
-            if self.vision_input_format == VISION_MODE_TILED
-            else ""
-        )
         attn_out_reshaped = self.make_node(
             "MultiHeadAttention",
-            [q, k, v, "", "", attn_bias, "", ""],
+            [q, k, v, "", "", "/model/attn_mask_reformat_full/Expand/output_0", "", ""],
             [f"{layer}/attn/MultiHeadAttention/output_0"],
             domain="com.microsoft",
             num_heads=nh,
@@ -1235,7 +1043,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
     def build_projector(self, vision_embeddings: str) -> str:
         """Build the MLP projector with pixel unshuffle.
 
-        For tiled mode with variable spatial shapes, uses ScatterND canvas approach:
+        For variable spatial shapes, uses ScatterND canvas approach:
             1. Split spatial_shapes into per-batch h and w
             2. Compute aligned max dims (rounded to even for pixel unshuffle)
             3. Build grid indices (batch, y, x) for each patch
@@ -1248,7 +1056,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             vision_embeddings [B, N, C]
                 ↓
             ┌─────────────────────────────────────┐
-            │  ScatterND Canvas (tiled mode)      │
+            │  ScatterND Canvas                   │
             │  [B, N, C] → [B, aligned_H, aligned_W, C] │
             └─────────────────────────────────────┘
                 ↓
@@ -1320,81 +1128,44 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             axis=0,
         )
 
-        if self.vision_input_format == VISION_MODE_CONV2D:
-            # Conv2d mode: use passed spatial dimensions
-            n_merge = self.downsample
-            self.add_initializer(f"{p}/n_merge", np.array(n_merge, dtype=np.int64))
+        # === ScatterND canvas ===
+        # This supports variable spatial shapes per batch element
 
-            pre_merge_h = self.make_node(
-                "Mul", ["spatial_h", f"{p}/n_merge"], [f"{p}/pre_merge_h/output_0"]
-            )
-            pre_merge_w = self.make_node(
-                "Mul", ["spatial_w", f"{p}/n_merge"], [f"{p}/pre_merge_w/output_0"]
-            )
+        # Split spatial_shapes into h and w per batch
+        h_per_batch, w_per_batch = self._split_spatial_shapes(p)
 
-            reshape_4d_shape = self.make_node(
-                "Concat",
-                [
-                    self.make_node("Unsqueeze", [batch_size, axes_0], [f"{p}/batch_unsq/output_0"]),
-                    self.make_node(
-                        "Unsqueeze", [pre_merge_h, axes_0], [f"{p}/spatial_h_unsq/output_0"]
-                    ),
-                    self.make_node(
-                        "Unsqueeze", [pre_merge_w, axes_0], [f"{p}/spatial_w_unsq/output_0"]
-                    ),
-                    self.get_constant("INT64", [C]),
-                ],
-                [f"{p}/reshape_4d_shape/output_0"],
-                axis=0,
-            )
+        # Compute aligned max dims (rounded to even for pixel unshuffle)
+        aligned_h, aligned_w = self._compute_aligned_max_dims(h_per_batch, w_per_batch, p)
 
-            hidden_4d = self.make_node(
-                "Reshape", [vision_embeddings, reshape_4d_shape], [f"{p}/hidden_4d/output_0"]
-            )
+        # Build grid indices (batch, y, x) for each patch
+        grid_indices = self._build_grid_indices(
+            batch_size, num_patches, h_per_batch, w_per_batch, f"{p}/grid"
+        )
 
-            spatial_h_name = pre_merge_h
-            half_spatial_h_name = "spatial_h"
-            half_spatial_w_name = "spatial_w"
-        else:
-            # === Tiled mode: ScatterND canvas approach ===
-            # This supports variable spatial shapes per batch element
+        # Cast pixel_attention_mask to bool for ScatterND
+        mask_bool = self.make_node(
+            "Cast", ["pixel_attention_mask"], [f"{p}/mask_bool/output_0"], to=TensorProto.BOOL
+        )
 
-            # Split spatial_shapes into h and w per batch
-            h_per_batch, w_per_batch = self._split_spatial_shapes(p)
+        # ScatterND: place features into canvas [B, aligned_h, aligned_w, C]
+        hidden_4d = self._build_scatter_canvas(
+            vision_embeddings,
+            grid_indices,
+            mask_bool,
+            batch_size,
+            aligned_h,
+            aligned_w,
+            C,
+            f"{p}/scatter",
+        )
 
-            # Compute aligned max dims (rounded to even for pixel unshuffle)
-            aligned_h, aligned_w = self._compute_aligned_max_dims(h_per_batch, w_per_batch, p)
-
-            # Build grid indices (batch, y, x) for each patch
-            grid_indices = self._build_grid_indices(
-                batch_size, num_patches, h_per_batch, w_per_batch, f"{p}/grid"
-            )
-
-            # Cast pixel_attention_mask to bool for ScatterND
-            mask_bool = self.make_node(
-                "Cast", ["pixel_attention_mask"], [f"{p}/mask_bool/output_0"], to=TensorProto.BOOL
-            )
-
-            # ScatterND: place features into canvas [B, aligned_h, aligned_w, C]
-            hidden_4d = self._build_scatter_canvas(
-                vision_embeddings,
-                grid_indices,
-                mask_bool,
-                batch_size,
-                aligned_h,
-                aligned_w,
-                C,
-                f"{p}/scatter",
-            )
-
-            spatial_h_name = aligned_h
-            half_spatial_h_name = self.make_node(
-                "Div", [aligned_h, self.get_constant("INT64", 2)], [f"{p}/half_h/output_0"]
-            )
-            half_spatial_w_name = self.make_node(
-                "Div", [aligned_w, self.get_constant("INT64", 2)], [f"{p}/half_w/output_0"]
-            )
-
+        spatial_h_name = aligned_h
+        half_spatial_h_name = self.make_node(
+            "Div", [aligned_h, self.get_constant("INT64", 2)], [f"{p}/half_h/output_0"]
+        )
+        half_spatial_w_name = self.make_node(
+            "Div", [aligned_w, self.get_constant("INT64", 2)], [f"{p}/half_w/output_0"]
+        )
         # Pixel unshuffle: (B, H, W, C) -> (B, H/2, W/2, C*4)
         reshape1_shape = self.make_node(
             "Concat",
@@ -1488,45 +1259,35 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         else:
             fc2 = self.make_node("Identity", [fc2], [f"{p}/linear_2/output_0"])
 
-        if self.vision_input_format == VISION_MODE_TILED:
-            # === Build output validity mask and Compress ===
-            # For each position in [B, out_h, out_w], check if y < h[b]/2 AND x < w[b]/2
-            output_mask = self._build_output_validity_mask(
-                h_per_batch,
-                w_per_batch,
-                aligned_h,
-                aligned_w,
-                ds,
-                f"{p}/out_mask",
-            )
+        # === Build output validity mask and Compress ===
+        # For each position in [B, out_h, out_w], check if y < h[b]/2 AND x < w[b]/2
+        output_mask = self._build_output_validity_mask(
+            h_per_batch,
+            w_per_batch,
+            aligned_h,
+            aligned_w,
+            ds,
+            f"{p}/out_mask",
+        )
 
-            # Flatten embeddings [B, out_h * out_w, hidden] → [B * out_h * out_w, hidden]
-            embeds_flat = self.make_node(
-                "Reshape",
-                [fc2, self.get_constant("INT64", [-1, self.text_hidden])],
-                [f"{p}/compress/embeds_flat/output_0"],
-            )
+        # Flatten embeddings [B, out_h * out_w, hidden] → [B * out_h * out_w, hidden]
+        embeds_flat = self.make_node(
+            "Reshape",
+            [fc2, self.get_constant("INT64", [-1, self.text_hidden])],
+            [f"{p}/compress/embeds_flat/output_0"],
+        )
 
-            # Compress: select only valid tokens → [total_valid_tokens, hidden]
-            self.make_node("Compress", [embeds_flat, output_mask], ["image_features"], axis=0)
-        else:
-            # Conv2d mode: single image, keep 3D output
-            self.make_node("Identity", [fc2], ["image_features"])
-
+        # Compress: select only valid tokens → [total_valid_tokens, hidden]
+        self.make_node("Compress", [embeds_flat, output_mask], ["image_features"], axis=0)
         return "image_features"
 
     def load_weights(self, weights: dict[str, np.ndarray]):
+        # transformers >= 5 names the SigLIP2 tower model.vision_tower.* (no vision_model level).
         for name, weight in weights.items():
-            if name.startswith("model.vision_tower.vision_model."):
-                new_name = name.replace("model.vision_tower.", "")
-                self.weights[new_name] = weight
-            elif name.startswith("vision_model."):
-                self.weights[name] = weight
+            if name.startswith("model.vision_tower."):
+                self.weights["vision_model." + name.removeprefix("model.vision_tower.")] = weight
             elif name.startswith("model.multi_modal_projector."):
-                new_name = name.replace("model.", "")
-                self.weights[new_name] = weight
-            elif name.startswith("multi_modal_projector."):
-                self.weights[name] = weight
+                self.weights[name.removeprefix("model.")] = weight
 
         logger.info(f"Loaded {len(self.weights)} vision + projector weights")
 

@@ -155,12 +155,12 @@ class AudioDetokenizerBuilder(ONNXBuilderBase):
         self.make_transpose(emb_output, "/emb/pre_upsample_t/output_0", perm=[0, 2, 1])
 
         # Resize: [B, H, T] → [B, H, 6*T]
+        # roi is omitted ("") - it is only read for crop_and_resize coordinate mode
         self.add_initializer("upsample_scales", np.array([1.0, 1.0, 6.0], dtype=np.float32))
-        self.add_initializer("empty_roi", np.array([], dtype=np.float32))
 
         node = helper.make_node(
             "Resize",
-            ["/emb/pre_upsample_t/output_0", "empty_roi", "upsample_scales"],
+            ["/emb/pre_upsample_t/output_0", "", "upsample_scales"],
             ["/emb/upsampled/output_0"],
             name="/emb/upsample",
             mode="nearest",
@@ -551,9 +551,12 @@ class AudioDetokenizerBuilder(ONNXBuilderBase):
         invalid_mask_f = self.make_node(
             "Cast", [invalid_mask], [f"{prefix}/attn/invalid_mask_f/output_0"], to=TensorProto.FLOAT
         )
+        # -1e4 is large enough that exp() underflows to 0 after softmax, and stays
+        # finite in fp16 (-1e9 saturates to -65504 and then overflows to -inf when
+        # added to the scores).
         mask_bias = self.make_mul(
             invalid_mask_f,
-            self.get_constant(-1e9, dtype=np.float32),
+            self.get_constant(-1e4, dtype=np.float32),
             f"{prefix}/attn/mask_bias/output_0",
         )
 
@@ -700,7 +703,6 @@ def export_audio_detokenizer_builder(model_path: str, onnx_dir: pathlib.Path) ->
     onnx.save_model(model, str(output_path))
     logger.info(f"audio_detokenizer saved to {output_path}")
 
-    # Note: ISTFT window is generated at runtime via np.hanning() in infer.py
-    # This makes inference compatible with transformers.js which cannot load numpy files
-
+    # The inverse STFT runs outside the graph (lfm2_audio.infer.Detokenizer), with its window
+    # computed at runtime.
     return output_path

@@ -1,9 +1,7 @@
 """
 Verify vision encoder ONNX export against PyTorch reference.
 
-Note: Only tests tiled format. Conv2d format uses different preprocessing
-(our preprocess_conv2d vs HuggingFace processor) which causes numerical
-differences. Coherence tests verify conv2d works end-to-end.
+Tests the tiled format, the default and the one onnxruntime-genai runs.
 
 Run with:
     uv run pytest tests/test_lfm2_vl/test_vision_encoder.py -v
@@ -16,11 +14,11 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from helpers import get_model_name, get_onnx_dir
+from helpers import get_model_name, get_onnx_dir, pad_to_square
 from PIL import Image
 
-from liquidonnx.lfm2_vl.preprocessing import pad_to_square
-from liquidonnx.session import get_onnx_file, load_onnx_session
+from liquidonnx.lfm2_vl.export import bundle
+from liquidonnx.session import load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, compare_correlation, get_tolerances
 
 logger = logging.getLogger(__name__)
@@ -119,7 +117,6 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, v
 
 
 # pytorch_model outermost so same model runs consecutively (memory optimization)
-# Only tests tiled format (conv2d has different preprocessing, verified via coherence tests)
 @pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 @pytest.mark.parametrize("vision_type,checks", QUANT_CONFIGS)
 def test_vision_encoder(
@@ -137,7 +134,7 @@ def test_vision_encoder(
     if not onnx_dir.exists():
         pytest.skip(f"Export not found: {onnx_dir}")
 
-    embed_images_file = get_onnx_file(onnx_dir, vision_type, "embed_images")
+    embed_images_file = onnx_dir / bundle(vision_type or "fp32")["vision"]
     if not embed_images_file.exists():
         pytest.skip(f"Vision encoder not found: {embed_images_file}")
 

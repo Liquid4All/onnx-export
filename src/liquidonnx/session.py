@@ -1,4 +1,10 @@
-"""Shared ONNX inference utilities."""
+"""
+onnxruntime sessions and decoder steps for the graphs of an export.
+
+Generation runs on onnxruntime-genai (liquidonnx.genai_runtime); these helpers run single graphs,
+for tests, the comparison against PyTorch and the audio detokenizer. Decoder caches follow the
+onnxruntime-genai layout: past_key_values.N.key / .value and past.N.conv in, present.* out.
+"""
 
 import logging
 import pathlib
@@ -6,44 +12,7 @@ import pathlib
 import numpy as np
 import onnxruntime as ort
 
-from liquidonnx import remote_code_enabled
-
 logger = logging.getLogger(__name__)
-
-
-# Mapping from legacy component names to Transformers.js v4 names
-_COMPONENT_ALIASES = {
-    "embed_images": "vision_encoder",
-    "decoder": "decoder_model_merged",
-}
-
-
-def get_onnx_file(
-    onnx_dir: pathlib.Path, precision: str | None, name: str = "model"
-) -> pathlib.Path:
-    """Get ONNX file path for given precision.
-
-    Args:
-        onnx_dir: Directory containing ONNX files
-        precision: None for fp32, "fp16", "q4", "q8"
-        name: Base name of the model file (default: "model").
-              Accepts legacy names (embed_images, decoder) and resolves
-              to new names (vision_encoder, decoder_model_merged) with
-              fallback to legacy if the new file doesn't exist.
-
-    Returns:
-        Path to the ONNX file (e.g., model.onnx, model_q4.onnx, decoder_fp16.onnx)
-    """
-    new_name = _COMPONENT_ALIASES.get(name)
-    if new_name:
-        suffix = f"_{precision}.onnx" if precision else ".onnx"
-        new_path = onnx_dir / f"{new_name}{suffix}"
-        if new_path.exists():
-            return new_path
-        # Fall back to legacy name
-    if precision:
-        return onnx_dir / f"{name}_{precision}.onnx"
-    return onnx_dir / f"{name}.onnx"
 
 
 _cuda_works = None  # Cache CUDA availability check
@@ -125,190 +94,71 @@ ONNX_TYPE_TO_NUMPY = {
 }
 
 
-def initialize_cache(session: ort.InferenceSession) -> dict:
-    """Initialize KV cache tensors for an ONNX inference session.
-
-    Automatically detects cache inputs (past_*) and initializes them with zeros.
-    Infers dtype from the ONNX model input specification.
-    """
-    skip_inputs = {"input_ids", "inputs_embeds", "attention_mask", "position_ids"}
+def initialize_cache(session: ort.InferenceSession, batch_size: int = 1) -> dict:
+    """Empty conv and KV caches (past_* inputs), typed as the graph declares them."""
     cache = {}
-
     for inp in session.get_inputs():
-        if inp.name in skip_inputs:
+        if not inp.name.startswith("past"):
             continue
         shape = [d if isinstance(d, int) else 1 for d in inp.shape]
         for i, d in enumerate(inp.shape):
             if isinstance(d, str) and "sequence" in d.lower():
                 shape[i] = 0
+        shape[0] = batch_size
         dtype = ONNX_TYPE_TO_NUMPY.get(inp.type, np.float32)
         cache[inp.name] = np.zeros(shape, dtype=dtype)
-
     return cache
 
 
-def update_cache(cache: dict, outputs: list, output_infos: list) -> None:
-    """Update cache from model outputs.
+def cache_input_name(output_name: str) -> str | None:
+    """Past-cache input fed by a present-cache output.
 
-    Handles present_conv -> past_conv and present. -> past_key_values. mappings.
+    present.N.conv -> past.N.conv, present.N.key -> past_key_values.N.key
     """
-    for i, out_info in enumerate(output_infos[1:], 1):  # Skip logits
-        name = out_info.name
-        if "present_conv" in name:
-            cache_name = name.replace("present_conv", "past_conv")
-        elif "present." in name:
-            cache_name = name.replace("present.", "past_key_values.")
-        else:
-            continue
+    if output_name.startswith("present.") and output_name.endswith(".conv"):
+        return output_name.replace("present.", "past.", 1)
+    if output_name.startswith("present."):
+        return output_name.replace("present.", "past_key_values.", 1)
+    return None
+
+
+def update_cache(cache: dict, outputs: list, output_infos: list) -> None:
+    for out_info, value in zip(output_infos, outputs, strict=True):
+        cache_name = cache_input_name(out_info.name)
         if cache_name in cache:
-            cache[cache_name] = outputs[i]
+            cache[cache_name] = value
 
 
-class ONNXTextModel:
-    """Shared ONNX inference for LFM2 text models (dense and MoE)."""
-
-    def __init__(self, model_path: str, force_cpu: bool = False):
-        self.model_path = pathlib.Path(model_path)
-        self.tokenizer = None
-        self.session = None
-        self.input_names = set()
-        self.force_cpu = force_cpu
-
-    def load(self):
-        """Load tokenizer and ONNX model."""
-        from transformers import AutoTokenizer
-
-        logger.info(f"Loading model from {self.model_path}...")
-
-        # Handle both directory and direct ONNX file paths
-        if self.model_path.suffix == ".onnx":
-            onnx_path = self.model_path
-            tokenizer_path = self.model_path.parent.parent
-        else:
-            tokenizer_path = self.model_path
-            # Try decoder_model_merged.onnx first, then decoder.onnx (legacy), then model.onnx
-            onnx_path = self.model_path / "onnx" / "decoder_model_merged.onnx"
-            if not onnx_path.exists():
-                onnx_path = self.model_path / "onnx" / "decoder.onnx"
-            if not onnx_path.exists():
-                onnx_path = self.model_path / "onnx" / "model.onnx"
-
-        if not onnx_path.exists():
-            raise FileNotFoundError(f"ONNX file not found: {onnx_path}")
-
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            str(tokenizer_path), trust_remote_code=remote_code_enabled()
-        )
-
-        providers = ["CPUExecutionProvider"] if self.force_cpu else None
-        logger.info(f"Loading ONNX from {onnx_path}...")
-        self.session = load_onnx_session(onnx_path, providers=providers)
-
-        self.input_names = {inp.name for inp in self.session.get_inputs()}
-        logger.info(f"Model loaded. Inputs: {len(self.input_names)} tensors")
-
-    def generate(
-        self,
-        messages: list,
-        max_new_tokens: int = 100,
-        stream: bool = True,
-    ) -> str:
-        """Generate response for chat messages."""
-        prompt = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        input_ids = np.array(
-            [self.tokenizer.encode(prompt, add_special_tokens=False)], dtype=np.int64
-        )
-
-        cache = initialize_cache(self.session)
-        output_infos = self.session.get_outputs()
-
-        seq_len = input_ids.shape[1]
-        position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
-
-        generated_tokens = []
-        cur_len = seq_len
-
-        for step in range(max_new_tokens):
-            if step == 0:
-                ids = input_ids
-                pos = position_ids
-            else:
-                ids = np.array([[generated_tokens[-1]]], dtype=np.int64)
-                pos = np.array([[cur_len - 1]], dtype=np.int64)
-
-            attn_mask = np.ones((1, cur_len), dtype=np.int64)
-
-            feed = {"input_ids": ids, "attention_mask": attn_mask}
-            if "position_ids" in self.input_names:
-                feed["position_ids"] = pos
-            feed.update(cache)
-
-            outputs = self.session.run(None, feed)
-            logits = outputs[0][0, -1]
-
-            next_token = int(np.argmax(logits))
-            generated_tokens.append(next_token)
-
-            update_cache(cache, outputs, output_infos)
-            cur_len += 1
-
-            if stream:
-                token_str = self.tokenizer.decode([next_token])
-                print(token_str, end="", flush=True)
-
-            if next_token == self.tokenizer.eos_token_id:
-                break
-
-        if stream:
-            print()
-
-        return self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+def decoder_inputs(inputs: np.ndarray, cache: dict, past_len: int) -> dict:
+    """Feed for one decoder step: token ids [B, S] or embeddings [B, S, H], a full attention
+    mask (the graph derives positions from it) and the cache."""
+    batch, seq_len = inputs.shape[:2]
+    feed = {"attention_mask": np.ones((batch, past_len + seq_len), dtype=np.int64)}
+    if inputs.ndim == 3:
+        feed["inputs_embeds"] = inputs.astype(np.float32)
+    else:
+        feed["input_ids"] = inputs.astype(np.int64)
+    feed.update(cache)
+    return feed
 
 
-def run_chat_loop(model: ONNXTextModel, args) -> None:
-    """Run interactive chat loop."""
-    print("\n" + "=" * 50)
-    print("LFM2 Model - ONNX Inference")
-    print("Type 'quit' or 'exit' to stop")
-    print("=" * 50 + "\n")
+def cached_outputs(
+    session: ort.InferenceSession,
+    inputs: np.ndarray,
+    prefill: int,
+    names: tuple[str, ...] = ("logits",),
+) -> dict[str, np.ndarray]:
+    """Last-position outputs of a prefill of inputs[:, :prefill], then of one call per position.
 
-    messages = []
-
-    if args.prompt:
-        messages.append({"role": "user", "content": args.prompt})
-        print(f"User: {args.prompt}")
-        print("Assistant: ", end="")
-        response = model.generate(
-            messages, max_new_tokens=args.max_tokens, stream=not args.no_stream
-        )
-        messages.append({"role": "assistant", "content": response})
-        if args.no_stream:
-            print(response)
-
-    while True:
-        try:
-            user_input = input("\nUser: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
-            break
-
-        if not user_input:
-            continue
-        if user_input.lower() in ["quit", "exit"]:
-            print("Goodbye!")
-            break
-        if user_input.lower() == "clear":
-            messages = []
-            print("Chat history cleared.")
-            continue
-
-        messages.append({"role": "user", "content": user_input})
-        print("Assistant: ", end="")
-        response = model.generate(
-            messages, max_new_tokens=args.max_tokens, stream=not args.no_stream
-        )
-        messages.append({"role": "assistant", "content": response})
-        if args.no_stream:
-            print(response)
+    inputs is [1, S] token ids or [1, S, H] embeddings; each result has S - prefill + 1 fp32 rows,
+    row i coming from position prefill + i - 1 (logits: predicting position prefill + i).
+    """
+    cache, outputs = initialize_cache(session), session.get_outputs()
+    rows = {name: [] for name in names}
+    for start, end in [(0, prefill), *((p, p + 1) for p in range(prefill, inputs.shape[1]))]:
+        result = session.run(None, decoder_inputs(inputs[:, start:end], cache, start))
+        update_cache(cache, result, outputs)
+        named = dict(zip([o.name for o in outputs], result, strict=True))
+        for name in names:
+            rows[name].append(named[name][0, -1])
+    return {name: np.stack(r).astype(np.float32) for name, r in rows.items()}

@@ -1,18 +1,34 @@
 #!/usr/bin/env python3
 """
-ONNX export for LFM2.5-Audio model supporting all 3 modes:
+ONNX export of LFM2.5-Audio for onnxruntime-genai, covering all three modes:
 - ASR (Automatic Speech Recognition): Audio -> Text
 - TTS (Text-to-Speech): Text -> Audio
 - Interleaved: Mixed text and audio I/O
 
-Exports the following ONNX models:
-1. decoder.onnx - LFM2 backbone with text embeddings (input_ids -> logits/hidden_states)
-2. audio_encoder.onnx - Conformer encoder for ASR (mel-spectrogram -> audio embeddings)
-3. audio_embedding.onnx - Audio code embeddings for TTS/interleaved
-4. audio_detokenizer.onnx - Neural vocoder for TTS (codes -> STFT features)
+The decoder comes from the onnxruntime-genai model builder (fp32, CPU EP, inputs_embeds in,
+logits and hidden states out; see liquidonnx.genai_builder). This repository builds the other
+graphs and derives every precision.
 
-Note: Depthformer (audio codebook prediction) uses PyTorch at inference time for
-autoregressive generation, which produces higher quality audio than parallel ONNX.
+Output Structure:
+    {output-dir}/exports/{model-name}-ONNX/
+        ├── genai_config.json          # lfm2_audio pipeline at the default precision
+        ├── config.json, tokenizer.json, tokenizer_config.json
+        └── onnx/
+            ├── decoder.onnx               # LFM2 backbone (inputs_embeds -> logits, hidden_states)
+            ├── embeddings.onnx            # token table + audio feature scatter (fp32 table)
+            ├── embeddings_fp16.onnx       # fp16 table, used with every other precision
+            ├── audio_encoder.onnx         # Conformer: mel-spectrogram -> audio features
+            ├── audio_embedding.onnx       # audio codes -> decoder input (+ .bin/.json table)
+            ├── vocoder_depthformer.onnx   # decoder hidden state -> frame of 8 audio codes
+            ├── audio_detokenizer.onnx     # audio codes -> STFT features (outside the runtime)
+            ├── embed_tokens.bin/.json     # text embedding table for web runtimes
+            └── mel_config.json
+
+    fp16, q4 and q8 add {graph}_{precision}.onnx; bundle() lists what each precision loads. The
+    depthformer and audio embedding stay fp16 in the q4 and q8 bundles: quantizing the depthformer
+    changes most audio codes.
+
+genai_config.json uses the first exported precision of q4, q8, fp16, fp32.
 
 Usage:
     uv run lfm2-audio-export LiquidAI/LFM2.5-Audio-1.5B
@@ -25,29 +41,76 @@ import gc
 import json
 import logging
 import pathlib
-import shutil
 
 import numpy as np
 import onnx
 from onnx import TensorProto, helper
 
-from liquidonnx.external_data import split_external_data
-from liquidonnx.lfm2.builder import LFM2Builder, LFM2Config
+from liquidonnx.embeddings import build_embeddings, embeddings_to_fp16
+from liquidonnx.export_cli import (
+    add_export_arguments,
+    finish,
+    log_step,
+    output_dir,
+    parse_precisions,
+)
+from liquidonnx.genai_builder import export_decoder
 from liquidonnx.lfm2_audio.builder.config import ConformerConfig
 from liquidonnx.lfm2_audio.builder.conformer_builder import ConformerEncoderBuilder
 from liquidonnx.lfm2_audio.builder.depthformer_builder import export_vocoder_depthformer
 from liquidonnx.lfm2_audio.builder.detokenizer_builder import (
     export_audio_detokenizer_builder,
 )
-from liquidonnx.quantize import get_model_size, get_total_model_size_mb, quantize_model
+from liquidonnx.quantize import (
+    convert_to_fp16,
+    derive_precision,
+    get_model_size,
+    quantize_model,
+)
 
 logger = logging.getLogger(__name__)
 
+PRECISIONS = ("fp16", "q4", "q8")
+DEFAULT_ORDER = ("q4", "q8", "fp16")
+DECODER_OPTIONS = {"exclude_embeds": "true", "include_hidden_states": "true"}
+# Token ids this export hard-codes; write_genai_config checks them against tokenizer.json.
+SPECIAL_TOKEN_IDS = {"<|reserved_123|>": 133, "<|audio_start|>": 128, "<|text_end|>": 130}
+# The placeholder the embedding model replaces with audio features. The onnxruntime-genai audio
+# processor writes one per encoder frame.
+AUDIO_TOKEN_ID = SPECIAL_TOKEN_IDS["<|reserved_123|>"]
+# The model turns to speech here, so these only end generation in a text-only pipeline.
+MODALITY_SWITCH_TOKEN_IDS = (
+    SPECIAL_TOKEN_IDS["<|audio_start|>"],
+    SPECIAL_TOKEN_IDS["<|text_end|>"],
+)
 
-def get_model_name(model_path: str) -> str:
-    if "/" in model_path:
-        return model_path.split("/")[-1]
-    return pathlib.Path(model_path).name
+
+def bundle(precision: str) -> dict[str, str]:
+    """ONNX files (in onnx/) that make up one precision."""
+    suffix = "" if precision == "fp32" else f"_{precision}"
+    fp16 = "" if precision == "fp32" else "_fp16"
+    return {
+        "decoder": f"decoder{suffix}.onnx",
+        "embedding": f"embeddings{fp16}.onnx",
+        "speech": f"audio_encoder{suffix}.onnx",
+        "depthformer": f"vocoder_depthformer{fp16}.onnx",
+        "audio_embedding": f"audio_embedding{fp16}.onnx",
+        "detokenizer": f"audio_detokenizer{suffix}.onnx",
+    }
+
+
+def genai_files(precision: str) -> dict:
+    """genai_config.json model entries that load one precision (the detokenizer runs outside)."""
+    files = {name: {"filename": f"onnx/{file}"} for name, file in bundle(precision).items()}
+    return {
+        "decoder": files["decoder"],
+        "embedding": files["embedding"],
+        "speech": files["speech"],
+        "audio_output": {
+            "depthformer": files["depthformer"],
+            "embedding": files["audio_embedding"],
+        },
+    }
 
 
 def load_audio_model_weights(model_path: str) -> dict[str, np.ndarray]:
@@ -111,8 +174,6 @@ def export_audio_encoder_builder(
 
 
 # === 2. Audio Embedding Export (builder) ===
-# Note: embed_tokens is NOT exported separately - it's included in decoder.onnx
-# and extracted at inference time for text embedding lookup.
 
 
 def export_audio_embedding(
@@ -231,19 +292,10 @@ def export_audio_embedding_binary(
 
 # === 3c. Text Embedding Export ===
 #
-# Why export embed_tokens separately?
-#
-# The embed_tokens.weight is already stored in decoder.onnx (for the tied LM head),
-# but we export it as a standalone binary file for cross-platform consistency:
-#
-# - Python CAN extract weights from ONNX via `onnx.load()` + graph.initializer
-# - JavaScript CANNOT - ONNX Runtime Web only exposes inference APIs, not internals
-#
-# By exporting as raw binary, both Python and JS use the same artifact and code path:
+# onnxruntime-genai looks up text through embeddings.onnx. Web runtimes, which cannot read ONNX
+# initializers, index this raw table instead:
 #   weight = load_binary("embed_tokens.bin")
 #   embedding = weight[token_id]
-#
-# This avoids maintaining two different extraction methods and ensures identical behavior.
 
 
 def export_embed_tokens(
@@ -254,8 +306,6 @@ def export_embed_tokens(
     Saves embed_tokens.weight as:
     1. embed_tokens.bin - raw float32 binary (vocab_size * hidden_size * 4 bytes)
     2. embed_tokens.json - metadata (vocab_size, hidden_size, dtype)
-
-    Both Python and JavaScript load this the same way for consistency.
     """
     embed_weight = weights["lfm.embed_tokens.weight"]  # [vocab_size, hidden_size]
     vocab_size, hidden_size = embed_weight.shape
@@ -284,284 +334,84 @@ def export_embed_tokens(
     return bin_path
 
 
-# === 4. Decoder Export (builder) ===
+# === 4. Precisions ===
 
 
-def export_decoder(
-    weights: dict[str, np.ndarray], config: dict, onnx_dir: pathlib.Path
-) -> pathlib.Path:
-    """Export decoder.onnx (LFM2 backbone with inputs_embeds).
+def derive_precision_files(onnx_dir: pathlib.Path, precision: str, block_size: int):
+    """Write the files bundle(precision) loads."""
+    derive_precision(onnx_dir, precision, name="decoder", block_size=block_size)
 
-    Outputs both logits and hidden_states for audio generation.
-    """
-    logger.info("Exporting decoder.onnx...")
-
-    lfm_config = config.get("lfm", {})
-    lfm2_config = LFM2Config.from_hf_config(type("Config", (), lfm_config)())
-
-    builder = LFM2Builder(lfm2_config, use_integrated_rope=True, vl_naming=True)
-
-    # Load LFM weights (prefixed with "lfm.")
-    for name, weight in weights.items():
-        if name.startswith("lfm."):
-            new_name = "model." + name[4:]
-            builder.weights[new_name] = weight
-
-    H = lfm2_config.hidden_size
-
-    # Build inputs
-    builder.inputs.append(
-        helper.make_tensor_value_info(
-            "inputs_embeds", TensorProto.FLOAT, ["batch_size", "sequence_length", H]
-        )
-    )
-    builder.inputs.append(
-        helper.make_tensor_value_info(
-            "attention_mask", TensorProto.INT64, ["batch_size", "total_sequence_length"]
-        )
-    )
-
-    # Cache inputs
-    conv_set = set(builder.conv_indices)
-    attn_set = set(builder.attn_indices)
-    for idx in range(lfm2_config.num_hidden_layers):
-        if idx in conv_set:
-            builder.inputs.append(
-                helper.make_tensor_value_info(
-                    f"past_conv.{idx}",
-                    TensorProto.FLOAT,
-                    ["batch_size", H, lfm2_config.conv_L_cache],
-                )
-            )
-        elif idx in attn_set:
-            builder.inputs.append(
-                helper.make_tensor_value_info(
-                    f"past_key_values.{idx}.key",
-                    TensorProto.FLOAT,
-                    [
-                        "batch_size",
-                        lfm2_config.num_key_value_heads,
-                        "past_sequence_length",
-                        builder.head_dim,
-                    ],
-                )
-            )
-            builder.inputs.append(
-                helper.make_tensor_value_info(
-                    f"past_key_values.{idx}.value",
-                    TensorProto.FLOAT,
-                    [
-                        "batch_size",
-                        lfm2_config.num_key_value_heads,
-                        "past_sequence_length",
-                        builder.head_dim,
-                    ],
-                )
-            )
-
-    builder.build_outputs()
-
-    # Add hidden_states output for audio generation
-    builder.outputs.append(
-        helper.make_tensor_value_info(
-            "hidden_states", TensorProto.FLOAT, ["batch_size", "sequence_length", H]
-        )
-    )
-
-    builder.build_rope_cache()
-    builder.build_attention_mask_subgraph()
-
-    builder.add_initializer(
-        "model.embed_tokens.weight", builder.weights["model.embed_tokens.weight"]
-    )
-    hidden_state = "inputs_embeds"
-
-    for layer_idx in range(lfm2_config.num_hidden_layers):
-        layer_type = lfm2_config.layer_types[layer_idx]
-        logger.info(f"Building decoder layer {layer_idx} ({layer_type})...")
-        builder.prepare_layer_weights(layer_idx, layer_type)
-
-        if layer_type == "conv":
-            hidden_state = builder.build_conv_layer(layer_idx, hidden_state)
-        else:
-            hidden_state = builder.build_attention_layer(layer_idx, hidden_state)
-
-    # Build lm_head and capture hidden states
-    # The build_lm_head applies final norm then lm_head projection
-    # We need the normed hidden states before projection
-    builder.build_lm_head(hidden_state)
-
-    # Add Identity node to output hidden states (final norm output)
-    # The final norm output is at /model/layers.{num_layers}/final_norm_layernorm/output_0
-    num_layers = lfm2_config.num_hidden_layers
-    final_norm_output = f"/model/layers.{num_layers}/final_norm_layernorm/output_0"
-    builder.nodes.append(
-        helper.make_node(
-            "Identity",
-            [final_norm_output],
-            ["hidden_states"],
-            name="/hidden_states/Identity",
-        )
-    )
-
-    builder.build_value_info()
-
-    graph = helper.make_graph(
-        builder.nodes,
-        "decoder",
-        builder.inputs,
-        builder.outputs,
-        builder.initializers,
-        value_info=builder.value_info,
-    )
-
-    model = helper.make_model(
-        graph,
-        opset_imports=[
-            helper.make_opsetid("", 21),
-            helper.make_opsetid("com.microsoft", 1),
-        ],
-        ir_version=10,
-    )
-    model.producer_name = "liquidonnx"
-
-    output_path = onnx_dir / "decoder.onnx"
-    output_data = onnx_dir / "decoder.onnx_data"
-    if output_data.exists():
-        output_data.unlink()
-
-    onnx.save_model(
-        model,
-        str(output_path),
-        save_as_external_data=True,
-        all_tensors_to_one_file=True,
-        location="decoder.onnx_data",
-        size_threshold=1024,
-    )
-    logger.info(f"decoder saved to {output_path}")
-    return output_path
-
-
-# === Quantization ===
-
-
-def do_quantize(onnx_dir: pathlib.Path, bits: int, block_size: int, symmetric: bool):
-    """Quantize all exportable models to specified precision."""
-    # Models to quantize: (relative_path, exclude_lm_head)
-    models_to_quantize = [
-        ("decoder", True),
-        ("audio_encoder", False),
-        ("audio_embedding", False),
-        ("audio_detokenizer", False),
-        ("vocoder_depthformer", False),
-    ]
-
-    for model_path, exclude_lm_head in models_to_quantize:
-        fp32_path = onnx_dir / f"{model_path}.onnx"
-        quant_path = onnx_dir / f"{model_path}_q{bits}.onnx"
-
-        if not fp32_path.exists():
+    for name in ("audio_encoder", "audio_detokenizer"):
+        fp32_path = onnx_dir / f"{name}.onnx"
+        output_path = onnx_dir / f"{name}_{precision}.onnx"
+        if precision == "fp16":
+            convert_to_fp16(fp32_path, output_path, keep_io=True)
             continue
-        if quant_path.exists():
-            logger.info(f"  {model_path}_q{bits}.onnx already exists, skipping")
-            continue
-
+        bits = int(precision[1])
         _, orig_mb = get_model_size(fp32_path)
         quantize_model(
             fp32_path,
-            quant_path,
+            output_path,
             bits=bits,
             block_size=block_size,
-            exclude_lm_head=exclude_lm_head,
-            symmetric=symmetric,
+            exclude_lm_head=False,
+            symmetric=bits == 4,
         )
-        _, quant_mb = get_model_size(quant_path)
-        logger.info(f"  {model_path}: {orig_mb:.1f} -> {quant_mb:.1f} MB")
+        _, quant_mb = get_model_size(output_path)
+        logger.info(f"  {name}: {orig_mb:.1f} -> {quant_mb:.1f} MB")
+
+    # The depthformer and audio embedding stay fp16 in every non-fp32 bundle; the audio
+    # embedding is a Gather, which weight-only quantization leaves at full size anyway.
+    for name in ("vocoder_depthformer", "audio_embedding"):
+        convert_to_fp16(onnx_dir / f"{name}.onnx", onnx_dir / f"{name}_fp16.onnx", keep_io=True)
+    embeddings_to_fp16(onnx_dir / "embeddings.onnx", onnx_dir / "embeddings_fp16.onnx")
 
 
-# === FP16 Conversion ===
+def write_genai_config(output_dir: pathlib.Path, precision: str):
+    """Point genai_config.json at one precision and add the speech input and output sections."""
+    tokenizer = json.loads((output_dir / "tokenizer.json").read_text())
+    ids = {token["content"]: token["id"] for token in tokenizer["added_tokens"]}
+    if any(ids.get(name) != i for name, i in SPECIAL_TOKEN_IDS.items()):
+        found = {name: ids.get(name) for name in SPECIAL_TOKEN_IDS}
+        raise ValueError(f"tokenizer.json has {found}; the export assumes {SPECIAL_TOKEN_IDS}")
 
-
-def convert_to_fp16(
-    input_path: pathlib.Path,
-    output_path: pathlib.Path,
-    keep_io_types: bool = True,
-):
-    """Convert ONNX model from FP32 to FP16.
-
-    Args:
-        input_path: Path to FP32 ONNX model
-        output_path: Path for FP16 output model
-        keep_io_types: Keep inputs/outputs as FP32 for compatibility
-    """
-    from onnx.external_data_helper import load_external_data_for_model
-    from onnxruntime.transformers.float16 import convert_float_to_float16
-
-    logger.info(f"Converting {input_path.name} to FP16...")
-
-    model = onnx.load(str(input_path), load_external_data=False)
-    load_external_data_for_model(model, str(input_path.parent))
-
-    model_fp16 = convert_float_to_float16(
-        model,
-        keep_io_types=keep_io_types,
-        force_fp16_initializers=True,
-        disable_shape_infer=True,
+    files = genai_files(precision)
+    config_path = output_dir / "genai_config.json"
+    config = json.loads(config_path.read_text())
+    model = config["model"]
+    model["decoder"].update(files["decoder"])
+    model["audio_token_id"] = AUDIO_TOKEN_ID
+    eos = (
+        model["eos_token_id"]
+        if isinstance(model["eos_token_id"], list)
+        else [model["eos_token_id"]]
     )
-
-    output_data_path = output_path.parent / f"{output_path.stem}.onnx_data"
-    if output_data_path.exists():
-        output_data_path.unlink()
-
-    onnx.save_model(
-        model_fp16,
-        str(output_path),
-        save_as_external_data=True,
-        all_tensors_to_one_file=True,
-        location=f"{output_path.stem}.onnx_data",
-    )
-
-    orig_mb = get_total_model_size_mb(input_path)
-    fp16_mb = get_total_model_size_mb(output_path)
-    ratio = orig_mb / fp16_mb if fp16_mb > 0 else 0
-    logger.info(f"  {input_path.name}: {orig_mb:.1f} -> {fp16_mb:.1f} MB ({ratio:.1f}x)")
-
-
-def do_fp16(onnx_dir: pathlib.Path):
-    """Convert all models to FP16."""
-    models = [
-        "decoder",
-        "audio_encoder",
-        "audio_embedding",
-        "audio_detokenizer",
-        "vocoder_depthformer",
-    ]
-
-    for model_name in models:
-        fp32_path = onnx_dir / f"{model_name}.onnx"
-        fp16_path = onnx_dir / f"{model_name}_fp16.onnx"
-
-        if not fp32_path.exists():
-            continue
-        if fp16_path.exists():
-            logger.info(f"  {model_name}_fp16.onnx already exists, skipping")
-            continue
-
-        convert_to_fp16(fp32_path, fp16_path)
+    model["eos_token_id"] = [t for t in eos if t not in MODALITY_SWITCH_TOKEN_IDS]
+    model["embedding"] = {
+        **files["embedding"],
+        "inputs": {"input_ids": "input_ids", "audio_features": "audio_features"},
+        "outputs": {"inputs_embeds": "inputs_embeds"},
+    }
+    model["speech"] = {
+        **files["speech"],
+        "inputs": {
+            "audio_embeds": "mel_spectrogram",
+            "audio_lengths": "mel_lengths",
+            "audio_sizes": "audio_sizes",
+        },
+        "outputs": {"audio_features": "audio_embeddings"},
+    }
+    model["audio_output"] = files["audio_output"]
+    config_path.write_text(json.dumps(config, indent=4))
+    logger.info(f"genai_config.json -> {precision}")
 
 
-# === 7. Audio Detokenizer Export ===
+# === 5. Mel Config ===
 
 
 def save_mel_config(onnx_dir: pathlib.Path):
-    """Save mel spectrogram configuration for ASR preprocessing.
-
-    The mel filterbank and window are generated at runtime using librosa,
-    making inference compatible with transformers.js which cannot load numpy files.
-
-    Parameters match liquid_audio's AudioToMelSpectrogramPreprocessor config.
-    """
-    # Mel spectrogram parameters from LFM2.5-Audio config
+    """Mel front-end parameters of liquid-audio's AudioToMelSpectrogramPreprocessor, for web
+    runtimes (onnxruntime-genai has the same settings built in)."""
     mel_config = {
         "sample_rate": 16000,
         "n_fft": 512,
@@ -576,7 +426,6 @@ def save_mel_config(onnx_dir: pathlib.Path):
         "mel_norm": "slaney",
     }
 
-    # Save config only - filterbank and window generated at runtime via librosa
     config_path = onnx_dir / "mel_config.json"
     with open(config_path, "w") as f:
         json.dump(mel_config, f, indent=2)
@@ -587,62 +436,31 @@ def save_mel_config(onnx_dir: pathlib.Path):
 
 
 def export_full_model(model_path: str, output_dir: pathlib.Path):
-    """Export all components of LFM2.5-Audio to ONNX.
-
-    Exports:
-    - decoder.onnx: LFM2 backbone (includes embed_tokens.weight for text embedding)
-    - audio_encoder.onnx: Conformer encoder for ASR
-    - audio_embedding.onnx: Audio code embeddings for TTS
-    - audio_detokenizer.onnx: Neural vocoder for TTS
-    - vocoder_depthformer.onnx: Autoregressive audio codebook prediction
-
-    Note: embed_tokens.weight is stored in decoder.onnx (used for tied LM head).
-    Inference extracts this weight for text embedding lookup.
-    """
+    """Export every fp32 graph of LFM2.5-Audio, plus config and tokenizer."""
     output_dir.mkdir(parents=True, exist_ok=True)
     onnx_dir = output_dir / "onnx"
     onnx_dir.mkdir(exist_ok=True)
 
-    # Load config and weights
     config = load_audio_config(model_path)
     weights = load_audio_model_weights(model_path)
 
-    # === Builder-based exports (no PyTorch model needed) ===
     export_audio_embedding(weights, config, onnx_dir)
-    export_audio_embedding_binary(weights, config, onnx_dir)  # For direct lookup
-    export_embed_tokens(weights, config, onnx_dir)  # For web inference
-    export_decoder(weights, config, onnx_dir)
+    export_audio_embedding_binary(weights, config, onnx_dir)
+    export_embed_tokens(weights, config, onnx_dir)
+    build_embeddings(
+        weights["lfm.embed_tokens.weight"],
+        AUDIO_TOKEN_ID,
+        "audio_features",
+        onnx_dir / "embeddings.onnx",
+    )
+    weights.clear()
+    gc.collect()
+
+    export_decoder(model_path, output_dir, "decoder.onnx", DECODER_OPTIONS)
     export_audio_encoder_builder(model_path, config, onnx_dir)
     export_vocoder_depthformer(model_path, onnx_dir)
     export_audio_detokenizer_builder(model_path, onnx_dir)
     save_mel_config(onnx_dir)
-
-    # Clean up weights after builder exports
-    weights.clear()
-    gc.collect()
-
-    # Copy config and tokenizer
-    from huggingface_hub import hf_hub_download
-
-    for filename in ["config.json", "tokenizer.json", "tokenizer_config.json"]:
-        try:
-            src = hf_hub_download(model_path, filename)
-            shutil.copy(src, output_dir / filename)
-        except Exception as e:
-            logger.warning(f"Could not copy {filename}: {e}")
-
-    # Print summary
-    logger.info("\n" + "=" * 60)
-    logger.info("Export Summary")
-    logger.info("=" * 60)
-    total_size = 0
-    for fpath in sorted(onnx_dir.iterdir()):
-        if fpath.is_file():
-            size = fpath.stat().st_size
-            total_size += size
-            logger.info(f"  {fpath.name}: {size / 1e6:.1f} MB")
-    logger.info(f"Total: {total_size / 1e9:.2f} GB")
-
     return output_dir
 
 
@@ -652,99 +470,25 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-
-    parser.add_argument(
-        "model",
-        help="HuggingFace model ID (e.g., LiquidAI/LFM2.5-Audio-1.5B)",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=pathlib.Path,
-        default=pathlib.Path("."),
-        help="Output base directory",
-    )
-    parser.add_argument(
-        "--output-name",
-        type=str,
-        help="Output folder name (default: {model-name}-ONNX)",
-    )
-    parser.add_argument(
-        "--precision",
-        nargs="*",
-        metavar="PRECISION",
-        help="Output precisions: fp16, q4, q8 (default if no args: fp16, q4, q8)",
-    )
-    parser.add_argument(
-        "--block-size",
-        type=int,
-        default=32,
-        help="Block size for quantization (default: 32)",
-    )
-    parser.add_argument(
-        "--split-data",
-        type=float,
-        default=2.0,
-        metavar="GB",
-        help="Split external data into chunks (default: 2GB per chunk)",
-    )
-
+    add_export_arguments(parser, PRECISIONS, PRECISIONS, "LiquidAI/LFM2.5-Audio-1.5B")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
 
-    model_name = get_model_name(args.model)
-    output_name = args.output_name or f"{model_name}-ONNX"
-    output_dir = args.output_dir / "exports" / output_name
-    onnx_dir = output_dir / "onnx"
+    precisions = parse_precisions(parser, args, PRECISIONS, PRECISIONS)
+    export_dir = output_dir(args)
+    onnx_dir = export_dir / "onnx"
 
-    logger.info("=" * 60)
-    logger.info("ONNX Export for LFM2.5-Audio")
-    logger.info("=" * 60)
+    log_step(f"Exporting {args.model} (fp32) to {export_dir}")
+    export_full_model(args.model, export_dir)
 
-    export_full_model(args.model, output_dir)
+    for precision in precisions:
+        log_step(f"Deriving {precision}")
+        derive_precision_files(onnx_dir, precision, args.block_size)
 
-    # Parse precision options
-    do_fp16_conversion = False
-    quant_bits = []
-    if args.precision is not None:
-        if len(args.precision) == 0:
-            # Default: export all precisions
-            do_fp16_conversion = True
-            quant_bits = [4, 8]
-        else:
-            for p in args.precision:
-                p = p.lower()
-                if p == "fp16":
-                    do_fp16_conversion = True
-                elif p in ("q4", "q8"):
-                    quant_bits.append(int(p[1]))
+    write_genai_config(export_dir, next((p for p in DEFAULT_ORDER if p in precisions), "fp32"))
 
-    # FP16 conversion
-    if do_fp16_conversion:
-        logger.info("=" * 60)
-        logger.info("Converting to FP16")
-        logger.info("=" * 60)
-        do_fp16(onnx_dir)
-
-    # Quantization
-    for bits in quant_bits:
-        logger.info("=" * 60)
-        logger.info(f"Quantizing to Q{bits}")
-        logger.info("=" * 60)
-        do_quantize(onnx_dir, bits, args.block_size, symmetric=(bits == 4))
-
-    # Split data
-    chunk_size_bytes = int(args.split_data * 1024 * 1024 * 1024)
-    for onnx_file in onnx_dir.glob("*.onnx"):
-        data_file = onnx_file.with_suffix(".onnx_data")
-        if data_file.exists() and data_file.stat().st_size > chunk_size_bytes:
-            logger.info(f"Splitting {onnx_file.name}...")
-            split_external_data(onnx_file, chunk_size=chunk_size_bytes)
-
-    logger.info("=" * 60)
-    logger.info("Export complete!")
-    logger.info("=" * 60)
-    logger.info(f"Output: {output_dir}")
+    finish(args, export_dir)
 
 
 if __name__ == "__main__":

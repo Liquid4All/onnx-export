@@ -14,7 +14,8 @@ import pytest
 import torch
 from helpers import get_onnx_dir
 
-from liquidonnx.session import get_onnx_file, load_onnx_session
+from liquidonnx.lfm2.export import model_file
+from liquidonnx.session import initialize_cache, load_onnx_session
 from liquidonnx.verify import cosine_similarity
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,9 @@ PROMPTS = [
     "Name the capital of France.",
     "Explain in one sentence why compilers use intermediate representations.",
 ]
-PADDING_SIDES = ["left", "right"]
+# GroupQueryAttention in the onnxruntime-genai decoder takes each row's length from the mask sum, so
+# batches are right-padded.
+PADDING_SIDES = ["right"]
 MIN_COSINE = 0.95
 MIN_TOP5_OVERLAP = 4
 
@@ -56,31 +59,6 @@ def _build_padded_batch(tokenizer, prompts: list[str], padding_side: str):
     return tokenized, input_ids, attention_mask, position_ids
 
 
-def _init_onnx_cache(session, batch_size: int) -> dict[str, np.ndarray]:
-    cache = {}
-    skip_inputs = {"input_ids", "attention_mask", "position_ids"}
-
-    for inp in session.get_inputs():
-        if inp.name in skip_inputs:
-            continue
-
-        shape = []
-        for dim in inp.shape:
-            if isinstance(dim, int):
-                shape.append(dim)
-            elif isinstance(dim, str) and dim == "batch_size":
-                shape.append(batch_size)
-            elif isinstance(dim, str) and "sequence" in dim.lower():
-                shape.append(0)
-            else:
-                shape.append(1)
-
-        dtype = np.float16 if "float16" in inp.type else np.float32
-        cache[inp.name] = np.zeros(shape, dtype=dtype)
-
-    return cache
-
-
 def _top5_overlap(expected: np.ndarray, actual: np.ndarray) -> int:
     exp_top5 = np.argsort(expected)[-5:]
     act_top5 = np.argsort(actual)[-5:]
@@ -97,15 +75,12 @@ def test_padded_batch_matches_pytorch(
     """Compare padded fp32 batch logits against PyTorch at each row's last valid token."""
     model_id, model, tokenizer = pytorch_model
     onnx_dir = get_onnx_dir(exports_dir, model_id)
-    onnx_file = get_onnx_file(onnx_dir, None)
+    onnx_file = onnx_dir / model_file("fp32")
 
     if not onnx_file.exists():
         pytest.skip(f"ONNX file not found: {onnx_file}")
 
-    try:
-        onnx_sess = load_onnx_session(onnx_file)
-    except Exception as e:
-        pytest.skip(f"ONNX model failed to load: {e}")
+    onnx_sess = load_onnx_session(onnx_file)
 
     _, input_ids, attention_mask, position_ids = _build_padded_batch(
         tokenizer, PROMPTS, padding_side
@@ -122,9 +97,7 @@ def test_padded_batch_matches_pytorch(
         "input_ids": input_ids.numpy().astype(np.int64),
         "attention_mask": attention_mask.numpy().astype(np.int64),
     }
-    if any(inp.name == "position_ids" for inp in onnx_sess.get_inputs()):
-        onnx_inputs["position_ids"] = position_ids.numpy().astype(np.int64)
-    onnx_inputs.update(_init_onnx_cache(onnx_sess, batch_size=input_ids.shape[0]))
+    onnx_inputs.update(initialize_cache(onnx_sess, batch_size=input_ids.shape[0]))
 
     onnx_logits = onnx_sess.run(None, onnx_inputs)[0]
 

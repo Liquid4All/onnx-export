@@ -15,8 +15,9 @@ import pytest
 from helpers import get_onnx_dir
 from PIL import Image
 
-from liquidonnx.lfm2_vl.preprocessing import get_image_token_id
-from liquidonnx.session import initialize_cache, load_onnx_session
+from liquidonnx.embeddings import embed
+from liquidonnx.lfm2_vl.export import bundle
+from liquidonnx.session import decoder_inputs, initialize_cache, load_onnx_session
 
 logger = logging.getLogger(__name__)
 
@@ -44,51 +45,18 @@ def run_embed_images(embed_images_sess, processor, image):
     return outputs[0]  # [num_tokens, hidden]
 
 
-def run_full_inference(
-    embed_tokens_sess, embed_images_sess, decoder_sess, processor, image, prompt
-):
+def run_full_inference(embeddings_sess, embed_images_sess, decoder_sess, processor, image, prompt):
     """Run full VL inference and return logits."""
     messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = processor(text=text, images=[image], return_tensors="pt")
 
     input_ids = inputs["input_ids"].numpy().astype(np.int64)
-
-    # Get image embeddings
     image_embeds = run_embed_images(embed_images_sess, processor, image)
+    inputs_embeds = embed(embeddings_sess, input_ids, image_embeds)
 
-    # Get text embeddings
-    text_embeds = embed_tokens_sess.run(None, {"input_ids": input_ids})[0][0]
-
-    # Merge embeddings
-    image_token_id = get_image_token_id(processor.tokenizer)
-    image_mask = input_ids[0] == image_token_id
-
-    result_embeds = []
-    img_idx = 0
-    for i, is_image in enumerate(image_mask):
-        if is_image and img_idx < len(image_embeds):
-            result_embeds.append(image_embeds[img_idx])
-            img_idx += 1
-        else:
-            result_embeds.append(text_embeds[i])
-
-    inputs_embeds = np.stack(result_embeds, axis=0)[np.newaxis, ...].astype(np.float32)
-
-    # Run decoder
-    seq_len = inputs_embeds.shape[1]
-    attention_mask = np.ones((1, seq_len), dtype=np.int64)
-
-    decoder_inputs = {
-        "inputs_embeds": inputs_embeds,
-        "attention_mask": attention_mask,
-    }
-
-    cache = initialize_cache(decoder_sess)
-    decoder_inputs.update(cache)
-
-    logits = decoder_sess.run(None, decoder_inputs)[0]
-    return logits
+    feed = decoder_inputs(inputs_embeds, initialize_cache(decoder_sess), past_len=0)
+    return decoder_sess.run(None, feed)[0]
 
 
 # === Image Size Edge Cases ===
@@ -257,20 +225,14 @@ def test_full_inference_different_sizes(
     if not onnx_dir.exists():
         pytest.skip(f"Export not found: {onnx_dir}")
 
-    embed_tokens_file = onnx_dir / "embed_tokens.onnx"
-    embed_images_file = onnx_dir / "vision_encoder.onnx"
-    decoder_file = onnx_dir / "decoder_model_merged.onnx"
+    files = bundle("fp32")
+    for name in files.values():
+        if not (onnx_dir / name).exists():
+            pytest.skip(f"{name} not found in {onnx_dir}")
 
-    if not embed_tokens_file.exists():
-        pytest.skip(f"embed_tokens not found: {embed_tokens_file}")
-    if not embed_images_file.exists():
-        pytest.skip(f"vision_encoder not found: {embed_images_file}")
-    if not decoder_file.exists():
-        pytest.skip(f"decoder not found: {decoder_file}")
-
-    embed_tokens_sess = load_onnx_session(embed_tokens_file)
-    embed_images_sess = load_onnx_session(embed_images_file)
-    decoder_sess = load_onnx_session(decoder_file)
+    embeddings_sess = load_onnx_session(onnx_dir / files["embedding"])
+    embed_images_sess = load_onnx_session(onnx_dir / files["vision"])
+    decoder_sess = load_onnx_session(onnx_dir / files["decoder"])
 
     prompt = "What do you see?"
 
@@ -281,7 +243,7 @@ def test_full_inference_different_sizes(
         img = Image.new("RGB", (w, h), color=(128, 128, 128))
 
         logits = run_full_inference(
-            embed_tokens_sess, embed_images_sess, decoder_sess, processor, img, prompt
+            embeddings_sess, embed_images_sess, decoder_sess, processor, img, prompt
         )
 
         # Verify logits shape

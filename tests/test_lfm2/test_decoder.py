@@ -11,12 +11,12 @@ Run with:
 import logging
 import pathlib
 
-import numpy as np
 import pytest
 import torch
 from helpers import get_model_name, get_onnx_dir
 
-from liquidonnx.session import get_onnx_file, load_onnx_session
+from liquidonnx.lfm2.export import model_file
+from liquidonnx.session import decoder_inputs, initialize_cache, load_onnx_session
 from liquidonnx.verify import check_results, compare_arrays, compare_top_k, get_tolerances
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ def test_decoder(
     logger.info(f"Testing {model_name}/{precision or 'fp32'}: '{prompt}'")
 
     onnx_dir = get_onnx_dir(exports_dir, model_id)
-    onnx_file = get_onnx_file(onnx_dir, precision)
+    onnx_file = onnx_dir / model_file(precision or "fp32")
 
     if not onnx_file.exists():
         precision_arg = f" --precision {precision}" if precision else ""
@@ -81,17 +81,7 @@ def test_decoder(
         pytorch_logits = outputs.logits.numpy()
     logger.info(f"  PyTorch logits: shape={pytorch_logits.shape}")
 
-    onnx_inputs = {
-        "input_ids": input_ids.numpy().astype(np.int64),
-        "attention_mask": attention_mask.numpy().astype(np.int64),
-        "position_ids": position_ids.numpy().astype(np.int64),
-    }
-
-    for inp in onnx_sess.get_inputs():
-        if inp.name not in onnx_inputs:
-            shape = [d if isinstance(d, int) else 1 for d in inp.shape]
-            onnx_inputs[inp.name] = np.zeros(shape, dtype=np.float32)
-
+    onnx_inputs = decoder_inputs(input_ids.numpy(), initialize_cache(onnx_sess), past_len=0)
     onnx_logits = onnx_sess.run(None, onnx_inputs)[0]
     logger.info(f"  ONNX logits: shape={onnx_logits.shape}")
 

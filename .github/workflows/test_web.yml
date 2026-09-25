@@ -1,0 +1,53 @@
+name: Test WebGPU
+
+# Runs the synthetic LFM2.5-Audio graphs on onnxruntime-web's WebGPU EP in headless
+# Chromium (SwiftShader) and checks outputs against the wasm EP. See tests/web/README.md.
+
+on:
+  push:
+    branches: [main]
+    paths: &web-paths
+      - 'src/liquidonnx/**'
+      - 'tests/web/**'
+      - 'tests/test_lfm2_audio/synthetic.py'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/test_web.yml'
+  pull_request:
+    paths: *web-paths
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  webgpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      - run: uv sync --extra dev
+      - run: uv run python tests/web/export_synthetic.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tests/web/package-lock.json
+      - run: npm ci
+        working-directory: tests/web
+      - run: npx playwright install --with-deps chromium
+        working-directory: tests/web
+      - run: npm test
+        working-directory: tests/web
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: tests/web/test-results/
+          retention-days: 7
