@@ -43,6 +43,7 @@ import pathlib
 
 import onnx
 
+from liquidonnx import remote_code_enabled
 from liquidonnx.embeddings import build_embeddings, embeddings_to_fp16
 from liquidonnx.export_cli import (
     add_export_arguments,
@@ -147,12 +148,12 @@ def export_vl_model(model_path: str, output_dir: pathlib.Path):
     onnx_dir = output_dir / "onnx"
     onnx_dir.mkdir(parents=True, exist_ok=True)
 
-    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=remote_code_enabled())
     vl_config = LFM2VLConfig.from_hf_config(config)
 
     logger.info(f"Loading weights from {model_path}...")
     model = AutoModelForImageTextToText.from_pretrained(
-        model_path, torch_dtype=torch.float32, trust_remote_code=True
+        model_path, torch_dtype=torch.float32, trust_remote_code=remote_code_enabled()
     )
     weights = {name: param.detach().numpy() for name, param in model.named_parameters()}
     del model
@@ -181,7 +182,9 @@ def export_vl_model(model_path: str, output_dir: pathlib.Path):
     export_decoder(model_path, output_dir, "decoder.onnx", {"exclude_embeds": "true"})
 
     # === 4. Processor and tokenizer ===
-    AutoProcessor.from_pretrained(model_path, trust_remote_code=True).save_pretrained(output_dir)
+    AutoProcessor.from_pretrained(
+        model_path, trust_remote_code=remote_code_enabled()
+    ).save_pretrained(output_dir)
     fix_tokenizer_pattern(output_dir / "tokenizer.json")
 
 

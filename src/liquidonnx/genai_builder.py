@@ -20,6 +20,7 @@ import tempfile
 
 import onnx
 
+from liquidonnx import remote_code_enabled
 from liquidonnx.quantize import get_total_model_size_mb, load_model, save_model
 
 logger = logging.getLogger(__name__)
@@ -101,8 +102,8 @@ def build_decoder(
         "-c",
         str(cache_dir() / "genai-builder-cache"),
     ]
-    if extra_options:
-        cmd += ["--extra_options", *[f"{k}={v}" for k, v in extra_options.items()]]
+    options = {"hf_remote": str(remote_code_enabled()).lower(), **(extra_options or {})}
+    cmd += ["--extra_options", *[f"{k}={v}" for k, v in options.items()]]
     logger.info(f"Building decoder with the onnxruntime-genai builder: {checkpoint}")
     subprocess.run(cmd, check=True)
     return output_dir / "model.onnx"

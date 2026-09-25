@@ -77,6 +77,12 @@ exports/LFM2.5-1.2B-Instruct-ONNX/
 
 The first export fetches the onnxruntime-genai model builder at a pinned commit into `~/.cache/liquidonnx` (needs `git`). Set `LIQUIDONNX_GENAI_BUILDER` to a local `src/python/py/models` directory to use another copy.
 
+Exports do not run Python code shipped in a Hugging Face repository (`trust_remote_code`). For a trusted repository that needs custom Transformers code, opt in with `LIQUIDONNX_TRUST_REMOTE_CODE=1`:
+
+```bash
+LIQUIDONNX_TRUST_REMOTE_CODE=1 uv run lfm2-vl-export LiquidAI/LFM2.5-VL-1.6B --precision q4
+```
+
 ### 3.2 LFM2-VL Vision-Language Models
 
 ```bash
