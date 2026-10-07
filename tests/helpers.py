@@ -4,9 +4,6 @@ import logging
 import pathlib
 
 import numpy as np
-import onnxruntime_genai as og
-import pytest
-from packaging.version import Version
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -23,17 +20,6 @@ def get_export_dir(exports_dir: pathlib.Path, model_id: str) -> pathlib.Path:
 
 def get_onnx_dir(exports_dir: pathlib.Path, model_id: str) -> pathlib.Path:
     return get_export_dir(exports_dir, model_id) / "onnx"
-
-
-def require_genai(model_type: str):
-    """Skip unless the installed onnxruntime-genai runs model_type.
-
-    0.16.0 runs lfm2 only; lfm2_moe, lfm2_vl and lfm2_audio landed after it, and builds of main
-    report 0.16.0-dev.
-    """
-    version = Version(og.__version__)
-    if model_type != "lfm2" and not version.is_devrelease and version <= Version("0.16.0"):
-        pytest.skip(f"onnxruntime-genai {og.__version__} has no {model_type}")
 
 
 def generate_with_logits(model, inputs, max_new_tokens: int) -> tuple[list[int], np.ndarray]:

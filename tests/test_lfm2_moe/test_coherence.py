@@ -13,7 +13,7 @@ import logging
 import pathlib
 
 import pytest
-from helpers import get_export_dir, require_genai, text_coherence
+from helpers import get_export_dir, text_coherence
 
 from liquidonnx.genai_runtime import load_model
 from liquidonnx.lfm2.export import genai_files, model_file
@@ -39,7 +39,6 @@ PROMPTS = [
 @pytest.mark.parametrize("pytorch_model", MODELS, indirect=True)
 @pytest.mark.parametrize("precision", PRECISIONS)
 def test_coherence(exports_dir: pathlib.Path, pytorch_model, precision: str):
-    require_genai("lfm2_moe")
     model_id, model, tokenizer = pytorch_model
     export = get_export_dir(exports_dir, model_id)
     if not (export / "onnx" / model_file(precision)).exists():

@@ -1,9 +1,11 @@
 """
 Build LFM2 decoders (text, MoE, VL, audio) with the onnxruntime-genai model builder.
 
-The builder runs from a source checkout of onnxruntime-genai main at GENAI_COMMIT (0.16.0 has
-only the text builder), fetched once into ~/.cache/liquidonnx. Set LIQUIDONNX_GENAI_BUILDER to a
-local `src/python/py/models` directory to use another copy.
+The builder runs from a source checkout of onnxruntime-genai main at the pinned GENAI_COMMIT,
+fetched once into ~/.cache/liquidonnx. Set LIQUIDONNX_GENAI_BUILDER to a local
+`src/python/py/models` directory to use another copy. The exports run on onnxruntime-genai 0.17.1
+or later from PyPI, for all four families (lfm2, lfm2_moe, lfm2_vl, lfm2_audio); CI tests them on
+the runtime built from main at GENAI_COMMIT.
 
 The decoder is always built as fp32 for the CPU EP; every other precision is derived from it by
 liquidonnx.quantize.
@@ -26,7 +28,7 @@ from liquidonnx.quantize import get_total_model_size_mb, load_model, save_model
 logger = logging.getLogger(__name__)
 
 GENAI_REPO = "https://github.com/microsoft/onnxruntime-genai.git"
-GENAI_COMMIT = "7f750ddbcbfb4c93d99d23d595c40294904f1b06"
+GENAI_COMMIT = "957bdd8dc717e94c09fad3b17d22f10d33217fd2"
 BUILDER_SUBDIR = "src/python/py/models"
 CHECKPOINT_FILES = ("config.json", "generation_config.json")
 

@@ -11,7 +11,6 @@ import pathlib
 
 import numpy as np
 import pytest
-from helpers import require_genai
 
 from liquidonnx.lfm2_audio.infer import (
     AUDIO_MARKER,
@@ -38,7 +37,6 @@ def model_dir(tmp_path_factory) -> pathlib.Path:
 
 @pytest.fixture(scope="module")
 def chat(model_dir) -> AudioChat:
-    require_genai("lfm2_audio")
     return AudioChat(model_dir)
 
 

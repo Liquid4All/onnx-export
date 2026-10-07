@@ -17,7 +17,6 @@ import numpy as np
 import onnx
 import pytest
 import torch
-from helpers import require_genai
 from transformers import (
     AutoTokenizer,
     Lfm2Config,
@@ -28,7 +27,7 @@ from transformers import (
 
 from liquidonnx.compare.metrics import greedy
 from liquidonnx.genai_builder import export_decoder
-from liquidonnx.genai_runtime import generate, load_model
+from liquidonnx.genai_runtime import check_genai_version, generate, load_model
 from liquidonnx.lfm2.export import ALL_PRECISIONS, genai_files, model_file, set_default_decoder
 from liquidonnx.quantize import derive_precision
 from liquidonnx.session import cached_outputs, decoder_inputs, initialize_cache, load_onnx_session
@@ -193,11 +192,19 @@ def test_q4f16_ignores_a_stale_q4(export, tmp_path):
 @pytest.mark.parametrize("precision", ["fp32", "q4"])
 def test_genai_runtime_matches_onnxruntime(export, precision: str):
     """Greedy answers through liquidonnx.genai_runtime (the CLIs' path) and plain onnxruntime."""
-    kind, _, output_dir = export
-    require_genai("lfm2" if kind == "dense" else "lfm2_moe")
+    _, _, output_dir = export
 
     model = load_model(output_dir, genai_files(precision))
     genai_tokens = generate(model, TOKENS[0], 8).get_sequence(0)[TOKENS.shape[1] :].tolist()
 
     session = decoder(output_dir, precision)
     assert genai_tokens == greedy(session, TOKENS[0], len(genai_tokens), eos=set())
+
+
+def test_genai_version_floor():
+    """load_model refuses onnxruntime-genai releases before 0.17.1 and accepts builds of main."""
+    for version in ("0.16.0", "0.17.0"):
+        with pytest.raises(RuntimeError, match="0.17.1"):
+            check_genai_version(version)
+    for version in ("0.17.1", "0.18.0-dev"):
+        check_genai_version(version)

@@ -17,7 +17,6 @@ import onnx
 import onnxruntime_genai as og
 import pytest
 import torch
-from helpers import require_genai
 from PIL import Image
 from test_lfm2_audio.synthetic import HIDDEN, build_model_dir
 from tokenizers import Regex, Tokenizer, models, pre_tokenizers
@@ -173,7 +172,6 @@ def test_vl_genai_config(vl):
 @pytest.mark.parametrize("precision", ["fp32", "q4"])
 def test_vl_genai_runtime(vl, precision: str):
     """The lfm2_vl pipeline, loaded as the CLI does, against the same files in plain onnxruntime."""
-    require_genai("lfm2_vl")
     _, processor, output_dir = vl
     model = load_model(output_dir, vl_export.genai_files(precision))
 
@@ -202,7 +200,6 @@ def test_vl_genai_runtime(vl, precision: str):
 
 def test_vl_chat_keeps_images(vl, monkeypatch):
     """lfm2-vl-infer re-sends an image with every turn after the one it came with."""
-    require_genai("lfm2_vl")
     chat = VLChat(vl[2])
     prompts, processor = [], chat.processor
 

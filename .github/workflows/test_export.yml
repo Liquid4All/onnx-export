@@ -19,9 +19,10 @@ name: Test Export
 #   * push to main / PRs against main that touch export code (default model)
 #   * manual dispatch (pick the model, family, and precision)
 #
-# liquidonnx tracks onnxruntime-genai main: the job builds onnxruntime-genai at the
-# commit the model builder is pinned to (liquidonnx.genai_builder.GENAI_COMMIT), cached
-# per commit and onnxruntime version, and runs every family on it.
+# liquidonnx tracks onnxruntime-genai main: uv.lock installs the 0.17.1 release, but
+# the job builds onnxruntime-genai at the commit the model builder is pinned to
+# (liquidonnx.genai_builder.GENAI_COMMIT), cached per commit and onnxruntime version,
+# and runs every family on that build.
 #
 # Large checkpoints may exceed the runner's disk/RAM — keep to a small model
 # (the defaults export in a few minutes). CPU inference on a hosted runner is
@@ -127,8 +128,9 @@ jobs:
             --ort_home "$GITHUB_WORKSPACE/onnxruntime-linux-x64-$ORT"
           mv build/Linux/Release/wheel "$GITHUB_WORKSPACE/genai-python"
 
-      # Fail if Python falls back to the 0.16 release from uv.lock; the versions look alike
-      # (0.16.0 vs 0.16.0-dev), so only the import path tells them apart.
+      # Fail if Python falls back to the 0.17.1 release from uv.lock: it runs every family
+      # too, so the job would pass on it unnoticed. Check the import path, not the version
+      # (main reports 0.18.0-dev, which changes as main moves).
       - name: Use the onnxruntime-genai build
         run: |
           echo "PYTHONPATH=$GITHUB_WORKSPACE/genai-python" >> "$GITHUB_ENV"
