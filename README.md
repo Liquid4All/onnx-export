@@ -38,6 +38,13 @@ uv sync --extra dev
 
 `uv sync` installs onnxruntime-genai 0.17.1 from `uv.lock` (`pyproject.toml` requires 0.17.1 or later), which runs all four families (`lfm2`, `lfm2_moe`, `lfm2_vl`, `lfm2_audio`).
 
+`uv.lock` also pins an onnxruntime nightly from the ORT-Nightly feed (`[tool.uv]` in `pyproject.toml`), because it runs LFM2-MoE on CPU about 44 times faster than onnxruntime 1.30.0 (see [4.3](#43-moe)). `pip install` ignores `uv.lock` and installs the latest onnxruntime release (1.30.0; `pyproject.toml` requires 1.30.0 or later). To switch a pip environment to the nightly:
+
+```bash
+pip install --pre --no-deps --upgrade \
+    --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ onnxruntime
+```
+
 This repository tracks onnxruntime-genai `main`: the model builder runs at a pinned commit of `main` (`liquidonnx.genai_builder.GENAI_COMMIT`), and CI tests the runtime built from that same commit. To run on that build, build the pinned commit and put its Python package first on the path:
 
 ```bash
@@ -46,8 +53,8 @@ git checkout $(uv run --project ../onnx-export python -c "from liquidonnx.genai_
 uv pip install --python ../onnx-export/.venv/bin/python pip  # the build packages a wheel with pip
 # On Apple silicon, append CMAKE_OSX_ARCHITECTURES=arm64 to --cmake_extra_defines.
 # Without --ort_home, build.py compiles against the onnxruntime NuGet package cmake/ortlib.cmake pins
-# (1.26.0 at GENAI_COMMIT); CI passes --ort_home with the onnxruntime release archive of the uv.lock
-# version. Either way the build loads the venv's onnxruntime at run time.
+# (1.26.0 at GENAI_COMMIT); CI passes --ort_home with the onnxruntime 1.30.0 release archive (the
+# uv.lock nightly has none). Either way the build loads the venv's onnxruntime at run time.
 # CMAKE_BUILD_PARALLEL_LEVEL caps the build at the core count; build.py --parallel is an unbounded make -j.
 CMAKE_BUILD_PARALLEL_LEVEL=$(getconf _NPROCESSORS_ONLN) ../onnx-export/.venv/bin/python build.py \
     --config Release --skip_tests --skip_examples --no_telemetry --cmake_extra_defines ENABLE_TESTS=OFF
@@ -196,6 +203,13 @@ In the chat, `images <path> [<path> ...]` attaches images to the next message; t
 uv run lfm2-moe-infer --model ./exports/LFM2.5-8B-A1B-ONNX
 uv run lfm2-moe-infer --model ./exports/LFM2.5-8B-A1B-ONNX --precision q8 --prompt "Hello"
 ```
+
+On CPU, MoE speed depends on the onnxruntime version. LFM2.5-8B-A1B q4 with onnxruntime-genai 0.17.1 (`lfm2-bench --ep cpu --max-tokens 128`, 201-token prompt, 13-core (26-thread) x86-64 host, median of 3 runs):
+
+| onnxruntime | Load | Prefill | Decode |
+|---|---|---|---|
+| 1.30.0 (PyPI) | 32 s | 61 tok/s | 1.3 tok/s |
+| 1.31.0.dev20261007001 (`uv.lock`) | 3.6 s | 225 tok/s | 59 tok/s |
 
 ### 4.4 Audio (ASR, TTS, Interleaved)
 
