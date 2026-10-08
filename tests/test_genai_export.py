@@ -234,15 +234,34 @@ def test_load_model_preloads_cuda_libraries(export, ep: str, monkeypatch):
     assert calls == {"cpu": ["model"], "cuda": ["preload", "model"]}[ep]
 
 
+@pytest.mark.parametrize("tf32", [True, False])
+@pytest.mark.parametrize("ep", EXECUTION_PROVIDERS)
+def test_load_model_turns_tf32_off_on_cuda(export, ep: str, tf32: bool, monkeypatch):
+    """tf32=False sets the CUDA EP's use_tf32 to 0; otherwise the providers keep their defaults."""
+    options = []
+    set_provider_option = og.Config.set_provider_option
+
+    def record(config, *args):
+        options.append(args)
+        set_provider_option(config, *args)
+
+    monkeypatch.setattr(ort, "preload_dlls", lambda: None)
+    monkeypatch.setattr(og.Config, "set_provider_option", record)
+    monkeypatch.setattr(og, "Model", lambda config: None)
+    load_model(export[2], ep=ep, tf32=tf32)
+    assert options == ([("cuda", "use_tf32", "0")] if ep == "cuda" and not tf32 else [])
+
+
 def fake_sessions(monkeypatch, loaded: list[str]) -> list:
     """Sessions that load only the providers in loaded; returns the log of CUDA library preloads
     and the providers each session asked for."""
     calls = []
 
     class Session:
-        def __init__(self, path: str, providers: list[str]):
+        def __init__(self, path: str, providers: list):
             calls.append(providers)
-            self.providers = [p for p in providers if p in loaded]
+            names = [p[0] if isinstance(p, tuple) else p for p in providers]
+            self.providers = [p for p in names if p in loaded]
 
         def get_providers(self) -> list[str]:
             return self.providers
@@ -255,12 +274,18 @@ def fake_sessions(monkeypatch, loaded: list[str]) -> list:
 
 @pytest.mark.parametrize(
     ("args", "expected"),
-    [((), [[CPU_EP]]), (("cpu",), [[CPU_EP]]), (("cuda",), ["preload", [CUDA_EP, CPU_EP]])],
-    ids=["default", "cpu", "cuda"],
+    [
+        ((), [[CPU_EP]]),
+        (("cpu",), [[CPU_EP]]),
+        (("cuda",), ["preload", [CUDA_EP, CPU_EP]]),
+        (("cpu", False), [[CPU_EP]]),
+        (("cuda", False), ["preload", [(CUDA_EP, {"use_tf32": "0"}), CPU_EP]]),
+    ],
+    ids=["default", "cpu", "cuda", "cpu-no-tf32", "cuda-no-tf32"],
 )
 def test_sessions_run_on_the_requested_ep(args: tuple, expected: list, monkeypatch, tmp_path):
     """Single-graph sessions run on CPU unless asked for CUDA, even where CUDA works, and load the
-    CUDA libraries only for CUDA."""
+    CUDA libraries only for CUDA. tf32=False turns TF32 off on CUDA."""
     calls = fake_sessions(monkeypatch, [CUDA_EP, CPU_EP])
     path = tmp_path / "model.onnx"
     path.touch()
@@ -268,13 +293,14 @@ def test_sessions_run_on_the_requested_ep(args: tuple, expected: list, monkeypat
     assert calls == expected
 
 
-def test_cuda_session_fails_on_cpu_fallback(monkeypatch, tmp_path):
+@pytest.mark.parametrize("tf32", [True, False])
+def test_cuda_session_fails_on_cpu_fallback(tf32: bool, monkeypatch, tmp_path):
     """onnxruntime runs on CPU when the CUDA EP does not load; a CUDA session then fails."""
     fake_sessions(monkeypatch, [CPU_EP])
     path = tmp_path / "model.onnx"
     path.touch()
     with pytest.raises(RuntimeError, match=f"without {CUDA_EP}"):
-        load_onnx_session(path, "cuda")
+        load_onnx_session(path, "cuda", tf32)
 
 
 def test_preload_cuda_libraries_without_preload_dlls(monkeypatch):

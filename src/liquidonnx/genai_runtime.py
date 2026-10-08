@@ -49,8 +49,13 @@ def check_genai_version(version: str):
         )
 
 
-def load_model(model_dir: pathlib.Path, files: dict | None = None, ep: str = "cpu") -> og.Model:
-    """The export at model_dir; files replaces genai_config.json model entries (a precision)."""
+def load_model(
+    model_dir: pathlib.Path, files: dict | None = None, ep: str = "cpu", tf32: bool = True
+) -> og.Model:
+    """The export at model_dir; files replaces genai_config.json model entries (a precision).
+
+    The CUDA EP runs fp32 matmuls and convolutions in TF32 unless tf32 is False.
+    """
     check_genai_version(og.__version__)
     config = og.Config(str(model_dir))
     if files:
@@ -62,6 +67,8 @@ def load_model(model_dir: pathlib.Path, files: dict | None = None, ep: str = "cp
         config.clear_providers()
         config.append_provider(ep)
     if ep == "cuda":
+        if not tf32:
+            config.set_provider_option(ep, "use_tf32", "0")
         preload_cuda_libraries()
     logger.info(f"Loading {model_dir} ({ep}) with onnxruntime-genai {og.__version__}...")
     return og.Model(config)

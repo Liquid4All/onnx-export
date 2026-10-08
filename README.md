@@ -283,6 +283,8 @@ uv run lfm2-compare vl --model LiquidAI/LFM2.5-VL-1.6B --export ./exports/LFM2.5
 uv run lfm2-compare audio --model LiquidAI/LFM2.5-Audio-1.5B --export ./exports/LFM2.5-Audio-1.5B-ONNX
 ```
 
+`--device cuda` runs the reference, the ONNX sessions and onnxruntime-genai on the GPU with TF32 off, so fp32 stays fp32 (needs `onnxruntime-gpu` and `onnxruntime-genai-cuda`). References are cached per device.
+
 ## 6. Pre-exported Models
 
 ### 6.1 LiquidAI

@@ -33,18 +33,24 @@ def preload_cuda_libraries():
         preload()
 
 
-def load_onnx_session(path: pathlib.Path, ep: str = "cpu") -> ort.InferenceSession:
+def load_onnx_session(
+    path: pathlib.Path, ep: str = "cpu", tf32: bool = True
+) -> ort.InferenceSession:
     """The graph at path on an execution provider of SESSION_PROVIDERS.
 
     onnxruntime runs on CPU when the CUDA EP fails to load, so a CUDA session without it fails.
+    The CUDA EP runs fp32 matmuls and convolutions in TF32 unless tf32 is False.
     """
     if not path.exists():
         raise FileNotFoundError(f"ONNX file not found: {path}")
+    providers = SESSION_PROVIDERS[ep]
+    provider = providers[0]
     if ep == "cuda":
         preload_cuda_libraries()
+        if not tf32:
+            providers = [(provider, {"use_tf32": "0"}), *providers[1:]]
     logger.info(f"Loading {path.name} ({ep})...")
-    session = ort.InferenceSession(str(path), providers=SESSION_PROVIDERS[ep])
-    provider = SESSION_PROVIDERS[ep][0]
+    session = ort.InferenceSession(str(path), providers=providers)
     if provider not in session.get_providers():
         raise RuntimeError(
             f"onnxruntime {ort.__version__} ran {path.name} without {provider} (available: "

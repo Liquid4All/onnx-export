@@ -45,18 +45,19 @@ def precisions(export: pathlib.Path) -> list[str]:
     ]
 
 
-def reference(checkpoint: pathlib.Path, max_new: int) -> list[dict]:
+def reference(checkpoint: pathlib.Path, max_new: int, device: str) -> list[dict]:
     """Greedy answers, their logits, the merged input embeddings and the image features."""
     import torch
     from PIL import Image
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
     processor = AutoProcessor.from_pretrained(checkpoint)
-    model = AutoModelForImageTextToText.from_pretrained(checkpoint, dtype=torch.float32).eval()
+    model = AutoModelForImageTextToText.from_pretrained(checkpoint, dtype=torch.float32)
+    model = model.to(device).eval()
     captured = {}
 
     def grab(_module, _args, kwargs):
-        captured["embeds"] = kwargs["inputs_embeds"].detach().float().numpy()[0]
+        captured["embeds"] = kwargs["inputs_embeds"].detach().float().cpu().numpy()[0]
 
     model.model.language_model.register_forward_pre_hook(grab, with_kwargs=True)
     items = []
@@ -71,7 +72,7 @@ def reference(checkpoint: pathlib.Path, max_new: int) -> list[dict]:
             return_tensors="pt",
             do_image_splitting=False,
             **({"images": pil} if pil else {}),
-        )
+        ).to(device)
         ids = inputs["input_ids"]
         start = time.time()
         with torch.no_grad():
@@ -81,10 +82,10 @@ def reference(checkpoint: pathlib.Path, max_new: int) -> list[dict]:
         item = {
             "images": images,
             "rendered": rendered,
-            "prompt": ids[0].numpy(),
+            "prompt": ids[0].cpu().numpy(),
             "answer": answer,
             "embeds": captured["embeds"],  # [S, H]: text and image features, prompt + answer
-            "logits": logits.logits[0, ids.shape[1] - 1 : -1].float().numpy(),
+            "logits": logits.logits[0, ids.shape[1] - 1 : -1].float().cpu().numpy(),
             "text": processor.tokenizer.decode(answer, skip_special_tokens=True),
         }
         if pil:
@@ -92,18 +93,20 @@ def reference(checkpoint: pathlib.Path, max_new: int) -> list[dict]:
                 features = model.get_image_features(**{k: inputs[k] for k in PIXEL_INPUTS})
             features = getattr(features, "pooler_output", features)
             item["image_features"] = np.concatenate(
-                [f.float().numpy().reshape(-1, f.shape[-1]) for f in features]
+                [f.float().cpu().numpy().reshape(-1, f.shape[-1]) for f in features]
             )
-            item["pixel_inputs"] = {k: inputs[k].numpy() for k in PIXEL_INPUTS}
+            item["pixel_inputs"] = {k: inputs[k].cpu().numpy() for k in PIXEL_INPUTS}
         logger.info(f"reference {images}: {time.time() - start:.1f}s")
         items.append(item)
     return items
 
 
-def score_decoder(onnx_dir: pathlib.Path, files: dict, refs: list[dict], eos: set[int]) -> dict:
+def score_decoder(
+    onnx_dir: pathlib.Path, files: dict, refs: list[dict], eos: set[int], ep: str
+) -> dict:
     """The decoder fed the reference embeddings; greedy decode looks tokens up in embeddings."""
-    session = load_onnx_session(onnx_dir / files["decoder"])
-    embedding = load_onnx_session(onnx_dir / files["embedding"])
+    session = load_onnx_session(onnx_dir / files["decoder"], ep, tf32=False)
+    embedding = load_onnx_session(onnx_dir / files["embedding"], ep, tf32=False)
     forced, answers = [], []
     for ref in refs:
         n, embeds = len(ref["prompt"]), ref["embeds"][None]
@@ -122,8 +125,8 @@ def score_decoder(onnx_dir: pathlib.Path, files: dict, refs: list[dict], eos: se
     }
 
 
-def score_vision(path: pathlib.Path, refs: list[dict]) -> dict:
-    session = load_onnx_session(path)
+def score_vision(path: pathlib.Path, refs: list[dict], ep: str) -> dict:
+    session = load_onnx_session(path, ep, tf32=False)
     worst, cosines = 0.0, []
     for ref in refs:
         if "image_features" not in ref:
@@ -139,9 +142,9 @@ def score_vision(path: pathlib.Path, refs: list[dict]) -> dict:
     return {"max_abs": worst, "cosine_min": min(cosines), "size_mb": get_total_model_size_mb(path)}
 
 
-def score_embedding(path: pathlib.Path, refs: list[dict]) -> dict:
+def score_embedding(path: pathlib.Path, refs: list[dict], ep: str) -> dict:
     """The embedding model given the reference image features, against the merged embeddings."""
-    session = load_onnx_session(path)
+    session = load_onnx_session(path, ep, tf32=False)
     worst = 0.0
     for ref in refs:
         n = len(ref["prompt"])
@@ -150,8 +153,10 @@ def score_embedding(path: pathlib.Path, refs: list[dict]) -> dict:
     return {"max_abs": worst, "size_mb": get_total_model_size_mb(path)}
 
 
-def score_genai(export: pathlib.Path, precision: str, refs: list[dict], eos: set[int]) -> dict:
-    model = load_model(export, genai_files(precision))
+def score_genai(
+    export: pathlib.Path, precision: str, refs: list[dict], eos: set[int], ep: str
+) -> dict:
+    model = load_model(export, genai_files(precision), ep, tf32=False)
     processor = model.create_multimodal_processor()
     answers, same_ids = [], 0
     for ref in refs:
@@ -164,13 +169,13 @@ def score_genai(export: pathlib.Path, precision: str, refs: list[dict], eos: set
     return {"greedy": merge_sequences(answers), "prompt_ids_equal": f"{same_ids}/{len(refs)}"}
 
 
-def score(export: pathlib.Path, precision: str, refs: list[dict], genai: bool) -> dict:
+def score(export: pathlib.Path, precision: str, refs: list[dict], genai: bool, ep: str) -> dict:
     onnx_dir, files, eos = export / "onnx", bundle(precision), eos_ids(export)
     row = {
-        "decoder": guarded(score_decoder, onnx_dir, files, refs, eos),
-        "vision": guarded(score_vision, onnx_dir / files["vision"], refs),
-        "embedding": guarded(score_embedding, onnx_dir / files["embedding"], refs),
+        "decoder": guarded(score_decoder, onnx_dir, files, refs, eos, ep),
+        "vision": guarded(score_vision, onnx_dir / files["vision"], refs, ep),
+        "embedding": guarded(score_embedding, onnx_dir / files["embedding"], refs, ep),
     }
     if genai:
-        row["genai"] = guarded(score_genai, export, precision, refs, eos)
+        row["genai"] = guarded(score_genai, export, precision, refs, eos, ep)
     return row
