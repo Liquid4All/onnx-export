@@ -627,8 +627,13 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         )
 
     def build_conv_module(self, hidden_state: str, layer_idx: int, conv_mask: str) -> str:
-        """Build convolution module: LayerNorm → Conv1d (pointwise) → GLU → DepthConv → BN → SiLU → Conv1d."""
+        """Build convolution module: LayerNorm → pointwise → GLU → DepthConv → BN → SiLU → pointwise.
+
+        The pointwise (1x1) convolutions run as MatMul on [B, T, C], so that weight-only
+        quantization covers them; only the depthwise convolution runs on [B, C, T].
+        """
         prefix = f"/encoder/layers.{layer_idx}/conv"
+        weight_prefix = f"conformer.layers.{layer_idx}.conv"
 
         # LayerNorm
         normed = self.make_layernorm(
@@ -638,19 +643,14 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             f"{prefix}/norm",
         )
 
-        # Transpose for Conv1d: [B, T, C] → [B, C, T]
-        normed_t = self.make_transpose(normed, f"{prefix}/transpose1/output_0", perm=[0, 2, 1])
-
-        # Pointwise conv 1 (expand to 2*d_model for GLU)
-        pw1 = self.make_node(
-            "Conv",
-            [
-                normed_t,
-                f"encoder.layers.{layer_idx}.conv.pointwise_conv1.weight",
-                f"encoder.layers.{layer_idx}.conv.pointwise_conv1.bias",
-            ],
-            [f"{prefix}/pw1/Conv/output_0"],
-            kernel_shape=[1],
+        # Pointwise conv 1 (expand to 2*d_model for GLU): [B, T, C] → [B, T, 2C]
+        pw1 = self.make_linear(
+            normed,
+            self.weights[f"{weight_prefix}.pointwise_conv1.weight"][:, :, 0],
+            f"encoder.layers.{layer_idx}.conv.pointwise_conv1.weight",
+            f"{prefix}/pw1",
+            bias=self.weights[f"{weight_prefix}.pointwise_conv1.bias"],
+            bias_name=f"encoder.layers.{layer_idx}.conv.pointwise_conv1.bias",
         )
 
         # GLU: split in half, sigmoid one half, multiply
@@ -660,7 +660,7 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             "Split",
             [pw1, split_const],
             [f"{prefix}/glu/Split/output_0", f"{prefix}/glu/Split/output_1"],
-            axis=1,
+            axis=-1,
         )
         glu_sigmoid = self.make_sigmoid(
             f"{prefix}/glu/Split/output_1", f"{prefix}/glu/Sigmoid/output_0"
@@ -668,6 +668,9 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         glu_out = self.make_mul(
             f"{prefix}/glu/Split/output_0", glu_sigmoid, f"{prefix}/glu/Mul/output_0"
         )
+
+        # [B, T, C] → [B, C, T] for the depthwise conv
+        glu_out = self.make_transpose(glu_out, f"{prefix}/transpose1/output_0", perm=[0, 2, 1])
 
         # Zero padded frames before the depthwise conv (reference: x.masked_fill(pad_mask, 0))
         glu_out = self.make_mul(glu_out, conv_mask, f"{prefix}/glu/masked/output_0")
@@ -703,20 +706,18 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
         # SiLU
         silu = self.make_silu(bn, f"{prefix}/act")
 
-        # Pointwise conv 2 (project back)
-        pw2 = self.make_node(
-            "Conv",
-            [
-                silu,
-                f"encoder.layers.{layer_idx}.conv.pointwise_conv2.weight",
-                f"encoder.layers.{layer_idx}.conv.pointwise_conv2.bias",
-            ],
-            [f"{prefix}/pw2/Conv/output_0"],
-            kernel_shape=[1],
-        )
-
         # Transpose back: [B, C, T] → [B, T, C]
-        return self.make_transpose(pw2, f"{prefix}/transpose2/output_0", perm=[0, 2, 1])
+        silu = self.make_transpose(silu, f"{prefix}/transpose2/output_0", perm=[0, 2, 1])
+
+        # Pointwise conv 2 (project back)
+        return self.make_linear(
+            silu,
+            self.weights[f"{weight_prefix}.pointwise_conv2.weight"][:, :, 0],
+            f"encoder.layers.{layer_idx}.conv.pointwise_conv2.weight",
+            f"{prefix}/pw2",
+            bias=self.weights[f"{weight_prefix}.pointwise_conv2.bias"],
+            bias_name=f"encoder.layers.{layer_idx}.conv.pointwise_conv2.bias",
+        )
 
     def build_adapter(self, hidden_state: str) -> str:
         """Build adapter MLP: LayerNorm → Linear → Linear."""
@@ -964,17 +965,14 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             if pos_bias_v in self.weights:
                 self.add_initializer(f"{out_prefix}.self_attn.pos_bias_v", self.weights[pos_bias_v])
 
-            # Conv module weights
-            for conv_name in ["pointwise_conv1", "pointwise_conv2", "depthwise_conv"]:
-                w_name = f"{prefix}.conv.{conv_name}.weight"
-                b_name = f"{prefix}.conv.{conv_name}.bias"
-                if w_name in self.weights:
-                    self.add_initializer(
-                        f"{out_prefix}.conv.{conv_name}.weight", self.weights[w_name]
-                    )
-                    self.add_initializer(
-                        f"{out_prefix}.conv.{conv_name}.bias", self.weights[b_name]
-                    )
+            # Depthwise conv weights (build_conv_module adds the pointwise ones as MatMul weights)
+            w_name = f"{prefix}.conv.depthwise_conv.weight"
+            b_name = f"{prefix}.conv.depthwise_conv.bias"
+            if w_name in self.weights:
+                self.add_initializer(
+                    f"{out_prefix}.conv.depthwise_conv.weight", self.weights[w_name]
+                )
+                self.add_initializer(f"{out_prefix}.conv.depthwise_conv.bias", self.weights[b_name])
 
             # Batch norm
             for bn_param in ["weight", "bias", "running_mean", "running_var"]:

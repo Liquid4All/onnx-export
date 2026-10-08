@@ -20,6 +20,7 @@ from .synthetic import DETOK_CONFIG, HIDDEN, build_depthformer, build_detokenize
 
 OPSET = 21
 DEPTHFORMER_LAYERS = 2
+ENCODER_LAYERS = 2  # build_encoder's default
 
 
 @pytest.fixture(scope="module")
@@ -100,6 +101,15 @@ def test_encoder_batched_matches_per_item(encoder_path, rng):
         n = int(length[0])
         assert len_batched[i] == n
         np.testing.assert_allclose(emb_batched[i, :n], emb[0, :n], rtol=1e-5, atol=1e-6)
+
+
+def test_encoder_convolutions_are_depthwise_or_subsampling(encoder_path):
+    """The conformer's pointwise (1x1) convolutions run as MatMul, which quantize_model covers."""
+    graph = onnx.load(str(encoder_path), load_external_data=False).graph
+    convs = [node.name for node in graph.node if node.op_type == "Conv"]
+    assert [name for name in convs if name.startswith("/encoder/layers.")] == [
+        f"/encoder/layers.{i}/conv/dw/Conv" for i in range(ENCODER_LAYERS)
+    ]
 
 
 def test_detokenizer_runs(detokenizer_path, rng):
