@@ -21,6 +21,7 @@ import torch
 from helpers import attributes, matmul_bits
 from PIL import Image
 from test_lfm2_audio.synthetic import HIDDEN, build_model_dir
+from test_lfm2_audio.synthetic import write_wav as write_tone
 from tokenizers import Regex, Tokenizer, models, pre_tokenizers
 from transformers import AutoProcessor, Lfm2VlConfig, Lfm2VlForConditionalGeneration
 
@@ -76,6 +77,48 @@ def check_int8_embeddings(output_dir: pathlib.Path):
     half_step = np.repeat((blocks.max(-1) - blocks.min(-1)) / 255 / 2, 32, axis=1)
     within = np.abs(actual - table) <= half_step + 1e-6
     assert np.delete(within, token_id, axis=0).all()
+
+
+# (placeholders, feature rows): row i replaces placeholder i; the rest keep their table row.
+# More rows than placeholders means the encoder and the prompt disagree, which must still fail.
+SCATTER_CASES = [
+    pytest.param(3, 3, id="one-row-each"),
+    pytest.param(1, 0, id="sampled-placeholder"),
+    pytest.param(3, 1, id="fewer-rows"),
+    pytest.param(2, 4, id="more-rows"),
+]
+
+
+def check_scatter(output_dir: pathlib.Path, token_id: int, placeholders: int, rows: int):
+    """The fp32 embedding model writes the feature rows in order into the first placeholders."""
+    table = initializers(output_dir / "onnx/embeddings.onnx")[TABLE]
+    input_ids = np.array([[1, 6, *[token_id] * placeholders, 7]], dtype=np.int64)
+    features = np.random.default_rng(0).standard_normal((rows, table.shape[1])).astype(np.float32)
+    embeddings = session(output_dir, "embeddings.onnx")
+    if rows > placeholders:
+        with pytest.raises(Exception, match="ScatterND"):
+            embed(embeddings, input_ids, features)
+        return
+
+    expected = table[input_ids[0]].copy()
+    expected[2 : 2 + rows] = features
+    np.testing.assert_array_equal(embed(embeddings, input_ids, features)[0], expected)
+
+
+def check_genai_continues_after(model: og.Model, inputs: og.NamedTensors, token_id: int):
+    """onnxruntime-genai decodes on after a placeholder token that came with no features, as when
+    the decoder samples one itself."""
+    prompt_length = inputs["input_ids"].as_numpy().shape[-1]
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=prompt_length + 4)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    generator.generate_next_token()
+    generator.append_tokens(np.array([token_id], dtype=np.int32))
+    generator.generate_next_token()
+    sequence = generator.get_sequence(0)
+    assert len(sequence) == prompt_length + 3
+    assert sequence[-2] == token_id
 
 
 # === VL ===
@@ -273,6 +316,11 @@ def test_vl_int8_embeddings(vl):
     check_int8_embeddings(vl[2])
 
 
+@pytest.mark.parametrize("placeholders,rows", SCATTER_CASES)
+def test_vl_embeddings_scatter_features(vl, placeholders: int, rows: int):
+    check_scatter(vl[2], vl[0].config.image_token_id, placeholders, rows)
+
+
 def test_vl_int8_vision_encoder(vl):
     """q4 and q8 load one vision encoder: every weight MatMul int8, symmetric, in blocks of 128,
     with fp32 activations (accuracy_level 0), and each image token close to the fp32 encoder's."""
@@ -301,15 +349,19 @@ def test_vl_int8_vision_encoder(vl):
     assert result.passed, result.details
 
 
+def vl_genai_inputs(model: og.Model, processor) -> og.NamedTensors:
+    messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Hi"}]}]
+    prompt = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    return model.create_multimodal_processor()(prompt, images=og.Images.open(str(IMAGE)))
+
+
 @pytest.mark.parametrize("precision", ["fp32", "q8", "q4"])
 def test_vl_genai_runtime(vl, precision: str):
     """The lfm2_vl pipeline, loaded as the CLI does, against the same files in plain onnxruntime."""
     _, processor, output_dir = vl
     model = load_model(output_dir, vl_export.genai_files(precision))
 
-    messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Hi"}]}]
-    prompt = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    inputs = model.create_multimodal_processor()(prompt, images=og.Images.open(str(IMAGE)))
+    inputs = vl_genai_inputs(model, processor)
     genai_ids = inputs["input_ids"].as_numpy()[0]
     reference_inputs = vl_inputs(processor)
     assert genai_ids.tolist() == reference_inputs["input_ids"][0].tolist()
@@ -328,6 +380,14 @@ def test_vl_genai_runtime(vl, precision: str):
     embeds = vl_embeds(output_dir, precision, reference_inputs)
     expected = decoder.run(None, decoder_inputs(embeds, initialize_cache(decoder), 0))[0]
     assert cosine(expected[0, -1], first[0]) >= 0.999
+
+
+@pytest.mark.parametrize("precision", ["fp32", "q4"])
+def test_vl_genai_continues_after_an_image_token(vl, precision: str):
+    model, processor, output_dir = vl
+    genai_model = load_model(output_dir, vl_export.genai_files(precision))
+    inputs = vl_genai_inputs(genai_model, processor)
+    check_genai_continues_after(genai_model, inputs, model.config.image_token_id)
 
 
 def test_vl_chat_keeps_images(vl, monkeypatch):
@@ -472,22 +532,17 @@ def test_audio_embedding_checks_codebook_size(tmp_path):
         audio_export.export_audio_embedding_binary(weights, {}, tmp_path)
 
 
-def test_audio_embeddings_scatter_features(audio):
-    embeddings = session(audio, "embeddings.onnx")
-    table = onnx.numpy_helper.to_array(
-        next(
-            i
-            for i in onnx.load(str(audio / "onnx/embeddings.onnx")).graph.initializer
-            if i.name == "embed_tokens.weight"
-        )
-    )
-    token = audio_export.AUDIO_TOKEN_ID
-    input_ids = np.array([[1, 6, token, token, token, 7]], dtype=np.int64)
-    features = np.random.default_rng(0).standard_normal((3, HIDDEN)).astype(np.float32)
+@pytest.mark.parametrize("placeholders,rows", SCATTER_CASES)
+def test_audio_embeddings_scatter_features(audio, placeholders: int, rows: int):
+    check_scatter(audio, audio_export.AUDIO_TOKEN_ID, placeholders, rows)
 
-    expected = table[input_ids[0]].copy()
-    expected[2:5] = features
-    np.testing.assert_array_equal(embed(embeddings, input_ids, features)[0], expected)
+
+@pytest.mark.parametrize("precision", ["fp32", "q4"])
+def test_audio_genai_continues_after_an_audio_token(audio, tmp_path, precision: str):
+    chat = AudioChat(audio, precision)
+    turns, audios = single_turn(None, write_tone(tmp_path / "tone.wav"))
+    inputs = chat.processor(chat_prompt(None, turns), audios=og.Audios.open(*audios))
+    check_genai_continues_after(chat.model, inputs, audio_export.AUDIO_TOKEN_ID)
 
 
 def test_audio_int8_embeddings(audio):

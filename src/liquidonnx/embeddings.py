@@ -8,7 +8,8 @@ Embedding models for the onnxruntime-genai multimodal pipelines (lfm2_vl, lfm2_a
                                  inputs_embeds [B, S, H] (fp32)
 
 The decoders are built with exclude_embeds, so this graph owns the token table. The runtime
-calls it every step; decode steps pass an empty features tensor.
+calls it every step; decode steps pass an empty features tensor. Placeholders beyond the feature
+rows keep their table embedding; more feature rows than placeholders is an error.
 
 The fp32 and fp16 bundles store the table in their own precision. The quantized bundles share an
 int8 one (GatherBlockQuantized), a little over half the size of the fp16 table.
@@ -81,7 +82,13 @@ def build_embeddings(
         helper.make_node("Equal", ["flat_ids", TOKEN_ID], ["is_feature"]),
         helper.make_node("NonZero", ["is_feature"], ["positions_t"]),
         helper.make_node("Transpose", ["positions_t"], ["positions"], perm=[1, 0]),
-        helper.make_node("ScatterND", ["flat_embeds", "positions", feature], ["merged"]),
+        # A placeholder the decoder sampled itself has no feature row. Slice clamps its end, so
+        # only placeholders with a row are written and the rest keep their table embedding.
+        helper.make_node("Shape", [feature], ["num_features"], end=1),
+        helper.make_node(
+            "Slice", ["positions", "zero", "num_features", "zero"], ["used_positions"]
+        ),
+        helper.make_node("ScatterND", ["flat_embeds", "used_positions", feature], ["merged"]),
         helper.make_node("Reshape", ["merged", "embeds_shape"], ["inputs_embeds"]),
     ]
     graph = helper.make_graph(
@@ -102,6 +109,7 @@ def build_embeddings(
             *(numpy_helper.from_array(array, name) for name, array in tables.items()),
             numpy_helper.from_array(np.array([-1, hidden], np.int64), "flat_rows"),
             numpy_helper.from_array(np.array([-1], np.int64), "flat"),
+            numpy_helper.from_array(np.array([0], np.int64), "zero"),
             numpy_helper.from_array(np.array(token_id, np.int64), TOKEN_ID),
         ],
     )
