@@ -47,7 +47,7 @@ class DecoderPreset:
     precision: str  # builder -p
     options: dict[str, str]
     # Rename the tensors as liquidonnx.quantize named them when it derived this precision, so the
-    # published decoder keeps its bytes.
+    # published decoder keeps its tensor names.
     legacy_names: bool = False
 
 
@@ -63,12 +63,16 @@ Q4 = DecoderPreset(
     "int4",
     {"algo_config": "k_quant", "matmul_mixed_precision": "last_matmul:int8,mixed_layers:int8"},
 )
+# The VL and audio decoders take inputs_embeds, so their LM head shares no table and can be int8.
+# Q4_INT8_HEAD is Q4F32 with an int8 head, the olive-recipes audio cpu_int4 decoder (Q4's options
+# are unmeasured on audio).
+Q8_INT8_HEAD = DecoderPreset("int8", {"is_symmetric": "false"}, True)
+Q4_INT8_HEAD = DecoderPreset("int4", {"matmul_mixed_precision": "last_matmul:int8"})
 DECODER_PRESETS = {
     "lfm2": {"q4": Q4, "q4f32": Q4F32, "q8": Q8},
     "lfm2_moe": {"q4": Q4, "q4f32": Q4F32, "q8": Q8},
-    "lfm2_vl": {"q4": Q4, "q8": Q8},
-    # Q4's options are unmeasured on audio, so its q4 keeps the int4 body and fp32 head.
-    "lfm2_audio": {"q4": Q4F32, "q8": Q8},
+    "lfm2_vl": {"q4": Q4, "q8": Q8_INT8_HEAD},
+    "lfm2_audio": {"q4": Q4_INT8_HEAD, "q8": Q8_INT8_HEAD},
 }
 
 
