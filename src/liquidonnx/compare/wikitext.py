@@ -20,11 +20,12 @@ Hugging Face tokenizers give exactly llama.cpp 4e7481175's stream for LFM2.5-350
 liquid-audio, so audio exports take --reference only.
 
 A precision fails, and the command exits with 1, when its KLD is above --max-kld or, without it,
-above its ceiling in BASELINES.
+above its ceiling in BASELINES. The ONNX sessions run a fixed number of intra-op threads
+(--threads) on every machine, as the scores of MoE models depend on it.
 
 Usage:
     uv run lfm2-compare wikitext --export exports/LFM2.5-350M-ONNX \\
-        --reference ref/LFM2.5-350M/ref.kld --threads 8
+        --reference ref/LFM2.5-350M/ref.kld
     uv run lfm2-compare wikitext --export exports/LFM2.5-350M-ONNX --model LiquidAI/LFM2.5-350M \\
         --text wikitext-2-raw/wiki.test.raw --reference-device cuda
     uv run lfm2-compare wikitext --export exports/LFM2.5-350M-ONNX \\
@@ -63,14 +64,16 @@ PRECISIONS = ("fp32", "fp16", "q4", "q4f16", "q4f32", "q8")
 DEVICE_PRECISIONS = {"cpu": ("q4", "q4f32", "q8"), "cuda": ("fp16", "q4f16")}
 CHUNKS = 64  # llama-perplexity --chunks
 BATCH = 4  # chunks per forward pass of the reference model, as make_ref.py
+# onnxruntime's QMoE CPU kernel sums the experts in an order that depends on the intra-op thread
+# count, so MoE scores move with the machine's core count unless the count is fixed
+THREADS = 13
 
 # KLD ± SE against H100 fp32 references: q4, q4f32 and q8 on the CPU EP, fp16 and q4f16 on the
 # CUDA EP (q4f16 on onnxruntime-gpu 1.30.0). A precision fails above KLD + 2 SE. The text, MoE and
 # VL q4 rows, and the q4f16 rows converted from them, are the genai builder's k_quant build on the
 # locked onnxruntime nightly, which lacks onnxruntime#32814: with it, q4 scores 0.467 / 0.106 /
 # 0.146 / 0.187 on 350M / 1.2B / 2.6B / 8B. The other rows do not depend on #32814. The 8B-A1B q4
-# and q8 rows are at 13 intra-op threads, as the QMoE CPU kernel's sums depend on the thread count
-# (q8 by up to 3%).
+# and q8 rows hold at THREADS (13) intra-op threads only: at 12, q4 scores +0.17% and q8 -2.9%.
 BASELINES = {
     "LFM2.5-350M": {
         "q4": (0.4896, 0.0120),
@@ -296,7 +299,8 @@ def ceiling(names: list[str], precision: str, max_kld: float | None) -> float | 
 def report(results: dict) -> str:
     reference = results["reference"]
     lines = [
-        f"### {results['export']}: wikitext-2 KLD on {results['host']} ({results['device']})",
+        f"### {results['export']}: wikitext-2 KLD on {results['host']} "
+        f"({results['device']}, {results['threads']} threads)",
         "",
         f"Reference {reference['path']} ({reference.get('model', 'model unknown')}), "
         f"{reference['chunks']} chunks of {reference['n_ctx']} tokens",
@@ -365,8 +369,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--threads",
         type=int,
-        default=0,
-        help="Intra-op threads of the ONNX sessions (default: one per physical core)",
+        default=THREADS,
+        help=f"Intra-op threads of the ONNX sessions; 0 is one per physical core (default: "
+        f"{THREADS}, the count of the ceilings)",
     )
     parser.add_argument(
         "--max-kld",
