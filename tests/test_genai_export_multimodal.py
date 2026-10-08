@@ -24,8 +24,10 @@ from tokenizers import Regex, Tokenizer, models, pre_tokenizers
 from transformers import AutoProcessor, Lfm2VlConfig, Lfm2VlForConditionalGeneration
 
 from liquidonnx.embeddings import embed
+from liquidonnx.genai_builder import Q4F32, Q8, export_decoder
 from liquidonnx.genai_runtime import generate, load_model
 from liquidonnx.lfm2_audio import export as audio_export
+from liquidonnx.lfm2_audio.infer import AudioChat, chat_prompt
 from liquidonnx.lfm2_vl import export as vl_export
 from liquidonnx.lfm2_vl.infer import VLChat
 from liquidonnx.session import decoder_inputs, initialize_cache, load_onnx_session, update_cache
@@ -197,15 +199,17 @@ def test_vl_cached_decode_matches_prefill(vl, precision: str):
         np.testing.assert_allclose(result[0][0, -1], expected[0, n + i], atol=5e-3)
 
 
-def test_vl_q4_decoder_layout(vl):
-    """int4 body with an int8 LM head; the embedding model holds the token table."""
+@pytest.mark.parametrize("precision", ["q4", "q8"])
+def test_vl_decoder_layout(vl, precision: str):
+    """Every MatMul quantized, the LM head to int8; the embedding model holds the token table."""
     _, _, output_dir = vl
-    graph = onnx.load(str(output_dir / "onnx" / "decoder_q4.onnx"), load_external_data=False).graph
+    path = output_dir / "onnx" / f"decoder_{precision}.onnx"
+    graph = onnx.load(str(path), load_external_data=False).graph
     lm_head = next(node for node in graph.node if "logits" in node.output)
     assert lm_head.op_type == "MatMulNBits"
     assert attributes(lm_head)["bits"] == 8
-    assert matmul_bits(graph)[4] > 0
-    assert all(node.op_type != "GatherBlockQuantized" for node in graph.node)
+    assert matmul_bits(graph)[int(precision[1])] > 1
+    assert all(node.op_type not in ("MatMul", "GatherBlockQuantized") for node in graph.node)
 
 
 def test_vl_genai_config(vl):
@@ -230,7 +234,7 @@ def test_vl_genai_config(vl):
     assert (resize["min_pixels"], resize["max_pixels"]) == (64 * 32**2, 256 * 32**2)
 
 
-@pytest.mark.parametrize("precision", ["fp32", "q4"])
+@pytest.mark.parametrize("precision", ["fp32", "q8", "q4"])
 def test_vl_genai_runtime(vl, precision: str):
     """The lfm2_vl pipeline, loaded as the CLI does, against the same files in plain onnxruntime."""
     _, processor, output_dir = vl
@@ -346,12 +350,33 @@ def test_audio_genai_config(audio):
         assert (audio / filename).exists()
 
 
-def test_audio_q4_decoder_layout(audio):
-    """int4 MatMuls and an fp32 LM head."""
-    graph = onnx.load(str(audio / "onnx" / "decoder_q4.onnx"), load_external_data=False).graph
-    lm_head = next(node for node in graph.node if "logits" in node.output)
-    assert lm_head.op_type == "MatMul"
-    assert set(matmul_bits(graph)) == {4}
+def matmuls(path: pathlib.Path) -> dict:
+    """(op type, attributes, weight tensor bytes) of each MatMul(NBits), by output name."""
+    graph = onnx.load(str(path)).graph
+    tensors = {init.name: onnx.numpy_helper.to_array(init).tobytes() for init in graph.initializer}
+    return {
+        node.output[0]: (node.op_type, attributes(node), [tensors.get(i) for i in node.input[1:]])
+        for node in graph.node
+        if node.op_type in ("MatMul", "MatMulNBits")
+    }
+
+
+@pytest.mark.parametrize("precision,fp32_head", [("q4", Q4F32), ("q8", Q8)])
+def test_audio_decoder_adds_an_int8_lm_head(audio, tmp_path, precision: str, fp32_head):
+    """The decoder the fp32-head preset builds, but with an int8 LM head."""
+    checkpoint = str(audio.parent / "checkpoint")
+    options = audio_export.DECODER_OPTIONS
+    reference = export_decoder(
+        checkpoint, tmp_path, "decoder.onnx", options, fp32_head, block_size=32
+    )
+
+    actual = matmuls(audio / "onnx" / audio_export.bundle(precision)["decoder"])
+    expected = matmuls(reference)
+    op_type, attrs, _ = actual.pop("logits")
+    assert (op_type, attrs["bits"]) == ("MatMulNBits", 8)
+    assert expected.pop("logits")[0] == "MatMul"
+    assert actual == expected
+    assert {attrs["bits"] for _, attrs, _ in actual.values()} == {int(precision[1])}
 
 
 def test_audio_genai_config_checks_token_ids(audio, tmp_path):
@@ -398,3 +423,23 @@ def test_audio_decoder_precisions_follow_fp32(audio, precision: str):
     precision_logits, precision_hidden = run(audio_export.bundle(precision)["decoder"])
     assert cosine(logits, precision_logits) >= MIN_COSINE[precision]
     assert cosine(hidden, precision_hidden) >= MIN_COSINE[precision]
+
+
+@pytest.mark.parametrize("precision", ["q8", "q4"])
+def test_audio_genai_runtime(audio, precision: str):
+    """The lfm2_audio pipeline, loaded as the CLI does, against the same files in plain onnxruntime."""
+    chat = AudioChat(audio, precision)
+    inputs = chat.processor(chat_prompt(None, [("user", "hello")]))
+    first = []
+
+    def step(generator):
+        if not first:
+            first.append(np.asarray(generator.get_output("logits"))[0, -1])
+
+    generate(chat.model, inputs, 4, step)
+
+    files = audio_export.bundle(precision)
+    embeds = embed(session(audio, files["embedding"]), inputs["input_ids"].as_numpy())
+    decoder = session(audio, files["decoder"])
+    expected = decoder.run(["logits"], decoder_inputs(embeds, initialize_cache(decoder), 0))[0]
+    np.testing.assert_allclose(first[0], expected[0, -1], atol=1e-5)

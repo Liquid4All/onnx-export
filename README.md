@@ -118,6 +118,8 @@ exports/LFM2.5-VL-1.6B-ONNX/
     └── embeddings_fp16.onnx     # fp16 table, used with fp16, q4 and q8
 ```
 
+The q4 and q8 decoders have an int8 LM head.
+
 onnxruntime-genai resizes each image once instead of tiling it, as the upstream processor does with `do_image_splitting=False`. The image preprocessing follows the checkpoint's own processor (bilinear for LFM2.5-VL-450M/1.6B, bicubic for the others).
 
 ### 3.3 LFM2-MoE Mixture of Experts
@@ -155,7 +157,7 @@ exports/LFM2.5-Audio-1.5B-ONNX/
     └── ...                      # {graph}_{fp16,q4,q8}.onnx; embed_tokens.bin, mel_config.json for web runtimes
 ```
 
-The q4 and q8 configs keep the depthformer and audio embedding at fp16, because a quantized depthformer changes most audio codes.
+The q4 and q8 decoders have an int8 LM head. Their configs keep the depthformer and audio embedding at fp16, because a quantized depthformer changes most audio codes.
 
 ## 4. Inference
 
