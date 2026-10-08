@@ -37,7 +37,7 @@ VL_MIN_COSINE = {**MIN_COSINE, "q4": 0.9}
 
 
 def session(output_dir: pathlib.Path, filename: str):
-    return load_onnx_session(output_dir / "onnx" / filename, ["CPUExecutionProvider"])
+    return load_onnx_session(output_dir / "onnx" / filename)
 
 
 def cosine(a: np.ndarray, b: np.ndarray) -> float:

@@ -102,8 +102,8 @@ def reference(checkpoint: pathlib.Path, max_new: int) -> list[dict]:
 
 def score_decoder(onnx_dir: pathlib.Path, files: dict, refs: list[dict], eos: set[int]) -> dict:
     """The decoder fed the reference embeddings; greedy decode looks tokens up in embeddings."""
-    session = load_onnx_session(onnx_dir / files["decoder"], ["CPUExecutionProvider"])
-    embedding = load_onnx_session(onnx_dir / files["embedding"], ["CPUExecutionProvider"])
+    session = load_onnx_session(onnx_dir / files["decoder"])
+    embedding = load_onnx_session(onnx_dir / files["embedding"])
     forced, answers = [], []
     for ref in refs:
         n, embeds = len(ref["prompt"]), ref["embeds"][None]
@@ -123,7 +123,7 @@ def score_decoder(onnx_dir: pathlib.Path, files: dict, refs: list[dict], eos: se
 
 
 def score_vision(path: pathlib.Path, refs: list[dict]) -> dict:
-    session = load_onnx_session(path, ["CPUExecutionProvider"])
+    session = load_onnx_session(path)
     worst, cosines = 0.0, []
     for ref in refs:
         if "image_features" not in ref:
@@ -141,7 +141,7 @@ def score_vision(path: pathlib.Path, refs: list[dict]) -> dict:
 
 def score_embedding(path: pathlib.Path, refs: list[dict]) -> dict:
     """The embedding model given the reference image features, against the merged embeddings."""
-    session = load_onnx_session(path, ["CPUExecutionProvider"])
+    session = load_onnx_session(path)
     worst = 0.0
     for ref in refs:
         n = len(ref["prompt"])

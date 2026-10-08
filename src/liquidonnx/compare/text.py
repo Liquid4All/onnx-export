@@ -80,7 +80,7 @@ def eos_ids(export: pathlib.Path) -> set[int]:
 
 
 def score_decoder(path: pathlib.Path, refs: list[dict], eos: set[int]) -> dict:
-    session = load_onnx_session(path, ["CPUExecutionProvider"])
+    session = load_onnx_session(path)
     forced, answers = [], []
     for ref in refs:
         sequence = np.concatenate([ref["prompt"], ref["answer"]])[None]

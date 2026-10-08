@@ -112,7 +112,7 @@ def export(request, tmp_path_factory):
 
 
 def decoder(output_dir: pathlib.Path, precision: str):
-    return load_onnx_session(output_dir / "onnx" / model_file(precision), ["CPUExecutionProvider"])
+    return load_onnx_session(output_dir / "onnx" / model_file(precision))
 
 
 @pytest.mark.parametrize("precision", ["fp32", *ALL_PRECISIONS])
@@ -196,7 +196,7 @@ def test_q4f16_ignores_a_stale_q4(export, tmp_path):
     derive_precision(tmp_path, "q4f16")
 
     def logits(path: pathlib.Path) -> np.ndarray:
-        session = load_onnx_session(path, ["CPUExecutionProvider"])
+        session = load_onnx_session(path)
         return session.run(None, decoder_inputs(TOKENS, initialize_cache(session), 0))[0]
 
     expected = logits(output_dir / "onnx" / "model_q4f16.onnx")
@@ -234,26 +234,47 @@ def test_load_model_preloads_cuda_libraries(export, ep: str, monkeypatch):
     assert calls == {"cpu": ["model"], "cuda": ["preload", "model"]}[ep]
 
 
-@pytest.mark.parametrize(
-    ("available", "providers", "expected"),
-    [
-        ([CPU_EP], None, [CPU_EP]),
-        ([CUDA_EP, CPU_EP], None, ["preload", CUDA_EP, CUDA_EP]),  # the CUDA probe, the session
-        ([CUDA_EP, CPU_EP], [CPU_EP], [CPU_EP]),
-        ([CUDA_EP, CPU_EP], [CUDA_EP, CPU_EP], ["preload", CUDA_EP]),
-    ],
-)
-def test_sessions_preload_cuda_libraries(available, providers, expected, monkeypatch, tmp_path):
-    """Single-graph sessions load the CUDA libraries before any CUDA session, and only then."""
+def fake_sessions(monkeypatch, loaded: list[str]) -> list:
+    """Sessions that load only the providers in loaded; returns the log of CUDA library preloads
+    and the providers each session asked for."""
     calls = []
+
+    class Session:
+        def __init__(self, path: str, providers: list[str]):
+            calls.append(providers)
+            self.providers = [p for p in providers if p in loaded]
+
+        def get_providers(self) -> list[str]:
+            return self.providers
+
     monkeypatch.setattr(ort, "preload_dlls", lambda: calls.append("preload"))
-    monkeypatch.setattr(ort, "get_available_providers", lambda: available)
-    monkeypatch.setattr(ort, "InferenceSession", lambda path, providers: calls.append(providers[0]))
-    monkeypatch.setattr("liquidonnx.session._cuda_works", None)
+    monkeypatch.setattr(ort, "get_available_providers", lambda: loaded)
+    monkeypatch.setattr(ort, "InferenceSession", Session)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [((), [[CPU_EP]]), (("cpu",), [[CPU_EP]]), (("cuda",), ["preload", [CUDA_EP, CPU_EP]])],
+    ids=["default", "cpu", "cuda"],
+)
+def test_sessions_run_on_the_requested_ep(args: tuple, expected: list, monkeypatch, tmp_path):
+    """Single-graph sessions run on CPU unless asked for CUDA, even where CUDA works, and load the
+    CUDA libraries only for CUDA."""
+    calls = fake_sessions(monkeypatch, [CUDA_EP, CPU_EP])
     path = tmp_path / "model.onnx"
     path.touch()
-    load_onnx_session(path, providers)
+    load_onnx_session(path, *args)
     assert calls == expected
+
+
+def test_cuda_session_fails_on_cpu_fallback(monkeypatch, tmp_path):
+    """onnxruntime runs on CPU when the CUDA EP does not load; a CUDA session then fails."""
+    fake_sessions(monkeypatch, [CPU_EP])
+    path = tmp_path / "model.onnx"
+    path.touch()
+    with pytest.raises(RuntimeError, match=f"without {CUDA_EP}"):
+        load_onnx_session(path, "cuda")
 
 
 def test_preload_cuda_libraries_without_preload_dlls(monkeypatch):
