@@ -4,6 +4,7 @@ Audio Detokenizer ONNX builder.
 Converts audio codes (from depthformer) to STFT features for waveform synthesis.
 """
 
+import json
 import logging
 import pathlib
 
@@ -12,6 +13,7 @@ import onnx
 from onnx import TensorProto, helper
 
 from liquidonnx.builder_base import ONNXBuilderBase
+from liquidonnx.lfm2_audio.checkpoint import checkpoint_dir
 
 logger = logging.getLogger(__name__)
 
@@ -660,26 +662,14 @@ def export_audio_detokenizer_builder(model_path: str, onnx_dir: pathlib.Path) ->
     """
     logger.info("Exporting audio_detokenizer.onnx (full LFM builder version)...")
 
-    import json as json_module
-
-    from liquid_audio.utils import get_model_dir
     from safetensors.torch import load_file
 
-    cache_dir = get_model_dir(model_path)
-    config_path = cache_dir / "audio_detokenizer" / "config.json"
-
-    if not config_path.exists():
-        logger.warning("Audio detokenizer not found in model, skipping export")
-        return None
-
-    with open(config_path) as f:
-        detok_config = json_module.load(f)
-
+    # Where liquid-audio's LFM2AudioProcessor loads the detokenizer from
+    detok_dir = checkpoint_dir(model_path) / "audio_detokenizer"
+    detok_config = json.loads((detok_dir / "config.json").read_text())
     logger.info(f"Audio detokenizer config: {detok_config}")
 
-    # Load weights directly from checkpoint
-    weights_path = cache_dir / "audio_detokenizer" / "model.safetensors"
-    checkpoint_weights = load_file(str(weights_path))
+    checkpoint_weights = load_file(str(detok_dir / "model.safetensors"))
 
     # Convert to numpy
     detok_weights = {}

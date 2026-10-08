@@ -12,15 +12,23 @@ Run with:
 import json
 import pathlib
 import shutil
+import sys
 
+import huggingface_hub
 import numpy as np
 import onnx
 import onnxruntime_genai as og
 import pytest
 import torch
 from helpers import attributes, matmul_bits
+from huggingface_hub.utils import filter_repo_objects
 from PIL import Image
-from test_lfm2_audio.synthetic import HIDDEN, build_model_dir
+from test_lfm2_audio.synthetic import (
+    HIDDEN,
+    SmallDepthformer,
+    build_model_dir,
+    write_full_checkpoint,
+)
 from test_lfm2_audio.synthetic import write_wav as write_tone
 from tokenizers import Regex, Tokenizer, models, pre_tokenizers
 from transformers import AutoProcessor, Lfm2VlConfig, Lfm2VlForConditionalGeneration
@@ -29,6 +37,7 @@ from liquidonnx.embeddings import QUANT_TABLE, TABLE, TOKEN_ID, embed
 from liquidonnx.genai_builder import Q4F32, Q8, export_decoder
 from liquidonnx.genai_runtime import generate, load_model
 from liquidonnx.lfm2_audio import export as audio_export
+from liquidonnx.lfm2_audio.builder import depthformer_builder
 from liquidonnx.lfm2_audio.infer import AudioChat, chat_prompt, single_turn
 from liquidonnx.lfm2_vl import export as vl_export
 from liquidonnx.lfm2_vl.infer import VLChat
@@ -530,6 +539,59 @@ def test_audio_embedding_checks_codebook_size(tmp_path):
     weights = {"audio_embedding.embedding.weight": np.zeros((8 * 2048, 4), dtype=np.float32)}
     with pytest.raises(ValueError, match="16384 rows"):
         audio_export.export_audio_embedding_binary(weights, {}, tmp_path)
+
+
+# What the LFM2.5-Audio Hub repos hold besides the files the export reads
+UNUSED_HUB_FILES = (
+    ".gitattributes",
+    "LICENSE",
+    "README.md",
+    "demo.mp4",
+    "tokenizer-e351c8d8-checkpoint125.safetensors",
+)
+
+
+def test_audio_exports_a_checkpoint_folder_without_liquid_audio(tmp_path, monkeypatch):
+    """lfm2-audio-export of a local checkpoint folder, and of the same checkpoint as a Hub ID,
+    with liquid-audio not installed: the same ONNX files, and no download of unused files."""
+    checkpoint = write_full_checkpoint(tmp_path / "LFM2.5-Audio-synthetic")
+    for name in UNUSED_HUB_FILES:
+        (checkpoint / name).write_bytes(b"unused")
+    hub_id, snapshot = "LiquidAI/LFM2.5-Audio-synthetic", tmp_path / "snapshot"
+    downloaded = []
+
+    def snapshot_download(repo_id: str, allow_patterns: list[str] | None = None) -> str:
+        assert repo_id == hub_id
+        files = [p.relative_to(checkpoint).as_posix() for p in checkpoint.rglob("*") if p.is_file()]
+        for name in filter_repo_objects(files, allow_patterns=allow_patterns):
+            (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(checkpoint / name, snapshot / name)
+            downloaded.append(name)
+        return str(snapshot)
+
+    def hf_hub_download(*args, **kwargs):
+        raise AssertionError(f"hf_hub_download{args}")
+
+    for name in [m for m in sys.modules if m.split(".")[0] == "liquid_audio"] + ["liquid_audio"]:
+        monkeypatch.setitem(sys.modules, name, None)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", hf_hub_download)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")  # for the genai builder's process
+    monkeypatch.setattr(depthformer_builder, "DepthformerUnifiedBuilder", SmallDepthformer)
+
+    exports = {}
+    for model, base in ((str(checkpoint), tmp_path / "local"), (hub_id, tmp_path / "hub")):
+        argv = ["lfm2-audio-export", model, "--output-dir", str(base), "--precision", "q8"]
+        monkeypatch.setattr(sys, "argv", argv)
+        audio_export.main()
+        onnx_dir = base / "exports" / "LFM2.5-Audio-synthetic-ONNX" / "onnx"
+        exports[model] = {p.name: p.read_bytes() for p in sorted(onnx_dir.iterdir())}
+
+    local, hub = exports.values()
+    assert {*audio_export.bundle("fp32").values(), *audio_export.bundle("q8").values()} <= {*local}
+    assert local.keys() == hub.keys()
+    assert [name for name in local if local[name] != hub[name]] == []
+    assert downloaded and not set(downloaded) & set(UNUSED_HUB_FILES)
 
 
 @pytest.mark.parametrize("placeholders,rows", SCATTER_CASES)
