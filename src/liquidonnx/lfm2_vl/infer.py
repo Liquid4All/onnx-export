@@ -2,8 +2,9 @@
 """
 Chat with an LFM2-VL export through onnxruntime-genai, with images on any turn.
 
-Images stay in the conversation once attached, and every turn re-sends them. onnxruntime-genai
-resizes each image once instead of splitting it into tiles.
+Images stay in the conversation once attached, and every turn re-sends them. The checkpoint's own
+processor prepares them (see CheckpointProcessor): it resizes each image once instead of splitting
+it into tiles.
 
 Usage:
     uv run lfm2-vl-infer --model exports/LFM2.5-VL-1.6B-ONNX
@@ -13,28 +14,71 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import pathlib
 
+import numpy as np
 import onnxruntime_genai as og
 
 from liquidonnx.genai_runtime import TokenPrinter, add_runtime_arguments, generate, load_model
 from liquidonnx.lfm2.infer import run_chat_loop
 from liquidonnx.lfm2_vl.export import PRECISIONS, genai_files
 
+# Hugging Face processor output -> its entry in genai_config.json model.vision.inputs
+VISION_INPUTS = {
+    "pixel_values": "pixel_values",
+    "pixel_attention_mask": "attention_mask",
+    "spatial_shapes": "image_sizes",
+}
+
+
+class CheckpointProcessor:
+    """onnxruntime-genai inputs for a prompt and its images, made by the export's Hugging Face
+    processor (processor_config.json) instead of genai's own (genai_processor_config.json).
+
+    genai's processor rejects every prompt whose tallest image is not also its widest. The Hugging
+    Face processor pads each image's patches on their own, to the max_num_patches genai pads to.
+    Both resize each image once (do_image_splitting=False); from the same decoded image, their
+    pixels are a 1/255 step or two apart.
+    """
+
+    def __init__(self, model_dir: pathlib.Path):
+        from transformers import AutoProcessor
+
+        self.hf = AutoProcessor.from_pretrained(model_dir)
+        config = json.loads((model_dir / "genai_config.json").read_text())
+        inputs = config["model"]["vision"]["inputs"]
+        self.names = {key: inputs[entry] for key, entry in VISION_INPUTS.items()}
+
+    def __call__(self, prompt: str, images: list[str]) -> og.NamedTensors:
+        """prompt holds one <image> per image, which the processor expands into its placeholders."""
+        from PIL import Image
+
+        pil = [Image.open(path).convert("RGB") for path in images]
+        features = self.hf(
+            text=prompt, images=pil or None, return_tensors="np", do_image_splitting=False
+        )
+        input_ids = features["input_ids"]
+        inputs = og.NamedTensors()
+        inputs["input_ids"] = input_ids.astype(np.int32)
+        # genai sizes the image features by it, and skips the vision model at 0
+        image_tokens = np.count_nonzero(input_ids == self.hf.image_token_id)
+        inputs["num_image_tokens"] = np.array([image_tokens], dtype=np.int64)
+        if pil:
+            for key, name in self.names.items():
+                dtype = np.float32 if key == "pixel_values" else np.int64
+                inputs[name] = features[key].astype(dtype)
+        return inputs
+
 
 class VLChat:
     """A conversation with an LFM2-VL export; images join the next message sent."""
 
     def __init__(self, model_dir: pathlib.Path, precision: str | None = None, ep: str = "cpu"):
-        from transformers import AutoTokenizer
-
         self.model = load_model(model_dir, precision and genai_files(precision), ep)
         self.tokenizer = og.Tokenizer(self.model)
-        self.processor = self.model.create_multimodal_processor()
-        # The chat template writes one <image> per image; the genai processor expands each one
-        # into the image's feature placeholders.
-        self.hf_tokenizer = AutoTokenizer.from_pretrained(model_dir)
+        self.processor = CheckpointProcessor(model_dir)
         self.messages: list[dict] = []
         self.pending: list[str] = []
 
@@ -65,11 +109,10 @@ class VLChat:
             content.append({"type": "text", "text": text})
             self.pending = []
         self.messages.append({"role": "user", "content": content})
-        prompt = self.hf_tokenizer.apply_chat_template(
+        prompt = self.processor.hf.apply_chat_template(
             self.messages, tokenize=False, add_generation_prompt=True
         )
-        images = self.images()
-        inputs = self.processor(prompt, images=og.Images.open(*images) if images else None)
+        inputs = self.processor(prompt, self.images())
         prompt_length = inputs["input_ids"].as_numpy().shape[-1]
 
         printer = TokenPrinter(self.tokenizer) if stream else None
