@@ -22,7 +22,7 @@ ONNX export and inference tools for [LFM2](https://www.liquid.ai/liquid-foundati
 | **LFM2.5-8B-A1B**, **LFM2-8B-A1B** | fp32, fp16, q4, q4f16, q8 |
 | **LFM2.5-Audio** | fp32, fp16, q4, q8 |
 
-Every export is an [onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai) model folder, and the inference CLIs run on onnxruntime-genai. The decoders come from the onnxruntime-genai model builder, which also quantizes the q8 and q4f32 decoders; this repository builds the vision encoder, the audio graphs and the embedding models that splice image or audio features into the token embeddings, and derives the other precisions. The exports are not loadable by Transformers.js.
+Every export is an [onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai) model folder, and the inference CLIs run on onnxruntime-genai. The onnxruntime-genai model builder builds and quantizes the decoders; this repository builds the vision encoder, the audio graphs and the embedding models that splice image or audio features into the token embeddings, quantizes those, and converts the fp16 and q4f16 decoders. The exports are not loadable by Transformers.js.
 
 
 ## 2. Installation
@@ -82,7 +82,7 @@ exports/LFM2.5-1.2B-Instruct-ONNX/
 └── onnx/
     ├── model.onnx         # fp32
     ├── model_fp16.onnx    # fp16 weights, activations and caches; fp32 logits
-    ├── model_q4.onnx      # int4; embedding and tied lm_head share one int4 table
+    ├── model_q4.onnx      # int4 (k_quant); int8 lm_head, tied embedding table and sensitive layers
     ├── model_q4f32.onnx   # int4 MatMuls; fp32 embedding and lm_head
     └── model_q8.onnx      # int8
 ```

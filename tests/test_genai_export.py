@@ -12,7 +12,6 @@ import collections
 import json
 import logging
 import pathlib
-import shutil
 
 import numpy as np
 import onnx
@@ -20,7 +19,7 @@ import onnxruntime as ort
 import onnxruntime_genai as og
 import pytest
 import torch
-from helpers import assert_same_graph, derive_reference
+from helpers import attributes, matmul_bits
 from transformers import (
     AutoTokenizer,
     Lfm2Config,
@@ -38,7 +37,6 @@ from liquidonnx.genai_runtime import (
     load_model,
 )
 from liquidonnx.lfm2.export import ALL_PRECISIONS, genai_files, model_file, set_default_decoder
-from liquidonnx.quantize import derive_precision
 from liquidonnx.session import (
     cached_outputs,
     decoder_inputs,
@@ -161,45 +159,37 @@ def test_graph_layout(export):
     routers = 3 if kind == "moe" else 0
     assert fp32_ops["MoE"] == routers
 
+    # q4: int4 body, with the LM head, the embedding table it shares and the sensitive layers int8
     graph, q4_ops = ops("q4")
-    assert q4_ops["GatherBlockQuantized"] == 1
     assert q4_ops["MatMul"] == routers
-    assert not [i.name for i in graph.initializer if i.name.endswith("_quant_matmul")]
-    lm_head = next(n for n in graph.node if n.name == "/lm_head/MatMulNBits")
-    assert lm_head.input[1] == "/lm_head/quant_reshaped"
+    producers = {output: node for node in graph.node for output in node.output}
+    lm_head = producers["logits"]
+    gather = next(n for n in graph.node if n.op_type == "GatherBlockQuantized")
+    assert lm_head.op_type == "MatMulNBits"
+    assert producers[gather.input[0]].input[0] == lm_head.input[1]
+    assert attributes(lm_head)["bits"] == attributes(gather)["bits"] == 8
+    bits = matmul_bits(graph)
+    assert bits[4] > 0
+    assert bits[8] > 1
 
-    _, q4f32_ops = ops("q4f32")
+    # q4f32: int4 MatMuls, fp32 embedding and LM head
+    graph, q4f32_ops = ops("q4f32")
     assert q4f32_ops["GatherBlockQuantized"] == 0
-    assert q4f32_ops["MatMul"] == routers + 1  # lm_head stays fp32
+    assert q4f32_ops["MatMul"] == routers + 1
+    assert set(matmul_bits(graph)) == {4}
 
-    for precision, bits in (("q4", 4), ("q8", 8)):
+    graph, q8_ops = ops("q8")
+    assert q8_ops["MatMul"] == routers + 1
+    assert set(matmul_bits(graph)) == {8}
+
+    for precision, expert_bits in (("q4", 4), ("q4f32", 4), ("q8", 8)):
         graph, precision_ops = ops(precision)
         assert precision_ops["MoE"] == 0
         assert precision_ops["QMoE"] == routers
         for node in graph.node:
             if node.op_type == "QMoE":
-                attrs = {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
-                assert attrs["expert_weight_bits"] == bits
-
-
-@pytest.mark.parametrize("precision", ["q8", "q4f32"])
-def test_builder_presets_match_quantize(export, precision: str, tmp_path):
-    """The builder runs write the decoders liquidonnx.quantize derives from fp32."""
-    _, _, output_dir = export
-    expected = derive_reference(output_dir / "onnx", tmp_path, precision)
-    assert_same_graph(output_dir / "onnx" / model_file(precision), expected)
-
-
-def test_asymmetric_q4f32_matches_quantize(export, tmp_path):
-    """--q4-asymmetric reaches the q4f32 builder run, which writes nothing but the decoder."""
-    kind, _, output_dir = export
-    checkpoint = str(output_dir.parent / "checkpoint")
-    built = export_precision(checkpoint, tmp_path, FAMILIES[kind], "q4f32", q4_symmetric=False)
-    reference_dir = tmp_path / "reference"
-    reference_dir.mkdir()
-    expected = derive_reference(output_dir / "onnx", reference_dir, "q4f32", q4_symmetric=False)
-    assert_same_graph(built, expected)
-    assert not (tmp_path / "genai_config.json").exists()
+                assert attributes(node)["expert_weight_bits"] == expert_bits
+                assert attributes(node)["weights_prepacked"] == 0
 
 
 def test_genai_config(export):
@@ -225,23 +215,23 @@ def test_denormal_flush_keeps_logits(export, precision: str):
 
 
 def test_q4f16_ignores_a_stale_q4(export, tmp_path):
-    """Without reuse_q4, q4f16 quantizes the fp32 graph instead of converting model_q4.onnx."""
-    _, _, output_dir = export
-    for path in (output_dir / "onnx").glob("model.onnx*"):
-        shutil.copy(path, tmp_path)
-    (tmp_path / "model_q4.onnx").write_bytes(b"left over from another checkpoint")
+    """Without reuse_q4, q4f16 converts a fresh q4 build instead of onnx/model_q4.onnx."""
+    kind, _, output_dir = export
+    (tmp_path / "onnx").mkdir()
+    (tmp_path / "onnx" / "model_q4.onnx").write_bytes(b"left over from another checkpoint")
 
-    derive_precision(tmp_path, "q4f16")
+    checkpoint = str(output_dir.parent / "checkpoint")
+    export_precision(checkpoint, tmp_path, FAMILIES[kind], "q4f16")
 
     def logits(path: pathlib.Path) -> np.ndarray:
         session = load_onnx_session(path)
         return session.run(None, decoder_inputs(TOKENS, initialize_cache(session), 0))[0]
 
     expected = logits(output_dir / "onnx" / "model_q4f16.onnx")
-    np.testing.assert_array_equal(logits(tmp_path / "model_q4f16.onnx"), expected)
+    np.testing.assert_array_equal(logits(tmp_path / "onnx" / "model_q4f16.onnx"), expected)
 
 
-@pytest.mark.parametrize("precision", ["fp32", "q4"])
+@pytest.mark.parametrize("precision", ["fp32", "q4", "q4f16"])
 def test_genai_runtime_matches_onnxruntime(export, precision: str):
     """Greedy answers through liquidonnx.genai_runtime (the CLIs' path) and plain onnxruntime."""
     _, _, output_dir = export

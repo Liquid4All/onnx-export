@@ -1,8 +1,8 @@
 """Shared test utilities."""
 
+import collections
 import logging
 import pathlib
-import shutil
 
 import numpy as np
 from PIL import Image
@@ -10,35 +10,18 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 
-def derive_reference(
-    onnx_dir: pathlib.Path, tmp_path: pathlib.Path, precision: str, name: str = "model", **kwargs
-) -> pathlib.Path:
-    """The decoder liquidonnx.quantize derives from onnx_dir/{name}.onnx, written to tmp_path."""
-    from liquidonnx.quantize import derive_precision
+def attributes(node) -> dict:
+    """Attribute values of an ONNX node, by name."""
+    from onnx import helper
 
-    for path in onnx_dir.glob(f"{name}.onnx*"):
-        shutil.copy(path, tmp_path)
-    return derive_precision(tmp_path, precision, name, **kwargs)
+    return {a.name: helper.get_attribute_value(a) for a in node.attribute}
 
 
-def assert_same_graph(actual: pathlib.Path, expected: pathlib.Path):
-    """Same nodes, graph I/O, opsets and initializers (names, dtypes, shapes and bytes)."""
-    import onnx
-    from onnx import numpy_helper
-
-    a, b = onnx.load(str(actual)), onnx.load(str(expected))
-    assert list(a.graph.node) == list(b.graph.node)
-    assert list(a.graph.input) == list(b.graph.input)
-    assert list(a.graph.output) == list(b.graph.output)
-    assert list(a.opset_import) == list(b.opset_import)
-
-    a_tensors = {init.name: numpy_helper.to_array(init) for init in a.graph.initializer}
-    b_tensors = {init.name: numpy_helper.to_array(init) for init in b.graph.initializer}
-    assert a_tensors.keys() == b_tensors.keys()
-    for name, tensor in a_tensors.items():
-        assert tensor.dtype == b_tensors[name].dtype, name
-        assert tensor.shape == b_tensors[name].shape, name
-        assert tensor.tobytes() == b_tensors[name].tobytes(), name
+def matmul_bits(graph) -> collections.Counter:
+    """How many MatMulNBits nodes of each bit width an ONNX graph has."""
+    return collections.Counter(
+        attributes(node)["bits"] for node in graph.node if node.op_type == "MatMulNBits"
+    )
 
 
 def get_model_name(model_id: str) -> str:

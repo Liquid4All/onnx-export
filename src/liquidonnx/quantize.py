@@ -1,26 +1,16 @@
 """
 Quantization and precision conversion for ONNX models.
 
-Weight-only MatMulNBits quantization (quantize_model / quantize_matmuls), plus the passes that
-turn an fp32 onnxruntime-genai LFM2 decoder into the published precisions:
-
-    tie_embedding_int4  embedding Gather + tied lm_head -> GatherBlockQuantized + MatMulNBits
-                        sharing one int4 table
-    moe_to_qmoe         com.microsoft MoE -> QMoE with int4/int8 block-quantized experts
-    convert_to_fp16     fp16 weights, activations and caches; logits kept fp32
-
-derive_precision chains them into the recipe for each published precision. The exports build the
-precisions in liquidonnx.genai_builder.DECODER_PRESETS with the genai builder instead, which
-writes the same decoders.
+Weight-only MatMulNBits quantization (quantize_model / quantize_matmuls) for the vision encoder and
+the audio graphs, and convert_to_fp16 for their fp16 versions and the fp16 and q4f16 decoders. The
+genai builder quantizes the decoders (liquidonnx.genai_builder.DECODER_PRESETS).
 """
 
 import logging
 import pathlib
-import tempfile
 
 import numpy as np
 import onnx
-from onnx import helper, numpy_helper
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     DefaultWeightOnlyQuantConfig,
     MatMulNBitsQuantizer,
@@ -40,11 +30,6 @@ def find_lm_head_node(model) -> str | None:
                 if "lm_head" in inp.lower():
                     return node.name
     return None
-
-
-def find_router_nodes(model: onnx.ModelProto) -> list[str]:
-    """MoE router MatMuls; they stay fp32 so rounding cannot flip an expert choice."""
-    return [n.name for n in model.graph.node if n.op_type == "MatMul" and "/moe/router/" in n.name]
 
 
 def get_model_size(path: pathlib.Path) -> tuple[float, float]:
@@ -113,33 +98,6 @@ def _blocks(weight: np.ndarray, block_size: int) -> np.ndarray:
     return weight.reshape(*batch_dims, n_blocks, block_size)
 
 
-def quantize_int4_block(
-    weight: np.ndarray, block_size: int = DEFAULT_BLOCK_SIZE
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Asymmetric uint4 quantization along the last axis.
-
-    Returns (quant [..., K/2] two values per byte low nibble first, scales [..., n_blocks] fp32,
-    zero points [..., ceil(n_blocks/2)] packed the same way).
-    """
-    blocked = _blocks(weight, block_size)
-    batch_dims = blocked.shape[:-2]
-    w_min = blocked.min(axis=-1, keepdims=True)
-    w_max = blocked.max(axis=-1, keepdims=True)
-
-    scale = (w_max - w_min) / 15.0
-    scale = np.where(scale < SCALE_EPS, 1.0, scale)
-    zero_point = np.round(-w_min / scale).clip(0, 15).astype(np.uint8)
-    quant = np.round(blocked / scale + zero_point).clip(0, 15).astype(np.uint8)
-    quant_packed = (quant[..., 0::2] | (quant[..., 1::2] << 4)).reshape(*batch_dims, -1)
-
-    zero_point = zero_point.squeeze(-1)
-    if zero_point.shape[-1] % 2:
-        zero_point = np.concatenate([zero_point, np.zeros_like(zero_point[..., :1])], axis=-1)
-    zp_packed = zero_point[..., 0::2] | (zero_point[..., 1::2] << 4)
-
-    return quant_packed, scale.squeeze(-1).astype(np.float32), zp_packed
-
-
 def quantize_int8_block(
     weight: np.ndarray, block_size: int = DEFAULT_BLOCK_SIZE
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -159,178 +117,6 @@ def quantize_int8_block(
         scale.squeeze(-1).astype(np.float32),
         zero_point.squeeze(-1).astype(np.uint8),
     )
-
-
-# === Graph passes ===
-
-
-def _replace_nodes(model: onnx.ModelProto, replacements: dict[int, onnx.NodeProto | None]):
-    """Swap nodes by index in graph.node; None drops the node. Unused initializers are removed."""
-    nodes = []
-    for index, node in enumerate(model.graph.node):
-        if index in replacements:
-            if replacements[index] is not None:
-                nodes.append(replacements[index])
-        else:
-            nodes.append(node)
-    del model.graph.node[:]
-    model.graph.node.extend(nodes)
-
-    used = {name for node in model.graph.node for name in node.input}
-    used |= {o.name for o in model.graph.output}
-    kept = [init for init in model.graph.initializer if init.name in used]
-    del model.graph.initializer[:]
-    model.graph.initializer.extend(kept)
-
-
-def tie_embedding_int4(model: onnx.ModelProto, block_size: int = DEFAULT_BLOCK_SIZE) -> bool:
-    """Quantize the tied embedding table once for both the embedding lookup and lm_head.
-
-    The genai builder stores a tied table as lm_head.MatMul.weight [H, V] and feeds the embedding
-    through Transpose -> Gather. Returns False when there is no tied embedding in the graph.
-    """
-    graph = model.graph
-    initializers = {init.name: init for init in graph.initializer}
-    nodes = list(graph.node)
-    producers = {out: i for i, node in enumerate(nodes) for out in node.output}
-    lm_head = next(
-        (i for i, n in enumerate(nodes) if n.op_type == "MatMul" and n.name == "/lm_head/MatMul"),
-        None,
-    )
-    gather = next(
-        (i for i, n in enumerate(nodes) if n.op_type == "Gather" and n.input[1] == "input_ids"),
-        None,
-    )
-    if lm_head is None or gather is None or nodes[lm_head].input[1] not in initializers:
-        return False
-    transpose = producers.get(nodes[gather].input[0])
-    if (
-        transpose is None
-        or nodes[transpose].op_type != "Transpose"
-        or nodes[transpose].input[0] != nodes[lm_head].input[1]
-    ):
-        return False
-    lm_head_input, logits = nodes[lm_head].input[0], nodes[lm_head].output[0]
-    embeddings = nodes[gather].output[0]
-
-    table = numpy_helper.to_array(initializers[nodes[lm_head].input[1]]).T  # [H, V] -> [V, H]
-    vocab_size, hidden_size = table.shape
-    quant, scales, zero_points = quantize_int4_block(table, block_size)
-    n_blocks = (hidden_size + block_size - 1) // block_size
-
-    # One uint8 table; lm_head sees it as [V, n_blocks, block_size / 2] through a constant Reshape.
-    graph.initializer.extend(
-        [
-            numpy_helper.from_array(quant, "model_embed_tokens_weight_quant"),
-            numpy_helper.from_array(scales, "model_embed_tokens_weight_scales"),
-            numpy_helper.from_array(zero_points, "model_embed_tokens_weight_zp"),
-            numpy_helper.from_array(
-                np.array([vocab_size, n_blocks, block_size // 2], np.int64), "/lm_head/quant_shape"
-            ),
-        ]
-    )
-    gather_quantized = helper.make_node(
-        "GatherBlockQuantized",
-        [
-            "model_embed_tokens_weight_quant",
-            "input_ids",
-            "model_embed_tokens_weight_scales",
-            "model_embed_tokens_weight_zp",
-        ],
-        [embeddings],
-        name="/model/embed_tokens/GatherBlockQuantized",
-        domain="com.microsoft",
-        bits=4,
-        block_size=block_size,
-        gather_axis=0,
-        quantize_axis=1,
-    )
-    reshape = helper.make_node(
-        "Reshape",
-        ["model_embed_tokens_weight_quant", "/lm_head/quant_shape"],
-        ["/lm_head/quant_reshaped"],
-        name="/lm_head/Reshape",
-    )
-    matmul_nbits = helper.make_node(
-        "MatMulNBits",
-        [
-            lm_head_input,
-            "/lm_head/quant_reshaped",
-            "model_embed_tokens_weight_scales",
-            "model_embed_tokens_weight_zp",
-        ],
-        [logits],
-        name="/lm_head/MatMulNBits",
-        domain="com.microsoft",
-        K=hidden_size,
-        N=vocab_size,
-        bits=4,
-        block_size=block_size,
-    )
-    _replace_nodes(model, {gather: gather_quantized, transpose: reshape, lm_head: matmul_nbits})
-    return True
-
-
-def _expert_bias(node: onnx.NodeProto, index: int, initializers: dict) -> str:
-    """The MoE bias input at index, or "" when absent or all zero (as genai writes it)."""
-    name = node.input[index] if len(node.input) > index else ""
-    if not name or not np.any(numpy_helper.to_array(initializers[name])):
-        return ""
-    return name
-
-
-def moe_to_qmoe(model: onnx.ModelProto, bits: int, block_size: int = DEFAULT_BLOCK_SIZE) -> int:
-    """Rewrite each fp32 com.microsoft MoE node as QMoE with block-quantized experts.
-
-    MoE inputs: [x, router_probs, fc1 [E, 2I, H], fc1_bias, fc2 [E, H, I], fc2_bias]. QMoE takes
-    uint8 weights [E, N, K * bits / 8], scales [E, N, K / block] and asymmetric zero points at
-    inputs 11 / 12. Returns the number of nodes rewritten.
-    """
-    quantize = {4: quantize_int4_block, 8: quantize_int8_block}[bits]
-    initializers = {init.name: init for init in model.graph.initializer}
-    replacements = {}
-    for index, node in enumerate(model.graph.node):
-        if node.op_type != "MoE":
-            continue
-        packed = []
-        for weight_name in (node.input[2], node.input[4]):
-            weight = numpy_helper.to_array(initializers[weight_name]).astype(np.float32)
-            base = weight_name.removesuffix(".weight").replace(".", "_")
-            names = (f"{base}_weight_quant", f"{base}_weight_scales", f"{base}_weight_zp")
-            for array, name in zip(quantize(weight, block_size), names, strict=True):
-                model.graph.initializer.append(numpy_helper.from_array(array, name))
-            packed.append(names)
-
-        attrs = {a.name: helper.get_attribute_value(a) for a in node.attribute}
-        (fc1, fc1_scales, fc1_zp), (fc2, fc2_scales, fc2_zp) = packed
-        replacements[index] = helper.make_node(
-            "QMoE",
-            [
-                node.input[0],
-                node.input[1],
-                fc1,
-                fc1_scales,
-                _expert_bias(node, 3, initializers),
-                fc2,
-                fc2_scales,
-                _expert_bias(node, 5, initializers),
-                "",
-                "",
-                "",
-                fc1_zp,
-                fc2_zp,
-                "",
-            ],
-            list(node.output),
-            name=node.name.replace("/MoE", "/QMoE"),
-            domain="com.microsoft",
-            **attrs,
-            expert_weight_bits=bits,
-            block_size=block_size,
-        )
-    if replacements:
-        _replace_nodes(model, replacements)
-    return len(replacements)
 
 
 def convert_to_fp16(
@@ -474,66 +260,3 @@ def quantize_model(
     )
     logger.info(f"Saving to {output_path}...")
     return save_model(quantized, output_path)
-
-
-def derive_precision(
-    onnx_dir: pathlib.Path,
-    precision: str,
-    name: str = "model",
-    block_size: int = DEFAULT_BLOCK_SIZE,
-    q4_symmetric: bool = True,
-    reuse_q4: bool = False,
-) -> pathlib.Path:
-    """Write onnx_dir/{name}_{precision}.onnx from the fp32 decoder onnx_dir/{name}.onnx.
-
-    reuse_q4 lets q4f16 convert {name}_q4.onnx, which the caller has just derived from the same
-    fp32 graph; otherwise q4f16 quantizes afresh.
-    """
-    base = onnx_dir / f"{name}.onnx"
-    output_path = onnx_dir / f"{name}_{precision}.onnx"
-
-    if precision == "fp16":
-        return convert_to_fp16(base, output_path)
-
-    if precision == "q4f16":
-        q4 = onnx_dir / f"{name}_q4.onnx"
-        if reuse_q4:
-            return convert_to_fp16(q4, output_path)
-        with tempfile.TemporaryDirectory(dir=onnx_dir) as tmp:
-            q4 = _quantize_decoder(
-                base, pathlib.Path(tmp) / q4.name, "q4", block_size, q4_symmetric
-            )
-            return convert_to_fp16(q4, output_path)
-
-    return _quantize_decoder(base, output_path, precision, block_size, q4_symmetric)
-
-
-def _quantize_decoder(
-    base: pathlib.Path,
-    output_path: pathlib.Path,
-    precision: str,
-    block_size: int,
-    q4_symmetric: bool,
-) -> pathlib.Path:
-    model = load_model(base)
-    exclude = ["/lm_head/MatMul", *find_router_nodes(model)]
-    if precision == "q8":
-        experts = moe_to_qmoe(model, bits=8, block_size=block_size)
-        model = quantize_matmuls(
-            model, bits=8, block_size=block_size, symmetric=False, exclude=exclude
-        )
-    elif precision in ("q4", "q4f32"):
-        tied = precision == "q4" and tie_embedding_int4(model, block_size)
-        experts = moe_to_qmoe(model, bits=4, block_size=block_size)
-        model = quantize_matmuls(
-            model, bits=4, block_size=block_size, symmetric=q4_symmetric, exclude=exclude
-        )
-        if tied:
-            logger.info("  embedding and lm_head share one int4 table")
-    else:
-        raise ValueError(f"Unknown precision: {precision}")
-    if experts:
-        logger.info(f"  {experts} MoE layers -> QMoE")
-    save_model(model, output_path)
-    logger.info(f"  {output_path.name}: {get_total_model_size_mb(output_path):.1f} MB")
-    return output_path

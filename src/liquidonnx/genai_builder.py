@@ -7,9 +7,8 @@ fetched once into ~/.cache/liquidonnx. Set LIQUIDONNX_GENAI_BUILDER to a local
 or later from PyPI, for all four families (lfm2, lfm2_moe, lfm2_vl, lfm2_audio); CI tests them on
 the runtime built from main at GENAI_COMMIT.
 
-Decoders are built for the CPU EP. The fp32 decoder and the precisions in DECODER_PRESETS are
-each their own builder run; liquidonnx.quantize derives the other precisions from the fp32 (or q4)
-decoder.
+Decoders are built for the CPU EP. The fp32 decoder and the quantized precisions in DECODER_PRESETS
+are each their own builder run; fp16 and q4f16 are the fp32 and q4 decoders converted to fp16.
 """
 
 import json
@@ -27,10 +26,9 @@ import onnx
 from liquidonnx import remote_code_enabled
 from liquidonnx.quantize import (
     DEFAULT_BLOCK_SIZE,
-    derive_precision,
+    convert_to_fp16,
     get_total_model_size_mb,
     load_model,
-    moe_to_qmoe,
     rename_quantized_weights,
     save_model,
 )
@@ -48,22 +46,30 @@ CHECKPOINT_FILES = ("config.json", "generation_config.json")
 class DecoderPreset:
     precision: str  # builder -p
     options: dict[str, str]
+    # Rename the tensors as liquidonnx.quantize named them when it derived this precision, so the
+    # published decoder keeps its bytes.
+    legacy_names: bool = False
 
 
 # === Decoder presets ===
 
-# Each writes the initializers and nodes liquidonnx.quantize derives from fp32 for its precision,
-# once export_decoder gives the result quantize.py's tensor names and QMoE experts.
-Q8 = DecoderPreset("int8", {"is_symmetric": "false", "nodes_to_exclude": "/lm_head/MatMul"})
-Q4F32 = DecoderPreset("int4", {"nodes_to_exclude": "/lm_head/MatMul,/model/embed_tokens/Gather"})
+Q8 = DecoderPreset("int8", {"is_symmetric": "false", "nodes_to_exclude": "/lm_head/MatMul"}, True)
+Q4F32 = DecoderPreset(
+    "int4", {"nodes_to_exclude": "/lm_head/MatMul,/model/embed_tokens/Gather"}, True
+)
+# The olive-recipes cpu_int4 options: k_quant, with the LM head (and the tied embedding table it
+# shares) and the layers most sensitive to int4 at int8.
+Q4 = DecoderPreset(
+    "int4",
+    {"algo_config": "k_quant", "matmul_mixed_precision": "last_matmul:int8,mixed_layers:int8"},
+)
 DECODER_PRESETS = {
-    "lfm2": {"q8": Q8, "q4f32": Q4F32},
-    "lfm2_moe": {"q8": Q8, "q4f32": Q4F32},
-    "lfm2_vl": {"q8": Q8},
-    "lfm2_audio": {"q8": Q8},
+    "lfm2": {"q4": Q4, "q4f32": Q4F32, "q8": Q8},
+    "lfm2_moe": {"q4": Q4, "q4f32": Q4F32, "q8": Q8},
+    "lfm2_vl": {"q4": Q4, "q8": Q8},
+    # Q4's options are unmeasured on audio, so its q4 keeps the int4 body and fp32 head.
+    "lfm2_audio": {"q4": Q4F32, "q8": Q8},
 }
-# The builder's QMoE experts are symmetric; quantize.moe_to_qmoe keeps the asymmetric ones.
-FLOAT_EXPERTS = {"quant_config": {"moe": {"type": "none"}}}
 
 
 def cache_dir() -> pathlib.Path:
@@ -121,7 +127,6 @@ def build_decoder(
     precision: str = "fp32",
     extra_options: dict[str, str] | None = None,
     filename: str = "model.onnx",
-    target_options: dict | None = None,
 ) -> pathlib.Path:
     """Run the genai builder (CPU EP) at a builder precision and return output_dir/filename.
 
@@ -148,8 +153,6 @@ def build_decoder(
         **(extra_options or {}),
     }
     cmd += ["--extra_options", *[f"{k}={v}" for k, v in options.items()]]
-    if target_options:
-        cmd += ["--target_options", json.dumps(target_options)]
     logger.info(f"Building the {precision} decoder with the genai builder: {checkpoint}")
     subprocess.run(cmd, check=True)
     return output_dir / filename
@@ -168,42 +171,51 @@ def pin_kv_head_size(model: onnx.ModelProto, head_size: int):
                 dim.dim_value = head_size
 
 
+def mark_qmoe_weights_raw(model: onnx.ModelProto):
+    """Set weights_prepacked=0 on every QMoE node.
+
+    CPU builds store raw [E, N, K/pack] expert weights but omit the attribute, and CUDA's QMoE
+    reads an omitted one as CUTLASS-prepacked weights; 0 makes it prepack them at load time.
+    """
+    for node in model.graph.node:
+        if node.op_type == "QMoE" and all(a.name != "weights_prepacked" for a in node.attribute):
+            node.attribute.append(onnx.helper.make_attribute("weights_prepacked", 0))
+
+
 def export_decoder(
     model: str,
     output_dir: pathlib.Path,
     filename: str = "model.onnx",
     extra_options: dict[str, str] | None = None,
-    precision: str = "fp32",
+    preset: DecoderPreset | None = None,
     block_size: int = DEFAULT_BLOCK_SIZE,
 ) -> pathlib.Path:
-    """Build the decoder at a builder precision (fp32, int8, int4) into output_dir/onnx/filename.
+    """Build the fp32 decoder, or the one preset quantizes, into output_dir/onnx/filename.
 
     The fp32 build also writes the builder's genai_config.json and tokenizer files, and the
     checkpoint's config.json and generation_config.json, to output_dir.
     """
     onnx_dir = output_dir / "onnx"
     onnx_dir.mkdir(parents=True, exist_ok=True)
-    quantized = precision != "fp32"
+    precision = preset.precision if preset else "fp32"
     options = dict(extra_options or {})
-    target_options = None
-    if quantized:
-        options["block_size"] = str(block_size)
-        target_options = FLOAT_EXPERTS
+    if preset:
+        options.update(preset.options, block_size=str(block_size), qmoe_block_size=str(block_size))
 
     with tempfile.TemporaryDirectory(dir=output_dir, prefix=".genai-build-") as tmp:
         build_dir = pathlib.Path(tmp)
-        built = build_decoder(model, build_dir, precision, options, filename, target_options)
+        built = build_decoder(model, build_dir, precision, options, filename)
 
         genai_config = json.loads((build_dir / "genai_config.json").read_text())
         decoder = load_model(built)
         pin_kv_head_size(decoder, genai_config["model"]["decoder"]["head_size"])
-        if quantized:
+        if preset and preset.legacy_names:
             rename_quantized_weights(decoder)
-            moe_to_qmoe(decoder, bits=int(precision.removeprefix("int")), block_size=block_size)
+        mark_qmoe_weights_raw(decoder)
         output_path = save_model(decoder, onnx_dir / filename)
         del decoder
 
-        if not quantized:
+        if not preset:
             # genai passes unknown session_options keys to AddConfigEntry, and the multimodal
             # graphs without session_options of their own reuse the decoder's.
             session_options = genai_config["model"]["decoder"].setdefault("session_options", {})
@@ -230,22 +242,26 @@ def export_precision(
     name: str = "model",
     extra_options: dict[str, str] | None = None,
     block_size: int = DEFAULT_BLOCK_SIZE,
-    q4_symmetric: bool = True,
     reuse_q4: bool = False,
 ) -> pathlib.Path:
     """Write output_dir/onnx/{name}_{precision}.onnx.
 
     A precision in DECODER_PRESETS[family] is its own builder run, with the family's builder
-    options in extra_options as for fp32; liquidonnx.quantize derives the others from
-    onnx/{name}.onnx (see derive_precision for reuse_q4).
+    options in extra_options as for fp32. fp16 converts onnx/{name}.onnx; q4f16 converts
+    onnx/{name}_q4.onnx when reuse_q4 says the caller has just built it, and a fresh q4 otherwise.
     """
-    preset = DECODER_PRESETS[family].get(precision)
-    if preset is None:
-        onnx_dir = output_dir / "onnx"
-        return derive_precision(onnx_dir, precision, name, block_size, q4_symmetric, reuse_q4)
+    onnx_dir = output_dir / "onnx"
+    output_path = onnx_dir / f"{name}_{precision}.onnx"
+    if precision == "fp16":
+        return convert_to_fp16(onnx_dir / f"{name}.onnx", output_path)
+    if precision == "q4f16":
+        if reuse_q4:
+            return convert_to_fp16(onnx_dir / f"{name}_q4.onnx", output_path)
+        with tempfile.TemporaryDirectory(dir=output_dir, prefix=".q4-") as tmp:
+            q4 = export_precision(
+                model, pathlib.Path(tmp), family, "q4", name, extra_options, block_size
+            )
+            return convert_to_fp16(q4, output_path)
 
-    options = {**(extra_options or {}), **preset.options}
-    if preset.precision == "int4" and not q4_symmetric:
-        options["is_symmetric"] = "false"
-    filename = f"{name}_{precision}.onnx"
-    return export_decoder(model, output_dir, filename, options, preset.precision, block_size)
+    preset = DECODER_PRESETS[family][precision]
+    return export_decoder(model, output_dir, output_path.name, extra_options, preset, block_size)

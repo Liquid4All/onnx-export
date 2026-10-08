@@ -2,8 +2,8 @@
 """
 Export LFM2 and LFM2-MoE models to ONNX for onnxruntime-genai.
 
-The onnxruntime-genai model builder (CPU EP, see liquidonnx.genai_builder) builds the fp32, q8
-and q4f32 decoders, one run each; liquidonnx.quantize derives fp16, q4 and q4f16 from fp32.
+The onnxruntime-genai model builder (CPU EP, see liquidonnx.genai_builder) builds the fp32, q4,
+q4f32 and q8 decoders, one run each; fp16 and q4f16 are the fp32 and q4 decoders converted to fp16.
 
 Output Structure:
     {output-dir}/exports/{model-name}-ONNX/
@@ -15,7 +15,7 @@ Output Structure:
         └── onnx/
             ├── model.onnx           # fp32
             ├── model_fp16.onnx      # fp16 weights, activations and caches; fp32 logits
-            ├── model_q4.onnx        # int4; embedding and tied lm_head share one int4 table
+            ├── model_q4.onnx        # int4 (k_quant); int8 lm_head, tied table, sensitive layers
             ├── model_q4f16.onnx     # q4 with fp16 activations
             ├── model_q4f32.onnx     # int4 MatMuls; fp32 embedding and lm_head
             └── model_q8.onnx        # int8
@@ -100,11 +100,6 @@ def main(
         action="store_true",
         help="Reuse the existing fp32 onnx/model.onnx instead of rebuilding it",
     )
-    parser.add_argument(
-        "--q4-asymmetric",
-        action="store_true",
-        help="Use asymmetric int4 for MatMul weights. Default is symmetric",
-    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -130,7 +125,6 @@ def main(
             family,
             precision,
             block_size=args.block_size,
-            q4_symmetric=not args.q4_asymmetric,
             reuse_q4="q4" in precisions,
         )
 
