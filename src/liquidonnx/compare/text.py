@@ -39,13 +39,13 @@ def precisions(export: pathlib.Path) -> list[str]:
     return [p for p in ("fp32", *ALL_PRECISIONS) if (export / "onnx" / model_file(p)).exists()]
 
 
-def reference(checkpoint: pathlib.Path, prompts: int, max_new: int) -> list[dict]:
+def reference(checkpoint: pathlib.Path, prompts: int, max_new: int, device: str) -> list[dict]:
     """Greedy answers of the fp32 PyTorch model and the logits that predict each answer token."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-    model = AutoModelForCausalLM.from_pretrained(checkpoint, dtype=torch.float32).eval()
+    model = AutoModelForCausalLM.from_pretrained(checkpoint, dtype=torch.float32).to(device).eval()
     items = []
     for text in PROMPTS[:prompts]:
         rendered = tokenizer.apply_chat_template(
@@ -55,11 +55,11 @@ def reference(checkpoint: pathlib.Path, prompts: int, max_new: int) -> list[dict
         start = time.time()
         with torch.no_grad():
             out = model.generate(
-                torch.from_numpy(ids)[None], max_new_tokens=max_new, do_sample=False
+                torch.from_numpy(ids)[None].to(device), max_new_tokens=max_new, do_sample=False
             )
             # A full forward pass, not generate()'s own logits: MoE routing depends on the batch
             # shape, and the ONNX decoder is scored against the model, not one run of it.
-            logits = model(out).logits[0].float().numpy()
+            logits = model(out).logits[0].float().cpu().numpy()
         answer = out[0, len(ids) :].tolist()
         logger.info(f"reference {len(ids)}+{len(answer)} tokens in {time.time() - start:.1f}s")
         items.append(
@@ -79,8 +79,8 @@ def eos_ids(export: pathlib.Path) -> set[int]:
     return set(eos if isinstance(eos, list) else [eos])
 
 
-def score_decoder(path: pathlib.Path, refs: list[dict], eos: set[int]) -> dict:
-    session = load_onnx_session(path)
+def score_decoder(path: pathlib.Path, refs: list[dict], eos: set[int], ep: str) -> dict:
+    session = load_onnx_session(path, ep, tf32=False)
     forced, answers = [], []
     for ref in refs:
         sequence = np.concatenate([ref["prompt"], ref["answer"]])[None]
@@ -95,8 +95,10 @@ def score_decoder(path: pathlib.Path, refs: list[dict], eos: set[int]) -> dict:
     }
 
 
-def score_genai(export: pathlib.Path, precision: str, refs: list[dict], eos: set[int]) -> dict:
-    model = load_model(export, genai_files(precision))
+def score_genai(
+    export: pathlib.Path, precision: str, refs: list[dict], eos: set[int], ep: str
+) -> dict:
+    model = load_model(export, genai_files(precision), ep, tf32=False)
     tokenizer = og.Tokenizer(model)
     answers, same_ids = [], 0
     for ref in refs:
@@ -107,9 +109,10 @@ def score_genai(export: pathlib.Path, precision: str, refs: list[dict], eos: set
     return {"greedy": merge_sequences(answers), "prompt_ids_equal": f"{same_ids}/{len(refs)}"}
 
 
-def score(export: pathlib.Path, precision: str, refs: list[dict], genai: bool) -> dict:
+def score(export: pathlib.Path, precision: str, refs: list[dict], genai: bool, ep: str) -> dict:
     eos = eos_ids(export)
-    row = {"decoder": guarded(score_decoder, export / "onnx" / model_file(precision), refs, eos)}
+    path = export / "onnx" / model_file(precision)
+    row = {"decoder": guarded(score_decoder, path, refs, eos, ep)}
     if genai:
-        row["genai"] = guarded(score_genai, export, precision, refs, eos)
+        row["genai"] = guarded(score_genai, export, precision, refs, eos, ep)
     return row

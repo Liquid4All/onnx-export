@@ -8,20 +8,22 @@ For every precision in the export folder:
 - vision encoder and embedding model (VL): largest difference to the reference features
 - genai: greedy answers through onnxruntime-genai (audio: text and audio codes, frame by frame)
 
-References come from PyTorch (text, MoE, VL) or liquid-audio (audio), in fp32 on CPU, and are
-cached in ~/.cache/liquidonnx/compare. Run from the repository: the VL images and audio clips are
-tests/test_lfm2_vl/assets and samples/audio.
+References come from PyTorch (text, MoE, VL) or liquid-audio (audio) in fp32, and are cached per
+device in ~/.cache/liquidonnx/compare. --device cuda runs the references on the GPU with TF32 off,
+and the ONNX sessions and onnxruntime-genai on the CUDA EP, also without TF32. Run from the
+repository: the VL images and audio clips are tests/test_lfm2_vl/assets and samples/audio.
 
 Usage:
     uv run lfm2-compare text --model LiquidAI/LFM2.5-350M --export exports/LFM2.5-350M-ONNX
     uv run lfm2-compare moe --model LiquidAI/LFM2.5-8B-A1B --export exports/LFM2.5-8B-A1B-ONNX \\
-        --prompts 4 --max-new 32
+        --prompts 4 --max-new 32 --device cuda
     uv run lfm2-compare vl --model LiquidAI/LFM2.5-VL-1.6B --export exports/LFM2.5-VL-1.6B-ONNX
     uv run lfm2-compare audio --model LiquidAI/LFM2.5-Audio-1.5B \\
         --export exports/LFM2.5-Audio-1.5B-ONNX --precision fp32 q4
 """
 
 import argparse
+import gc
 import hashlib
 import json
 import logging
@@ -35,7 +37,9 @@ import time
 import numpy as np
 import onnxruntime_genai as og
 
+from liquidonnx.compare.metrics import guarded
 from liquidonnx.genai_builder import cache_dir, resolve_checkpoint
+from liquidonnx.genai_runtime import EXECUTION_PROVIDERS
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +69,16 @@ def checkpoint_revision(model: str, checkpoint: pathlib.Path) -> str:
     )
 
 
-def cached_reference(model: str, checkpoint: pathlib.Path, family: str, prompts: int, max_new: int):
-    """The reference answers, computed once per checkpoint revision, inputs and answer length.
+def cached_reference(
+    model: str,
+    checkpoint: pathlib.Path,
+    family: str,
+    prompts: int,
+    max_new: int,
+    device: str = "cpu",
+):
+    """The reference answers, computed once per checkpoint revision, inputs, answer length and
+    device.
 
     Hugging Face checkpoints are keyed by commit, so a reference computed on one host can be
     copied to another. An unreadable cache file is recomputed and overwritten.
@@ -75,7 +87,8 @@ def cached_reference(model: str, checkpoint: pathlib.Path, family: str, prompts:
     inputs = module.PROMPTS[:prompts] if family in ("text", "moe") else module.CASES
     key = repr((checkpoint_revision(model, checkpoint), inputs, max_new))
     digest = hashlib.sha256(key.encode()).hexdigest()[:12]
-    path = cache_dir() / "compare" / f"{pathlib.Path(model).name}-{family}-{digest}.npz"
+    tag = "" if device == "cpu" else f"-{device}"  # CPU references keep their pre-device names
+    path = cache_dir() / "compare" / f"{pathlib.Path(model).name}-{family}{tag}-{digest}.npz"
     if path.exists():
         try:
             with np.load(path, allow_pickle=True) as cache:
@@ -86,11 +99,20 @@ def cached_reference(model: str, checkpoint: pathlib.Path, family: str, prompts:
             logger.info(f"Reference: {path}")
             return items
 
-    logger.info(f"Running the reference model of {checkpoint}...")
+    logger.info(f"Running the reference model of {checkpoint} on {device}...")
+    if device == "cuda":
+        import torch
+
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
     if family in ("text", "moe"):
-        items = module.reference(checkpoint, prompts, max_new)
+        items = module.reference(checkpoint, prompts, max_new, device)
     else:
-        items = module.reference(checkpoint, max_new)
+        items = module.reference(checkpoint, max_new, device)
+    if device == "cuda":
+        # torch keeps the freed reference model's memory cached; the ONNX sessions need it
+        gc.collect()
+        torch.cuda.empty_cache()
     save_reference(path, items)
     return items
 
@@ -131,7 +153,7 @@ def _genai_cell(family: str, genai: dict | None) -> str:
 def report(results: dict) -> str:
     """Markdown tables of a results dict."""
     family = results["family"]
-    lines = [f"### {results['model']} ({family}) on {results['host']}", ""]
+    lines = [f"### {results['model']} ({family}) on {results['host']} ({results['device']})", ""]
     if family == "audio":
         lines += [
             "| precision | KL mean | top-1 | max abs | hidden max abs | MB | genai: text, frames |",
@@ -207,6 +229,13 @@ def main():
     )
     parser.add_argument("--no-genai", action="store_true", help="Skip onnxruntime-genai")
     parser.add_argument(
+        "--device",
+        choices=EXECUTION_PROVIDERS,
+        default="cpu",
+        help="Device of the reference, the ONNX sessions and onnxruntime-genai; cuda turns TF32 "
+        "off (default: cpu)",
+    )
+    parser.add_argument(
         "--output",
         type=pathlib.Path,
         help="Results JSON; a markdown report is written next to it "
@@ -225,25 +254,39 @@ def main():
 
     checkpoint = resolve_checkpoint(args.model)
     max_new = args.max_new or MAX_NEW[args.family]
-    refs = cached_reference(args.model, checkpoint, args.family, args.prompts, max_new)
+    refs = cached_reference(args.model, checkpoint, args.family, args.prompts, max_new, args.device)
 
     results = {
         "model": args.model,
         "revision": checkpoint.name,
         "family": args.family,
         "host": platform.node().split(".")[0],
+        "device": args.device,
         "export": str(args.export),
         "genai": og.__version__,
         "rows": {},
     }
+    # genai loads a second onnxruntime that shares the CUDA provider library; once it holds a CUDA
+    # model, new QMoE sessions of the Python module fail to prepack, so onnxruntime scores run first.
+    rows = results["rows"]
     for precision in precisions:
         start = time.time()
         if args.family == "audio":
-            row = module.score(args.export, precision, refs, not args.no_genai, max_new)
+            rows[precision] = module.score(
+                args.export, precision, refs, False, max_new, args.device
+            )
         else:
-            row = module.score(args.export, precision, refs, not args.no_genai)
-        row["seconds"] = time.time() - start
-        results["rows"][precision] = row
+            rows[precision] = module.score(args.export, precision, refs, False, args.device)
+        rows[precision]["seconds"] = time.time() - start
+    if not args.no_genai:
+        last = max_new if args.family == "audio" else module.eos_ids(args.export)
+        for precision in precisions:
+            start = time.time()
+            rows[precision]["genai"] = guarded(
+                module.score_genai, args.export, precision, refs, last, args.device
+            )
+            rows[precision]["seconds"] += time.time() - start
+    for precision, row in rows.items():
         logger.info(f"{precision}: {json.dumps(row, default=str)}")
 
     output = args.output or pathlib.Path(f"compare-{args.export.name}.json")

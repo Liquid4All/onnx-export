@@ -83,14 +83,14 @@ def reference_answer(
     return tokens, np.array(frames, np.int64).reshape(-1, NUM_CODEBOOKS), prompt_embeds
 
 
-def reference(checkpoint: pathlib.Path, max_new: int) -> list[dict]:
+def reference(checkpoint: pathlib.Path, max_new: int, device: str) -> list[dict]:
     """liquid-audio's answers to CASES and, for the text-only answers, the prompt embeddings,
     logits and hidden states that predict each answer token."""
     import torch
     from liquid_audio import LFM2AudioModel, LFM2AudioProcessor
 
-    model = LFM2AudioModel.from_pretrained(checkpoint, dtype=torch.float32, device="cpu").eval()
-    processor = LFM2AudioProcessor.from_pretrained(checkpoint, device="cpu")
+    model = LFM2AudioModel.from_pretrained(checkpoint, dtype=torch.float32, device=device).eval()
+    processor = LFM2AudioProcessor.from_pretrained(checkpoint, device=device)
     items = []
     for name, system, text, clip, interleaved in CASES:
         start = time.time()
@@ -109,16 +109,18 @@ def reference(checkpoint: pathlib.Path, max_new: int) -> list[dict]:
         }
         if not len(frames):
             with torch.no_grad():
-                answer = model.lfm.embed_tokens(torch.tensor(tokens, dtype=torch.long))
+                answer = model.lfm.embed_tokens(
+                    torch.tensor(tokens, dtype=torch.long, device=device)
+                )
                 embeds = torch.cat([prompt_embeds, answer])
                 hidden = model.lfm(inputs_embeds=embeds[None], use_cache=False).last_hidden_state
                 logits = torch.nn.functional.linear(hidden[0], model.lfm.embed_tokens.weight)
             n = prompt_embeds.shape[0]
             item.update(
-                embeds=embeds.numpy(),
+                embeds=embeds.cpu().numpy(),
                 n_prompt=n,
-                logits=logits[n - 1 : -1].numpy(),
-                hidden=hidden[0, n - 1 : -1].numpy(),
+                logits=logits[n - 1 : -1].cpu().numpy(),
+                hidden=hidden[0, n - 1 : -1].cpu().numpy(),
             )
         logger.info(
             f"reference {name}: {len(tokens)} tokens, {len(frames)} frames, "
@@ -128,9 +130,9 @@ def reference(checkpoint: pathlib.Path, max_new: int) -> list[dict]:
     return items
 
 
-def score_decoder(path: pathlib.Path, refs: list[dict]) -> dict:
+def score_decoder(path: pathlib.Path, refs: list[dict], ep: str) -> dict:
     """The decoder fed liquid-audio's embeddings of the text-only answers."""
-    session = load_onnx_session(path)
+    session = load_onnx_session(path, ep, tf32=False)
     forced, hidden_diff = [], 0.0
     for ref in refs:
         if "embeds" not in ref:
@@ -146,8 +148,10 @@ def score_decoder(path: pathlib.Path, refs: list[dict]) -> dict:
     }
 
 
-def score_genai(export: pathlib.Path, precision: str, refs: list[dict], max_new: int) -> dict:
-    model = load_model(export, genai_files(precision))
+def score_genai(
+    export: pathlib.Path, precision: str, refs: list[dict], max_new: int, ep: str
+) -> dict:
+    model = load_model(export, genai_files(precision), ep, tf32=False)
     processor = model.create_multimodal_processor()
     cases = {}
     for ref in refs:
@@ -174,9 +178,11 @@ def score_genai(export: pathlib.Path, precision: str, refs: list[dict], max_new:
     return cases
 
 
-def score(export: pathlib.Path, precision: str, refs: list[dict], genai: bool, max_new: int):
+def score(
+    export: pathlib.Path, precision: str, refs: list[dict], genai: bool, max_new: int, ep: str
+):
     files = bundle(precision)
-    row = {"decoder": guarded(score_decoder, export / "onnx" / files["decoder"], refs)}
+    row = {"decoder": guarded(score_decoder, export / "onnx" / files["decoder"], refs, ep)}
     if genai:
-        row["genai"] = guarded(score_genai, export, precision, refs, max_new)
+        row["genai"] = guarded(score_genai, export, precision, refs, max_new, ep)
     return row
