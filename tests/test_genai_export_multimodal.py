@@ -32,12 +32,11 @@ from liquidonnx.lfm2_audio.infer import AudioChat, chat_prompt
 from liquidonnx.lfm2_vl import export as vl_export
 from liquidonnx.lfm2_vl.infer import VLChat
 from liquidonnx.session import decoder_inputs, initialize_cache, load_onnx_session, update_cache
+from liquidonnx.verify import compare_token_cosine
 
 IMAGE = pathlib.Path(__file__).parent / "test_lfm2_vl/assets/cardinal.jpg"
 PRECISIONS = ["fp32", "fp16", "q8", "q4"]
 MIN_COSINE = {"fp32": 0.99999, "fp16": 0.9999, "q8": 0.999, "q4": 0.97}
-# int4 on the tiny 32-wide vision tower (one block per row) dominates the VL q4 error.
-VL_MIN_COSINE = {**MIN_COSINE, "q4": 0.9}
 
 
 def session(output_dir: pathlib.Path, filename: str):
@@ -130,10 +129,9 @@ def vl_inputs(processor) -> dict:
     return processor(text=text, images=[image], return_tensors="pt", do_image_splitting=False)
 
 
-def vl_embeds(output_dir: pathlib.Path, precision: str, inputs: dict) -> np.ndarray:
-    files = vl_export.bundle(precision)
-    vision = session(output_dir, files["vision"])
-    features = vision.run(
+def vl_features(output_dir: pathlib.Path, precision: str, inputs: dict) -> np.ndarray:
+    vision = session(output_dir, vl_export.bundle(precision)["vision"])
+    return vision.run(
         None,
         {
             "pixel_values": inputs["pixel_values"].numpy().astype(np.float32),
@@ -141,7 +139,12 @@ def vl_embeds(output_dir: pathlib.Path, precision: str, inputs: dict) -> np.ndar
             "spatial_shapes": inputs["spatial_shapes"].numpy().astype(np.int64),
         },
     )[0]
-    return embed(session(output_dir, files["embedding"]), inputs["input_ids"].numpy(), features)
+
+
+def vl_embeds(output_dir: pathlib.Path, precision: str, inputs: dict) -> np.ndarray:
+    features = vl_features(output_dir, precision, inputs)
+    embeddings = session(output_dir, vl_export.bundle(precision)["embedding"])
+    return embed(embeddings, inputs["input_ids"].numpy(), features)
 
 
 @pytest.mark.parametrize("precision", PRECISIONS)
@@ -155,7 +158,7 @@ def test_vl_logits_match_pytorch(vl, precision: str):
     feed = decoder_inputs(vl_embeds(output_dir, precision, inputs), initialize_cache(decoder), 0)
     actual = decoder.run(None, feed)[0][0].astype(np.float32)
 
-    assert cosine(expected, actual) >= VL_MIN_COSINE[precision]
+    assert cosine(expected, actual) >= MIN_COSINE[precision]
     if precision == "fp32":
         np.testing.assert_allclose(actual, expected, atol=1e-4)
 
@@ -251,7 +254,7 @@ def test_vl_genai_config(vl):
     assert model["decoder"]["filename"] == "onnx/decoder_q4.onnx"
     assert model["decoder"]["session_options"]["session.set_denormal_as_zero"] == "1"
     assert model["embedding"]["filename"] == "onnx/embeddings_q8.onnx"
-    assert model["vision"]["filename"] == "onnx/vision_encoder_q4.onnx"
+    assert model["vision"]["filename"] == "onnx/vision_encoder_q8.onnx"
     assert model["vision"]["max_num_patches"] == 1024
     for section in ("decoder", "embedding", "vision"):
         assert (output_dir / model[section]["filename"]).exists()
@@ -268,6 +271,34 @@ def test_vl_genai_config(vl):
 
 def test_vl_int8_embeddings(vl):
     check_int8_embeddings(vl[2])
+
+
+def test_vl_int8_vision_encoder(vl):
+    """q4 and q8 load one vision encoder: every weight MatMul int8, symmetric, in blocks of 128,
+    with fp32 activations (accuracy_level 0), and each image token close to the fp32 encoder's."""
+    _, processor, output_dir = vl
+    assert vl_export.bundle("q4")["vision"] == vl_export.bundle("q8")["vision"]
+    assert not (output_dir / "onnx/vision_encoder_q4.onnx").exists()
+
+    def graph(precision):
+        path = output_dir / "onnx" / vl_export.bundle(precision)["vision"]
+        return onnx.load(str(path), load_external_data=False).graph
+
+    fp32, int8 = graph("fp32"), graph("q4")
+    weights = {init.name for init in fp32.initializer}
+    weight_matmuls = [n for n in fp32.node if n.op_type == "MatMul" and n.input[1] in weights]
+    quantized = [node for node in int8.node if node.op_type == "MatMulNBits"]
+    assert len(quantized) == len(weight_matmuls)
+    for node in quantized:
+        attrs = attributes(node)
+        assert (attrs["bits"], attrs["block_size"], attrs.get("accuracy_level", 0)) == (8, 128, 0)
+        assert len(node.input) == 3  # no zero points
+
+    inputs = vl_inputs(processor)
+    expected = vl_features(output_dir, "fp32", inputs)
+    actual = vl_features(output_dir, "q4", inputs)
+    result = compare_token_cosine("vision", expected, actual, min_worst=0.999, min_mean=0.9995)
+    assert result.passed, result.details
 
 
 @pytest.mark.parametrize("precision", ["fp32", "q8", "q4"])

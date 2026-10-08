@@ -19,7 +19,7 @@ from PIL import Image
 
 from liquidonnx.lfm2_vl.export import bundle
 from liquidonnx.session import load_onnx_session
-from liquidonnx.verify import check_results, compare_arrays, compare_correlation, get_tolerances
+from liquidonnx.verify import check_results, compare_arrays, compare_token_cosine, get_tolerances
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +31,16 @@ MODELS = [
     "LiquidAI/LFM2.5-VL-1.6B",
 ]
 
-VISION_CORRELATION_THRESHOLD = 0.85  # LFM2.5-VL q4 has ~0.87 correlation
+# Per image token. The int8 encoder measures 0.961-0.985 worst and 0.998-0.999 mean on these
+# checkpoints; int4 weights or int8 activations fall to 0.13-0.93 worst.
+VISION_MIN_TOKEN_COSINE = 0.95
+VISION_MIN_MEAN_TOKEN_COSINE = 0.997
 
 QUANT_CONFIGS = [
     pytest.param(None, ["arrays"], id="fp32"),
     pytest.param("fp16", ["arrays"], id="fp16"),
-    pytest.param("q4", ["correlation"], id="q4"),
-    pytest.param("q8", ["arrays"], id="q8"),
+    pytest.param("q4", ["arrays", "token_cosine"], id="q4"),
+    pytest.param("q8", ["arrays", "token_cosine"], id="q8"),
 ]
 
 
@@ -103,13 +106,14 @@ def verify_vision_tiled(embed_images_sess, inputs, pytorch_embeddings, checks, v
                 rtol,
             )
         )
-    if "correlation" in checks:
+    if "token_cosine" in checks:
         results.append(
-            compare_correlation(
-                "vision_embeddings_corr",
+            compare_token_cosine(
+                "vision_embeddings_token_cosine",
                 pytorch_concat[:min_tokens],
                 onnx_embeddings[:min_tokens],
-                threshold=VISION_CORRELATION_THRESHOLD,
+                VISION_MIN_TOKEN_COSINE,
+                VISION_MIN_MEAN_TOKEN_COSINE,
             )
         )
 

@@ -14,7 +14,8 @@ Output Structure:
         ├── tokenizer.json, tokenizer_config.json, chat_template.jinja
         └── onnx/
             ├── decoder.onnx             # fp32; decoder_{fp16,q4,q8}.onnx as in lfm2-export
-            ├── vision_encoder.onnx      # fp32; vision_encoder_{fp16,q4,q8}.onnx
+            ├── vision_encoder.onnx      # fp32; vision_encoder_fp16.onnx
+            ├── vision_encoder_q8.onnx   # int8, used with q4 and q8
             ├── embeddings.onnx          # token table + image feature scatter (fp32 table)
             ├── embeddings_fp16.onnx     # fp16 table, used with fp16
             └── embeddings_q8.onnx       # int8 table, used with q4 and q8
@@ -66,6 +67,9 @@ PRECISIONS = ("fp16", "q4", "q8")
 DEFAULT_ORDER = ("q4", "q8", "fp16")
 DECODER_OPTIONS = {"exclude_embeds": "true"}
 GENAI_PROCESSOR_CONFIG = "genai_processor_config.json"
+# olive-recipes #619's vision quantization. int4 weights or int8 activations (accuracy_level 4)
+# put some LFM2.5-VL-1.6B image tokens below 0.7 cosine to HF fp32; these keep all above 0.96.
+VISION_QUANT = {"bits": 8, "block_size": 128, "symmetric": True, "accuracy_level": 0}
 INTERPOLATION = {2: "LINEAR", 3: "CUBIC"}  # PIL resample -> onnxruntime-extensions Resize
 # LFM2.5-VL-3B's pre-tokenizer pattern, which onnxruntime-extensions cannot parse, and the
 # equivalent one the rest of the line uses (same tokens on chat prompts).
@@ -82,9 +86,10 @@ SUPPORTED_PATTERN = (
 def bundle(precision: str) -> dict[str, str]:
     """ONNX files (in onnx/) that make up one precision."""
     suffix = "" if precision == "fp32" else f"_{precision}"
+    vision_suffix = {"fp32": "", "fp16": "_fp16", "q4": "_q8", "q8": "_q8"}[precision]
     return {
         "decoder": f"decoder{suffix}.onnx",
-        "vision": f"vision_encoder{suffix}.onnx",
+        "vision": f"vision_encoder{vision_suffix}.onnx",
         "embedding": embeddings_file(precision),
     }
 
@@ -174,14 +179,8 @@ def derive_precision_files(
     if precision == "fp16":
         convert_to_fp16(onnx_dir / "vision_encoder.onnx", vision, keep_io=True)
     else:
-        bits = int(precision[1])
         quantize_model(
-            onnx_dir / "vision_encoder.onnx",
-            vision,
-            bits=bits,
-            block_size=block_size,
-            exclude_lm_head=False,
-            symmetric=bits == 4,
+            onnx_dir / "vision_encoder.onnx", vision, exclude_lm_head=False, **VISION_QUANT
         )
 
     derive_embeddings(onnx_dir, precision, block_size)

@@ -127,10 +127,10 @@ def compare_top_k(
     )
 
 
-def compare_correlation(
-    name: str, expected: np.ndarray, actual: np.ndarray, threshold: float
+def compare_token_cosine(
+    name: str, expected: np.ndarray, actual: np.ndarray, min_worst: float, min_mean: float
 ) -> VerificationResult:
-    """Check correlation between arrays (for quantized models)."""
+    """Check the cosine of each row (token) of [tokens, hidden] arrays: the worst and the mean."""
     if expected.shape != actual.shape:
         return VerificationResult(
             name=name,
@@ -141,19 +141,19 @@ def compare_correlation(
             details=f"Shape mismatch: {expected.shape} vs {actual.shape}",
         )
 
+    expected, actual = expected.astype(np.float64), actual.astype(np.float64)
     diff = np.abs(expected - actual)
-    max_diff = float(diff.max())
-    mean_diff = float(diff.mean())
-    correlation = float(np.corrcoef(expected.flatten(), actual.flatten())[0, 1])
-    passed = correlation >= threshold
+    norms = np.linalg.norm(expected, axis=1) * np.linalg.norm(actual, axis=1)
+    cosines = (expected * actual).sum(axis=1) / norms
+    worst, mean = float(cosines.min()), float(cosines.mean())
 
     return VerificationResult(
         name=name,
-        passed=passed,
-        max_diff=max_diff,
-        mean_diff=mean_diff,
-        correlation=correlation,
-        details=f"threshold={threshold}",
+        passed=worst >= min_worst and mean >= min_mean,
+        max_diff=float(diff.max()),
+        mean_diff=float(diff.mean()),
+        correlation=float(np.corrcoef(expected.flatten(), actual.flatten())[0, 1]),
+        details=f"token cosine worst={worst:.4f} (>= {min_worst}), mean={mean:.5f} (>= {min_mean})",
     )
 
 
