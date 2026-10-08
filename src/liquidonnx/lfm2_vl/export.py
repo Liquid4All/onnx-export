@@ -16,7 +16,8 @@ Output Structure:
             ├── decoder.onnx             # fp32; decoder_{fp16,q4,q8}.onnx as in lfm2-export
             ├── vision_encoder.onnx      # fp32; vision_encoder_{fp16,q4,q8}.onnx
             ├── embeddings.onnx          # token table + image feature scatter (fp32 table)
-            └── embeddings_fp16.onnx     # fp16 table, used with every other precision
+            ├── embeddings_fp16.onnx     # fp16 table, used with fp16
+            └── embeddings_q8.onnx       # int8 table, used with q4 and q8
 
 genai_config.json uses the first exported precision of q4, q8, fp16, fp32; bundle() lists the
 files each precision loads.
@@ -42,7 +43,7 @@ import logging
 import pathlib
 
 from liquidonnx import remote_code_enabled
-from liquidonnx.embeddings import build_embeddings, embeddings_to_fp16
+from liquidonnx.embeddings import build_embeddings, derive_embeddings, embeddings_file
 from liquidonnx.export_cli import (
     add_export_arguments,
     finish,
@@ -84,7 +85,7 @@ def bundle(precision: str) -> dict[str, str]:
     return {
         "decoder": f"decoder{suffix}.onnx",
         "vision": f"vision_encoder{suffix}.onnx",
-        "embedding": "embeddings.onnx" if precision == "fp32" else "embeddings_fp16.onnx",
+        "embedding": embeddings_file(precision),
     }
 
 
@@ -183,7 +184,7 @@ def derive_precision_files(
             symmetric=bits == 4,
         )
 
-    embeddings_to_fp16(onnx_dir / "embeddings.onnx", onnx_dir / files["embedding"])
+    derive_embeddings(onnx_dir, precision, block_size)
 
 
 def genai_processor_config(image_processor) -> dict:

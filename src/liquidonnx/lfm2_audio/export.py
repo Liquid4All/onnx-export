@@ -16,7 +16,8 @@ Output Structure:
         └── onnx/
             ├── decoder.onnx               # LFM2 backbone (inputs_embeds -> logits, hidden_states)
             ├── embeddings.onnx            # token table + audio feature scatter (fp32 table)
-            ├── embeddings_fp16.onnx       # fp16 table, used with every other precision
+            ├── embeddings_fp16.onnx       # fp16 table, used with fp16
+            ├── embeddings_q8.onnx         # int8 table, used with q4 and q8
             ├── audio_encoder.onnx         # Conformer: mel-spectrogram -> audio features
             ├── audio_embedding.onnx       # audio codes -> decoder input (+ .bin/.json table)
             ├── vocoder_depthformer.onnx   # decoder hidden state -> frame of 8 audio codes
@@ -46,7 +47,7 @@ import numpy as np
 import onnx
 from onnx import TensorProto, helper
 
-from liquidonnx.embeddings import build_embeddings, embeddings_to_fp16
+from liquidonnx.embeddings import build_embeddings, derive_embeddings, embeddings_file
 from liquidonnx.export_cli import (
     add_export_arguments,
     finish,
@@ -90,7 +91,7 @@ def bundle(precision: str) -> dict[str, str]:
     fp16 = "" if precision == "fp32" else "_fp16"
     return {
         "decoder": f"decoder{suffix}.onnx",
-        "embedding": f"embeddings{fp16}.onnx",
+        "embedding": embeddings_file(precision),
         "speech": f"audio_encoder{suffix}.onnx",
         "depthformer": f"vocoder_depthformer{fp16}.onnx",
         "audio_embedding": f"audio_embedding{fp16}.onnx",
@@ -374,7 +375,7 @@ def derive_precision_files(
     # embedding is a Gather, which weight-only quantization leaves at full size anyway.
     for name in ("vocoder_depthformer", "audio_embedding"):
         convert_to_fp16(onnx_dir / f"{name}.onnx", onnx_dir / f"{name}_fp16.onnx", keep_io=True)
-    embeddings_to_fp16(onnx_dir / "embeddings.onnx", onnx_dir / "embeddings_fp16.onnx")
+    derive_embeddings(onnx_dir, precision, block_size)
 
 
 def write_genai_config(output_dir: pathlib.Path, precision: str):
