@@ -18,6 +18,18 @@ logger = logging.getLogger(__name__)
 _cuda_works = None  # Cache CUDA availability check
 
 
+def preload_cuda_libraries():
+    """Load the CUDA and cuDNN libraries of the nvidia pip packages into the process.
+
+    Otherwise the CUDA EP finds them only if torch has loaded them: onnxruntime-genai fails with
+    libcublasLt.so.13 and onnxruntime sessions silently fall back to CPU.
+    """
+    # onnxruntime-gpu is a separate distribution, so the onnxruntime floor does not apply to it
+    preload = getattr(ort, "preload_dlls", None)
+    if preload:
+        preload()
+
+
 def get_providers() -> list[str]:
     """Get available execution providers, preferring CUDA if it works."""
     global _cuda_works
@@ -28,6 +40,7 @@ def get_providers() -> list[str]:
 
     # Check if CUDA actually works (cuDNN available, etc.)
     if _cuda_works is None:
+        preload_cuda_libraries()
         try:
             # Create a minimal session to test CUDA
             import tempfile
@@ -73,7 +86,9 @@ def load_onnx_session(
     if not path.exists():
         raise FileNotFoundError(f"ONNX file not found: {path}")
     if providers is None:
-        providers = get_providers()
+        providers = get_providers()  # preloads the CUDA libraries before probing CUDA
+    elif "CUDAExecutionProvider" in providers:
+        preload_cuda_libraries()
 
     # Try with preferred providers, fallback to CPU if CUDA fails
     try:
