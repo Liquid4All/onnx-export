@@ -83,6 +83,10 @@ MODALITY_SWITCH_TOKEN_IDS = (
     SPECIAL_TOKEN_IDS["<|audio_start|>"],
     SPECIAL_TOKEN_IDS["<|text_end|>"],
 )
+# onnxruntime-genai's audio_output defaults, which the depthformer and audio embedding are built
+# for: 2048 codes per codebook plus end-of-audio.
+NUM_CODEBOOKS = 8
+CODEBOOK_SIZE = 2049
 
 
 def bundle(precision: str) -> dict[str, str]:
@@ -256,12 +260,11 @@ def export_audio_embedding_binary(
     embed_weight = weights["audio_embedding.embedding.weight"]  # [16392, hidden_size]
     vocab_size, hidden_size = embed_weight.shape
 
-    # Validate expected shape
-    num_codebooks = 8
-    codebook_vocab = 2049
-    expected_vocab = num_codebooks * codebook_vocab
-    if vocab_size != expected_vocab:
-        logger.warning(f"audio_embedding vocab_size={vocab_size}, expected {expected_vocab}")
+    if vocab_size != NUM_CODEBOOKS * CODEBOOK_SIZE:
+        raise ValueError(
+            f"audio_embedding has {vocab_size} rows; onnxruntime-genai reads it as "
+            f"{NUM_CODEBOOKS} codebooks of {CODEBOOK_SIZE}"
+        )
 
     logger.info(f"audio_embedding weight shape: {embed_weight.shape}")
 
@@ -277,8 +280,8 @@ def export_audio_embedding_binary(
             {
                 "vocab_size": int(vocab_size),
                 "hidden_size": int(hidden_size),
-                "num_codebooks": num_codebooks,
-                "codebook_vocab": codebook_vocab,
+                "num_codebooks": NUM_CODEBOOKS,
+                "codebook_vocab": CODEBOOK_SIZE,
                 "dtype": "float32",
                 "byte_order": "little",
             },
@@ -385,6 +388,11 @@ def write_genai_config(output_dir: pathlib.Path, precision: str):
     if any(ids.get(name) != i for name, i in SPECIAL_TOKEN_IDS.items()):
         found = {name: ids.get(name) for name in SPECIAL_TOKEN_IDS}
         raise ValueError(f"tokenizer.json has {found}; the export assumes {SPECIAL_TOKEN_IDS}")
+    checkpoint = json.loads((output_dir / "config.json").read_text())
+    if checkpoint["codebooks"] != NUM_CODEBOOKS:
+        raise ValueError(
+            f"config.json has {checkpoint['codebooks']} codebooks; the export assumes {NUM_CODEBOOKS}"
+        )
 
     files = genai_files(precision)
     config_path = output_dir / "genai_config.json"
@@ -412,7 +420,12 @@ def write_genai_config(output_dir: pathlib.Path, precision: str):
         },
         "outputs": {"audio_features": "audio_embeddings"},
     }
-    model["audio_output"] = files["audio_output"]
+    # genai defaults to 6 text tokens and 12 audio frames per interleaved turn; the JP model uses 9.
+    model["audio_output"] = {
+        **files["audio_output"],
+        "interleaved_n_text": checkpoint["interleaved_n_text"],
+        "interleaved_n_audio": checkpoint["interleaved_n_audio"],
+    }
     config_path.write_text(json.dumps(config, indent=4))
     logger.info(f"genai_config.json -> {precision}")
 
