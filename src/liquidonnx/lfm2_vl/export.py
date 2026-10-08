@@ -2,8 +2,8 @@
 """
 Export LFM2-VL models to ONNX for onnxruntime-genai.
 
-The fp32 and q8 decoders come from the onnxruntime-genai model builder (CPU EP, inputs_embeds in;
-see liquidonnx.genai_builder). This repository builds the vision encoder and the embedding model
+The fp32, q4 and q8 decoders come from the onnxruntime-genai model builder (CPU EP, inputs_embeds
+in; see liquidonnx.genai_builder). This repository builds the vision encoder and the embedding model
 that splices image features into the token embeddings, and derives the other precisions.
 
 Output Structure:
@@ -155,7 +155,6 @@ def derive_precision_files(
     output_dir: pathlib.Path,
     precision: str,
     block_size: int = DEFAULT_BLOCK_SIZE,
-    q4_symmetric: bool = True,
 ):
     """Write the files bundle(precision) loads."""
     onnx_dir = output_dir / "onnx"
@@ -168,7 +167,6 @@ def derive_precision_files(
         name="decoder",
         extra_options=DECODER_OPTIONS,
         block_size=block_size,
-        q4_symmetric=q4_symmetric,
     )
 
     vision = onnx_dir / files["vision"]
@@ -182,7 +180,7 @@ def derive_precision_files(
             bits=bits,
             block_size=block_size,
             exclude_lm_head=False,
-            symmetric=bits == 4 and q4_symmetric,
+            symmetric=bits == 4,
         )
 
     embeddings_to_fp16(onnx_dir / "embeddings.onnx", onnx_dir / files["embedding"])
@@ -278,11 +276,6 @@ def main():
         action="store_true",
         help="Reuse the existing fp32 graphs instead of rebuilding them",
     )
-    parser.add_argument(
-        "--q4-asymmetric",
-        action="store_true",
-        help="Use asymmetric int4 for MatMul weights. Default is symmetric",
-    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -303,13 +296,7 @@ def main():
 
     for precision in precisions:
         log_step(f"Exporting {precision}")
-        derive_precision_files(
-            args.model,
-            export_dir,
-            precision,
-            block_size=args.block_size,
-            q4_symmetric=not args.q4_asymmetric,
-        )
+        derive_precision_files(args.model, export_dir, precision, args.block_size)
 
     # Rebuilding fp32 makes precisions from earlier runs stale; --skip-export keeps them valid.
     available = precisions

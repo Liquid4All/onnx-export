@@ -64,41 +64,43 @@ DEVICE_PRECISIONS = {"cpu": ("q4", "q4f32", "q8"), "cuda": ("fp16", "q4f16")}
 CHUNKS = 64  # llama-perplexity --chunks
 BATCH = 4  # chunks per forward pass of the reference model, as make_ref.py
 
-# KLD ± SE of today's exports, measured against H100 fp32 references: q4, q4f32 and q8 on the CPU
-# EP, fp16 and q4f16 on the CUDA EP. A precision fails above KLD + 2 SE. None of these depends on
-# onnxruntime#32814, as liquidonnx.quantize rounds to nearest. The genai builder's q4 with k_quant
-# and int8 sensitive layers does: on LFM2.5-350M / 1.2B-Instruct / 2.6B / 8B-A1B it scores
-# 0.490 / 0.154 / 0.166 / 0.210 without #32814 and 0.467 / 0.106 / 0.146 / 0.187 with it.
+# KLD ± SE against H100 fp32 references: q4, q4f32 and q8 on the CPU EP, fp16 and q4f16 on the
+# CUDA EP (q4f16 on onnxruntime-gpu 1.30.0). A precision fails above KLD + 2 SE. The text, MoE and
+# VL q4 rows, and the q4f16 rows converted from them, are the genai builder's k_quant build on the
+# locked onnxruntime nightly, which lacks onnxruntime#32814: with it, q4 scores 0.467 / 0.106 /
+# 0.146 / 0.187 on 350M / 1.2B / 2.6B / 8B. The other rows do not depend on #32814. The 8B-A1B q4
+# and q8 rows are at 13 intra-op threads, as the QMoE CPU kernel's sums depend on the thread count
+# (q8 by up to 3%).
 BASELINES = {
     "LFM2.5-350M": {
-        "q4": (0.8344, 0.0191),
+        "q4": (0.4896, 0.0120),
         "q4f32": (0.7908, 0.0182),
         "q8": (0.007587, 0.000182),
-        "q4f16": (0.8316, 0.0190),
+        "q4f16": (0.4860, 0.0119),
         "fp16": (4.372e-5, 9.6e-7),
     },
     "LFM2.5-1.2B-Instruct": {
-        "q4": (0.1668, 0.0082),
+        "q4": (0.1537, 0.0131),
         "q4f32": (0.1584, 0.0107),
         "q8": (0.002030, 0.000216),
-        "q4f16": (0.1668, 0.0087),
+        "q4f16": (0.1524, 0.0134),
         "fp16": (1.636e-5, 3.9e-7),
     },
     "LFM2.5-2.6B": {
-        "q4": (0.2493, 0.0053),
+        "q4": (0.1657, 0.0041),
         "q4f32": (0.2310, 0.0051),
         "q8": (0.002723, 0.000099),
-        "q4f16": (0.2460, 0.0053),
+        "q4f16": (0.1638, 0.0040),
         "fp16": (2.154e-5, 8.1e-7),
     },
     "LFM2.5-8B-A1B": {
-        "q4": (0.2943, 0.0093),
-        "q8": (0.02449, 0.00142),
+        "q4": (0.2103, 0.0060),
+        "q8": (0.02602, 0.00123),
         # with weights_prepacked=0 on the QMoE nodes: without it the CUDA EP misreads the experts
-        "q4f16": (0.2895, 0.0088),
+        "q4f16": (0.2022, 0.0053),
     },
     "LFM2.5-VL-450M": {
-        "q4": (0.1104, 0.0021),
+        "q4": (0.0658, 0.0015),
         "q8": (0.001051, 0.000034),
         "fp16": (1.315e-5, 2.6e-7),
     },

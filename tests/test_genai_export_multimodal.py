@@ -17,7 +17,7 @@ import onnx
 import onnxruntime_genai as og
 import pytest
 import torch
-from helpers import assert_same_graph, derive_reference
+from helpers import attributes, matmul_bits
 from PIL import Image
 from test_lfm2_audio.synthetic import HIDDEN, build_model_dir
 from tokenizers import Regex, Tokenizer, models, pre_tokenizers
@@ -197,11 +197,15 @@ def test_vl_cached_decode_matches_prefill(vl, precision: str):
         np.testing.assert_allclose(result[0][0, -1], expected[0, n + i], atol=5e-3)
 
 
-def test_vl_q8_decoder_matches_quantize(vl, tmp_path):
-    """The builder's q8 decoder is the one liquidonnx.quantize derives from fp32."""
+def test_vl_q4_decoder_layout(vl):
+    """int4 body with an int8 LM head; the embedding model holds the token table."""
     _, _, output_dir = vl
-    expected = derive_reference(output_dir / "onnx", tmp_path, "q8", "decoder")
-    assert_same_graph(output_dir / "onnx" / "decoder_q8.onnx", expected)
+    graph = onnx.load(str(output_dir / "onnx" / "decoder_q4.onnx"), load_external_data=False).graph
+    lm_head = next(node for node in graph.node if "logits" in node.output)
+    assert lm_head.op_type == "MatMulNBits"
+    assert attributes(lm_head)["bits"] == 8
+    assert matmul_bits(graph)[4] > 0
+    assert all(node.op_type != "GatherBlockQuantized" for node in graph.node)
 
 
 def test_vl_genai_config(vl):
@@ -342,10 +346,12 @@ def test_audio_genai_config(audio):
         assert (audio / filename).exists()
 
 
-def test_audio_q8_decoder_matches_quantize(audio, tmp_path):
-    """The builder's q8 decoder is the one liquidonnx.quantize derives from fp32."""
-    expected = derive_reference(audio / "onnx", tmp_path, "q8", "decoder", block_size=32)
-    assert_same_graph(audio / "onnx" / "decoder_q8.onnx", expected)
+def test_audio_q4_decoder_layout(audio):
+    """int4 MatMuls and an fp32 LM head."""
+    graph = onnx.load(str(audio / "onnx" / "decoder_q4.onnx"), load_external_data=False).graph
+    lm_head = next(node for node in graph.node if "logits" in node.output)
+    assert lm_head.op_type == "MatMul"
+    assert set(matmul_bits(graph)) == {4}
 
 
 def test_audio_genai_config_checks_token_ids(audio, tmp_path):

@@ -5,8 +5,8 @@ ONNX export of LFM2.5-Audio for onnxruntime-genai, covering all three modes:
 - TTS (Text-to-Speech): Text -> Audio
 - Interleaved: Mixed text and audio I/O
 
-The fp32 and q8 decoders come from the onnxruntime-genai model builder (CPU EP, inputs_embeds in,
-logits and hidden states out; see liquidonnx.genai_builder). This repository builds the other
+The fp32, q4 and q8 decoders come from the onnxruntime-genai model builder (CPU EP, inputs_embeds
+in, logits and hidden states out; see liquidonnx.genai_builder). This repository builds the other
 graphs and derives the other precisions.
 
 Output Structure:
