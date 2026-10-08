@@ -7,7 +7,14 @@ import pathlib
 import numpy as np
 from PIL import Image
 
+from liquidonnx.genai_builder import DecoderPreset
+
 logger = logging.getLogger(__name__)
+
+# The q8 preset before its LM head went int8: fp32 head (and the embedding table it ties).
+Q8_FP32_HEAD = DecoderPreset(
+    "int8", {"is_symmetric": "false", "nodes_to_exclude": "/lm_head/MatMul"}, True
+)
 
 
 def attributes(node) -> dict:

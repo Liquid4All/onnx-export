@@ -20,7 +20,7 @@ import onnx
 import onnxruntime_genai as og
 import pytest
 import torch
-from helpers import attributes, matmul_bits
+from helpers import Q8_FP32_HEAD, attributes, matmul_bits
 from huggingface_hub.utils import filter_repo_objects
 from PIL import Image
 from test_lfm2_audio.synthetic import (
@@ -34,7 +34,7 @@ from tokenizers import Regex, Tokenizer, models, pre_tokenizers
 from transformers import AutoProcessor, Lfm2VlConfig, Lfm2VlForConditionalGeneration
 
 from liquidonnx.embeddings import QUANT_TABLE, TABLE, TOKEN_ID, embed
-from liquidonnx.genai_builder import Q4F32, Q8, export_decoder
+from liquidonnx.genai_builder import Q4F32, export_decoder
 from liquidonnx.genai_runtime import generate, load_model
 from liquidonnx.lfm2_audio import export as audio_export
 from liquidonnx.lfm2_audio.builder import depthformer_builder
@@ -499,7 +499,7 @@ def matmuls(path: pathlib.Path) -> dict:
     }
 
 
-@pytest.mark.parametrize("precision,fp32_head", [("q4", Q4F32), ("q8", Q8)])
+@pytest.mark.parametrize("precision,fp32_head", [("q4", Q4F32), ("q8", Q8_FP32_HEAD)])
 def test_audio_decoder_adds_an_int8_lm_head(audio, tmp_path, precision: str, fp32_head):
     """The decoder the fp32-head preset builds, but with an int8 LM head."""
     checkpoint = str(audio.parent / "checkpoint")

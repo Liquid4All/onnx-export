@@ -243,7 +243,7 @@ def test_known_models_have_ceilings(text, tmp_path, monkeypatch):
         kld, se = wikitext.BASELINES["LFM2.5-350M"][precision]
         assert row["ceiling"] == kld + 2 * se
         assert row["pass"] is True
-    assert wikitext.ceiling(["LFM2.5-tiny", "LFM2.5-2.6B"], "q8", None) == 0.002723 + 2 * 0.000099
+    assert wikitext.ceiling(["LFM2.5-tiny", "LFM2.5-2.6B"], "q8", None) == 0.002636 + 2 * 0.000118
     assert wikitext.ceiling(["LFM2.5-tiny"], "q4", None) is None
     assert wikitext.ceiling(["LFM2.5-350M"], "q4", 0.5) == 0.5
 

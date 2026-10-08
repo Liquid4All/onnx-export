@@ -18,7 +18,7 @@ Output Structure:
             ├── model_q4.onnx        # int4 (k_quant); int8 lm_head, tied table, sensitive layers
             ├── model_q4f16.onnx     # q4 with fp16 activations
             ├── model_q4f32.onnx     # int4 MatMuls; fp32 embedding and lm_head
-            └── model_q8.onnx        # int8
+            └── model_q8.onnx        # int8, lm_head and tied embedding table included
 
     MoE experts become QMoE int4 (q4*) or int8 (q8); the routers stay fp32.
 
