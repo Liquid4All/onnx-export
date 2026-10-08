@@ -285,6 +285,14 @@ uv run lfm2-compare audio --model LiquidAI/LFM2.5-Audio-1.5B --export ./exports/
 
 `--device cuda` runs the reference, the ONNX sessions and onnxruntime-genai on the GPU with TF32 off, so fp32 stays fp32 (needs `onnxruntime-gpu` and `onnxruntime-genai-cuda`). References are cached per device.
 
+`lfm2-compare wikitext` is the quality gate for quantized precisions. It scores them on wikitext-2 with the protocol of [olive-recipes #638](https://github.com/microsoft/olive-recipes/pull/638): 64 chunks of 512 tokens, the second half of each scored, KLD ± SE over the chunks and same-top %. The reference is an fp32 one in llama.cpp's KL-divergence base format, given with `--reference` or computed from `--model`. The command exits with 1 when a precision is above `--max-kld` or, for the LFM2.5 models it knows, above today's KLD + 2 SE. `--help` explains the token streams.
+
+```bash
+uv run lfm2-compare wikitext --export ./exports/LFM2.5-350M-ONNX --reference ref.kld
+uv run lfm2-compare wikitext --export ./exports/LFM2.5-350M-ONNX --model LiquidAI/LFM2.5-350M \
+    --text wikitext-2-raw/wiki.test.raw --reference-device cuda
+```
+
 ## 6. Pre-exported Models
 
 ### 6.1 LiquidAI

@@ -258,7 +258,7 @@ def fake_sessions(monkeypatch, loaded: list[str]) -> list:
     calls = []
 
     class Session:
-        def __init__(self, path: str, providers: list):
+        def __init__(self, path: str, sess_options=None, providers: list | None = None):
             calls.append(providers)
             names = [p[0] if isinstance(p, tuple) else p for p in providers]
             self.providers = [p for p in names if p in loaded]
