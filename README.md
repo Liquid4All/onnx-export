@@ -98,7 +98,7 @@ exports/LFM2.5-1.2B-Instruct-ONNX/
     ├── model_fp16.onnx    # fp16 weights, activations and caches; fp32 logits
     ├── model_q4.onnx      # int4 (k_quant); int8 lm_head, tied embedding table and sensitive layers
     ├── model_q4f32.onnx   # int4 MatMuls; fp32 embedding and lm_head
-    └── model_q8.onnx      # int8
+    └── model_q8.onnx      # int8, lm_head and tied embedding table included
 ```
 
 `genai_config.json` points at the first exported precision of q4, q4f16, q8, fp16, q4f32, fp32; override `model.decoder.filename` to load another one.

@@ -73,32 +73,33 @@ THREADS = 13
 # VL q4 rows, and the q4f16 rows converted from them, are the genai builder's k_quant build on the
 # locked onnxruntime nightly, which lacks onnxruntime#32814: with it, q4 scores 0.467 / 0.106 /
 # 0.146 / 0.187 on 350M / 1.2B / 2.6B / 8B. The other rows do not depend on #32814. The 8B-A1B q4
-# and q8 rows hold at THREADS (13) intra-op threads only: at 12, q4 scores +0.17% and q8 -2.9%.
+# and q8 rows hold at THREADS (13) intra-op threads only: at 12, q4 scores +0.17%, and q8 scored
+# -2.9% before its LM head went int8.
 BASELINES = {
     "LFM2.5-350M": {
         "q4": (0.4896, 0.0120),
         "q4f32": (0.7908, 0.0182),
-        "q8": (0.007587, 0.000182),
+        "q8": (0.007649, 0.000163),
         "q4f16": (0.4860, 0.0119),
         "fp16": (4.372e-5, 9.6e-7),
     },
     "LFM2.5-1.2B-Instruct": {
         "q4": (0.1537, 0.0131),
         "q4f32": (0.1584, 0.0107),
-        "q8": (0.002030, 0.000216),
+        "q8": (0.001866, 0.000144),
         "q4f16": (0.1524, 0.0134),
         "fp16": (1.636e-5, 3.9e-7),
     },
     "LFM2.5-2.6B": {
         "q4": (0.1657, 0.0041),
         "q4f32": (0.2310, 0.0051),
-        "q8": (0.002723, 0.000099),
+        "q8": (0.002636, 0.000118),
         "q4f16": (0.1638, 0.0040),
         "fp16": (2.154e-5, 8.1e-7),
     },
     "LFM2.5-8B-A1B": {
         "q4": (0.2103, 0.0060),
-        "q8": (0.02602, 0.00123),
+        "q8": (0.02564, 0.00153),
         # with weights_prepacked=0 on the QMoE nodes: without it the CUDA EP misreads the experts
         "q4f16": (0.2022, 0.0053),
     },

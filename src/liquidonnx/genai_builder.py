@@ -21,7 +21,9 @@ import sys
 import tempfile
 from dataclasses import dataclass
 
+import numpy as np
 import onnx
+from onnx import numpy_helper
 
 from liquidonnx import remote_code_enabled
 from liquidonnx.quantize import (
@@ -40,6 +42,7 @@ GENAI_REPO = "https://github.com/microsoft/onnxruntime-genai.git"
 GENAI_COMMIT = "957bdd8dc717e94c09fad3b17d22f10d33217fd2"
 BUILDER_SUBDIR = "src/python/py/models"
 CHECKPOINT_FILES = ("config.json", "generation_config.json")
+EMBED_GATHER = "/model/embed_tokens/Gather"
 
 
 @dataclass(frozen=True)
@@ -49,11 +52,15 @@ class DecoderPreset:
     # Rename the tensors as liquidonnx.quantize named them when it derived this precision, so the
     # published decoder keeps its tensor names.
     legacy_names: bool = False
+    # Gather a tied checkpoint's embeddings from the int8 LM head (gather_embeddings_from_lm_head).
+    tie_int8_embeddings: bool = False
 
 
 # === Decoder presets ===
 
-Q8 = DecoderPreset("int8", {"is_symmetric": "false", "nodes_to_exclude": "/lm_head/MatMul"}, True)
+# The builder ties only 4-bit embedding tables to the LM head and keeps a dense fp32 table next to
+# an int8 one.
+Q8 = DecoderPreset("int8", {"is_symmetric": "false"}, True, tie_int8_embeddings=True)
 Q4F32 = DecoderPreset(
     "int4", {"nodes_to_exclude": "/lm_head/MatMul,/model/embed_tokens/Gather"}, True
 )
@@ -63,9 +70,9 @@ Q4 = DecoderPreset(
     "int4",
     {"algo_config": "k_quant", "matmul_mixed_precision": "last_matmul:int8,mixed_layers:int8"},
 )
-# The VL and audio decoders take inputs_embeds, so their LM head shares no table and can be int8.
-# Q4_INT8_HEAD is Q4F32 with an int8 head, the olive-recipes audio cpu_int4 decoder (Q4's options
-# are unmeasured on audio).
+# The VL and audio decoders take inputs_embeds, so their LM head shares no table: Q8_INT8_HEAD is
+# Q8 without the tie, and Q4_INT8_HEAD is Q4F32 with an int8 head, the olive-recipes audio cpu_int4
+# decoder (Q4's options are unmeasured on audio).
 Q8_INT8_HEAD = DecoderPreset("int8", {"is_symmetric": "false"}, True)
 Q4_INT8_HEAD = DecoderPreset("int4", {"matmul_mixed_precision": "last_matmul:int8"})
 DECODER_PRESETS = {
@@ -189,6 +196,70 @@ def mark_qmoe_weights_raw(model: onnx.ModelProto):
             node.attribute.append(onnx.helper.make_attribute("weights_prepacked", 0))
 
 
+def ties_embeddings(checkpoint: pathlib.Path) -> bool:
+    """Whether the checkpoint's token embedding is its LM head, as the builder reads its config."""
+    from transformers import AutoConfig
+
+    config = AutoConfig.from_pretrained(checkpoint, trust_remote_code=remote_code_enabled())
+    return bool(getattr(config, "tie_word_embeddings", False))
+
+
+def gather_embeddings_from_lm_head(model: onnx.ModelProto):
+    """Gather the token embeddings of EMBED_GATHER from the int8 LM head; drop their fp32 table.
+
+    The layout is the builder's for the int8 head of a 4-bit build: the head's [V, n_blocks,
+    block_size] weights, reshaped to [V, n_blocks * block_size], feed a GatherBlockQuantized with
+    the head's scales and zero points, and a Slice drops the block padding of the rows, if any.
+    """
+    graph = model.graph
+    head = next(node for node in graph.node if "logits" in node.output)
+    attrs = {a.name: onnx.helper.get_attribute_value(a) for a in head.attribute}
+    if head.op_type != "MatMulNBits" or attrs["bits"] != 8:
+        raise ValueError(f"{head.name} is not an int8 MatMulNBits LM head")
+    index, gather = next((i, n) for i, n in enumerate(graph.node) if n.name == EMBED_GATHER)
+    table = next(init for init in graph.initializer if init.name == gather.input[0])
+    vocab, hidden, block_size = attrs["N"], attrs["K"], attrs["block_size"]
+    if list(table.dims) != [vocab, hidden]:
+        raise ValueError(f"{table.name} is {list(table.dims)}, the LM head [{vocab}, {hidden}]")
+
+    base = EMBED_GATHER.rsplit("/", 1)[0]
+    padded = -(-hidden // block_size) * block_size
+    shape, weights = f"{base}/Reshape/shape", f"{base}/Reshape/output_0"
+    constants = {shape: [vocab, padded]}
+    gathered = gather.output[0] if padded == hidden else f"{base}/GatherBlockQuantized/output_0"
+    nodes = [
+        onnx.helper.make_node("Reshape", [head.input[1], shape], [weights], name=f"{base}/Reshape"),
+        onnx.helper.make_node(
+            "GatherBlockQuantized",
+            [weights, gather.input[1], *head.input[2:4]],
+            [gathered],
+            name=f"{base}/GatherBlockQuantized",
+            domain="com.microsoft",
+            bits=8,
+            block_size=block_size,
+            gather_axis=0,
+            quantize_axis=1,
+        ),
+    ]
+    if padded != hidden:
+        bounds = {
+            f"{base}/Slice/{k}": [v] for k, v in (("starts", 0), ("ends", hidden), ("axes", -1))
+        }
+        constants |= bounds
+        nodes.append(
+            onnx.helper.make_node("Slice", [gathered, *bounds], gather.output, name=f"{base}/Slice")
+        )
+
+    graph.initializer.remove(table)
+    graph.initializer.extend(
+        numpy_helper.from_array(np.array(value, dtype=np.int64), name)
+        for name, value in constants.items()
+    )
+    del graph.node[index]
+    for offset, node in enumerate(nodes):
+        graph.node.insert(index + offset, node)
+
+
 def export_decoder(
     model: str,
     output_dir: pathlib.Path,
@@ -218,6 +289,8 @@ def export_decoder(
         pin_kv_head_size(decoder, genai_config["model"]["decoder"]["head_size"])
         if preset and preset.legacy_names:
             rename_quantized_weights(decoder)
+        if preset and preset.tie_int8_embeddings and ties_embeddings(resolve_checkpoint(model)):
+            gather_embeddings_from_lm_head(decoder)
         mark_qmoe_weights_raw(decoder)
         output_path = save_model(decoder, onnx_dir / filename)
         del decoder

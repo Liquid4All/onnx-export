@@ -19,7 +19,7 @@ import onnxruntime as ort
 import onnxruntime_genai as og
 import pytest
 import torch
-from helpers import attributes, matmul_bits
+from helpers import Q8_FP32_HEAD, attributes, matmul_bits
 from transformers import (
     AutoTokenizer,
     Lfm2Config,
@@ -29,7 +29,7 @@ from transformers import (
 )
 
 from liquidonnx.compare.metrics import greedy
-from liquidonnx.genai_builder import export_decoder, export_precision
+from liquidonnx.genai_builder import EMBED_GATHER, Q8, export_decoder, export_precision
 from liquidonnx.genai_runtime import (
     EXECUTION_PROVIDERS,
     check_genai_version,
@@ -67,14 +67,15 @@ MIN_COSINE = {
 }
 
 
-def make_checkpoint(kind: str, path: pathlib.Path) -> torch.nn.Module:
+def make_checkpoint(kind: str, path: pathlib.Path, **overrides) -> torch.nn.Module:
     torch.manual_seed(0)
+    common = COMMON | overrides
     if kind == "dense":
         config = Lfm2Config(
             num_hidden_layers=4,
             intermediate_size=128,
             layer_types=["conv", "conv", "full_attention", "conv"],
-            **COMMON,
+            **common,
         )
         model = Lfm2ForCausalLM(config)
     else:
@@ -86,7 +87,7 @@ def make_checkpoint(kind: str, path: pathlib.Path) -> torch.nn.Module:
             num_experts_per_tok=2,
             num_dense_layers=1,
             layer_types=["conv", "full_attention", "conv", "full_attention"],
-            **COMMON,
+            **common,
         )
         model = Lfm2MoeForCausalLM(config)
         with torch.no_grad():
@@ -117,18 +118,27 @@ def decoder(output_dir: pathlib.Path, precision: str):
     return load_onnx_session(output_dir / "onnx" / model_file(precision))
 
 
+def prefill_logits(path: pathlib.Path) -> np.ndarray:
+    session = load_onnx_session(path)
+    return session.run(None, decoder_inputs(TOKENS, initialize_cache(session), 0))[0][0]
+
+
+def pytorch_logits(model: torch.nn.Module) -> np.ndarray:
+    with torch.no_grad():
+        return model(torch.from_numpy(TOKENS)).logits[0].numpy()
+
+
+def cosine(expected: np.ndarray, actual: np.ndarray) -> float:
+    return (expected * actual).sum() / (np.linalg.norm(expected) * np.linalg.norm(actual))
+
+
 @pytest.mark.parametrize("precision", ["fp32", *ALL_PRECISIONS])
 def test_logits_match_pytorch(export, precision: str):
     _, model, output_dir = export
-    with torch.no_grad():
-        expected = model(torch.from_numpy(TOKENS)).logits[0].numpy()
+    expected = pytorch_logits(model)
+    actual = prefill_logits(output_dir / "onnx" / model_file(precision)).astype(np.float32)
 
-    session = decoder(output_dir, precision)
-    actual = session.run(None, decoder_inputs(TOKENS, initialize_cache(session), 0))[0][0]
-    actual = actual.astype(np.float32)
-
-    cosine = (expected * actual).sum() / (np.linalg.norm(expected) * np.linalg.norm(actual))
-    assert cosine >= MIN_COSINE[precision]
+    assert cosine(expected, actual) >= MIN_COSINE[precision]
     if precision == "fp32":
         np.testing.assert_allclose(actual, expected, atol=1e-5)
 
@@ -178,8 +188,9 @@ def test_graph_layout(export):
     assert q4f32_ops["MatMul"] == routers + 1
     assert set(matmul_bits(graph)) == {4}
 
+    # q8: int8 MatMuls, the LM head included
     graph, q8_ops = ops("q8")
-    assert q8_ops["MatMul"] == routers + 1
+    assert q8_ops["MatMul"] == routers
     assert set(matmul_bits(graph)) == {8}
 
     for precision, expert_bits in (("q4", 4), ("q4f32", 4), ("q8", 8)):
@@ -190,6 +201,63 @@ def test_graph_layout(export):
             if node.op_type == "QMoE":
                 assert attributes(node)["expert_weight_bits"] == expert_bits
                 assert attributes(node)["weights_prepacked"] == 0
+
+
+def test_q8_shares_one_int8_table(export):
+    """The q8 embeddings gather from the int8 weights, scales and zero points of the LM head, and
+    no other [V, H] table is left."""
+    _, _, output_dir = export
+    graph = onnx.load(str(output_dir / "onnx" / model_file("q8")), load_external_data=False).graph
+    producers = {output: node for node in graph.node for output in node.output}
+    lm_head = producers["logits"]
+    (gather,) = [node for node in graph.node if node.op_type == "GatherBlockQuantized"]
+    assert lm_head.op_type == "MatMulNBits"
+    assert attributes(lm_head)["bits"] == attributes(gather)["bits"] == 8
+    assert producers[gather.input[0]].input[0] == lm_head.input[1]
+    assert list(gather.input[1:]) == ["input_ids", *lm_head.input[2:]]
+
+    vocab, hidden = COMMON["vocab_size"], COMMON["hidden_size"]
+    tables = [
+        init.name
+        for init in graph.initializer
+        if vocab in init.dims and np.prod(init.dims) == vocab * hidden
+    ]
+    assert tables == [lm_head.input[1]]
+
+
+def test_q8_logits_match_the_fp32_head_q8(export, tmp_path):
+    """The shared int8 table keeps the logits of the q8 decoder with an fp32 LM head and table."""
+    _, _, output_dir = export
+    checkpoint = str(output_dir.parent / "checkpoint")
+    reference = export_decoder(checkpoint, tmp_path, "model_q8.onnx", preset=Q8_FP32_HEAD)
+    actual = prefill_logits(output_dir / "onnx" / model_file("q8"))
+    assert cosine(prefill_logits(reference), actual) >= MIN_COSINE["q8"]
+
+
+def test_q8_slices_the_block_padding_off_the_embeddings(export, tmp_path):
+    """With blocks longer than the hidden size, the shared table's rows are padded and the
+    embeddings sliced back to the hidden size."""
+    _, model, output_dir = export
+    checkpoint = str(output_dir.parent / "checkpoint")
+    path = export_decoder(checkpoint, tmp_path, "model_q8.onnx", preset=Q8, block_size=128)
+
+    graph = onnx.load(str(path), load_external_data=False).graph
+    producers = {output: node for node in graph.node for output in node.output}
+    embeddings = producers[f"{EMBED_GATHER}/output_0"]
+    assert embeddings.op_type == "Slice"
+    assert producers[embeddings.input[0]].op_type == "GatherBlockQuantized"
+    assert cosine(pytorch_logits(model), prefill_logits(path)) >= MIN_COSINE["q8"]
+
+
+def test_q8_keeps_the_table_of_an_untied_checkpoint(tmp_path):
+    """A checkpoint whose LM head is not its token embedding keeps an fp32 table at q8."""
+    model = make_checkpoint("dense", tmp_path / "checkpoint", tie_word_embeddings=False)
+    path = export_decoder(str(tmp_path / "checkpoint"), tmp_path, "model_q8.onnx", preset=Q8)
+
+    graph = onnx.load(str(path), load_external_data=False).graph
+    gather = next(node for node in graph.node if node.name == EMBED_GATHER)
+    assert gather.op_type == "Gather"
+    assert cosine(pytorch_logits(model), prefill_logits(path)) >= MIN_COSINE["q8"]
 
 
 def test_genai_config(export):
@@ -223,15 +291,11 @@ def test_q4f16_ignores_a_stale_q4(export, tmp_path):
     checkpoint = str(output_dir.parent / "checkpoint")
     export_precision(checkpoint, tmp_path, FAMILIES[kind], "q4f16")
 
-    def logits(path: pathlib.Path) -> np.ndarray:
-        session = load_onnx_session(path)
-        return session.run(None, decoder_inputs(TOKENS, initialize_cache(session), 0))[0]
-
-    expected = logits(output_dir / "onnx" / "model_q4f16.onnx")
-    np.testing.assert_array_equal(logits(tmp_path / "onnx" / "model_q4f16.onnx"), expected)
+    expected = prefill_logits(output_dir / "onnx" / "model_q4f16.onnx")
+    np.testing.assert_array_equal(prefill_logits(tmp_path / "onnx" / "model_q4f16.onnx"), expected)
 
 
-@pytest.mark.parametrize("precision", ["fp32", "q4", "q4f16"])
+@pytest.mark.parametrize("precision", ["fp32", "q4", "q4f16", "q8"])
 def test_genai_runtime_matches_onnxruntime(export, precision: str):
     """Greedy answers through liquidonnx.genai_runtime (the CLIs' path) and plain onnxruntime."""
     _, _, output_dir = export
