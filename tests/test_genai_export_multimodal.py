@@ -28,7 +28,7 @@ from liquidonnx.embeddings import QUANT_TABLE, TABLE, TOKEN_ID, embed
 from liquidonnx.genai_builder import Q4F32, Q8, export_decoder
 from liquidonnx.genai_runtime import generate, load_model
 from liquidonnx.lfm2_audio import export as audio_export
-from liquidonnx.lfm2_audio.infer import AudioChat, chat_prompt
+from liquidonnx.lfm2_audio.infer import AudioChat, chat_prompt, single_turn
 from liquidonnx.lfm2_vl import export as vl_export
 from liquidonnx.lfm2_vl.infer import VLChat
 from liquidonnx.session import decoder_inputs, initialize_cache, load_onnx_session, update_cache
@@ -412,8 +412,8 @@ def test_audio_genai_config(audio):
         "onnx/decoder_q4.onnx",
         "onnx/embeddings_q8.onnx",
         "onnx/audio_encoder_q4.onnx",
-        "onnx/vocoder_depthformer_fp16.onnx",
-        "onnx/audio_embedding_fp16.onnx",
+        "onnx/vocoder_depthformer_q4.onnx",
+        "onnx/audio_embedding_q4.onnx",
     ]
     for filename in files:
         assert (audio / filename).exists()
@@ -494,6 +494,112 @@ def test_audio_int8_embeddings(audio):
     check_int8_embeddings(audio)
 
 
+def graph_nodes(graph: onnx.GraphProto) -> list[onnx.NodeProto]:
+    """The nodes of graph and of its subgraphs."""
+    nodes = []
+    for node in graph.node:
+        nodes.append(node)
+        for attr in node.attribute:
+            if attr.type == onnx.AttributeProto.GRAPH:
+                nodes += graph_nodes(attr.g)
+    return nodes
+
+
+@pytest.mark.parametrize("precision", ["q8", "q4"])
+def test_audio_output_graphs_are_quantized(audio, precision: str):
+    """olive-recipes #639's choices: every depthformer weight matrix and the audio embedding table
+    symmetric int4/int8, the depthformer's per-codebook tables fp32 under the node names #639
+    excludes."""
+    bits = int(precision[1])
+    accuracy_level = audio_export.AUDIO_OUTPUT_QUANT[precision]["accuracy_level"]
+    files = audio_export.bundle(precision)
+
+    graph = onnx.load(str(audio / "onnx" / files["depthformer"])).graph
+    dtypes = {init.name: init.data_type for init in graph.initializer}
+    nodes = graph_nodes(graph)
+    quantized = [
+        (attributes(node)["bits"], attributes(node).get("accuracy_level", 0), len(node.input))
+        for node in nodes
+        if node.op_type == "MatMulNBits"
+    ]
+    # depth_linear (in the step-0 branch), then qkv, out, w1, w2 and w3 in each of 6 layers
+    assert quantized == [(bits, accuracy_level, 3)] * (1 + 6 * 5)
+    assert not [node.name for node in nodes if node.op_type == "MatMul" and node.input[1] in dtypes]
+    tables = {
+        node.name: node.input[0]
+        for node in nodes
+        if node.op_type == "Gather" and node.input[0] in dtypes
+    }
+    assert tables == {
+        "/prev_embed/table": "stacked_embed_weights",
+        "/logits/norm_w": "stacked_logits_norm_weights",
+        "/logits/logits_w": "stacked_logits_weights",
+    }
+    assert {dtypes[table] for table in tables.values()} == {onnx.TensorProto.FLOAT}
+
+    embedding = onnx.load(str(audio / "onnx" / files["audio_embedding"])).graph
+    assert [
+        (node.op_type, attributes(node)["bits"], len(node.input)) for node in embedding.node
+    ] == [("GatherBlockQuantized", bits, 3)]
+
+
+@pytest.mark.parametrize("precision", ["q8", "q4"])
+def test_audio_embedding_precisions_follow_fp32(audio, precision: str):
+    """Each looked-up value within half a quantization step (blocks of 32 along H) of the fp32
+    table, or a whole one next to the block's largest magnitude: that maps to -2^(bits-1), so
+    values opposite it clip at 2^(bits-1) - 1."""
+    table = initializers(audio / "onnx/audio_embedding.onnx")["audio_embedding.weight"]
+    embedding = session(audio, audio_export.bundle(precision)["audio_embedding"])
+    actual = embedding.run(None, {"audio_codes": np.arange(len(table))[None]})[0][0]
+
+    half = 2 ** (int(precision[1]) - 1)
+    blocks = np.abs(table).reshape(len(table), -1, 32)
+    step = np.repeat(blocks.max(-1) / half, 32, axis=1)
+    near_peak = np.abs(table) > (half - 0.5) * step
+    assert (np.abs(actual - table) <= np.where(near_peak, step, step / 2) + 1e-7).all()
+
+
+def depthformer_frame(
+    depthformer, hidden: np.ndarray, codes: list[int] | None = None
+) -> tuple[list[int], np.ndarray]:
+    """One frame's codes and the logits of its 8 steps; each step reads the previous code of
+    codes, or the previous step's greedy one."""
+    inputs = {i.name: i.shape for i in depthformer.get_inputs()}
+    layers, _, kv_heads, _, head_dim = inputs["past_keys"]
+    cache = np.zeros((layers, 1, kv_heads, 0, head_dim), np.float32)
+    feed = {
+        "hidden_states": hidden,
+        "depth_slices_in": np.zeros((1, *inputs["depth_slices_in"][1:]), np.float32),
+        "past_keys": cache,
+        "past_values": cache,
+    }
+    chosen, logits = [], []
+    for step in range(audio_export.NUM_CODEBOOKS):
+        previous = (codes or chosen)[step - 1] if step else 0
+        feed |= {
+            "step_idx": np.array(step, np.int64),
+            "prev_token": np.array([previous], np.int64),
+            "seqlens_k": np.array([step], np.int32),
+            "total_seq_len": np.array(step + 1, np.int32),
+        }
+        step_logits, slices, keys, values = depthformer.run(None, feed)
+        feed |= {"depth_slices_in": slices, "past_keys": keys, "past_values": values}
+        chosen.append(int(step_logits[0].argmax()))
+        logits.append(step_logits[0])
+    return chosen, np.stack(logits)
+
+
+@pytest.mark.parametrize("precision", ["q8", "q4"])
+def test_audio_depthformer_precisions_follow_fp32(audio, precision: str):
+    """A frame's logits against the fp32 depthformer, both reading the fp32 one's greedy codes."""
+    hidden = np.random.default_rng(2).standard_normal((1, HIDDEN)).astype(np.float32)
+    codes, logits = depthformer_frame(session(audio, "vocoder_depthformer.onnx"), hidden)
+    depthformer = session(audio, audio_export.bundle(precision)["depthformer"])
+    _, precision_logits = depthformer_frame(depthformer, hidden, codes)
+    for step in range(audio_export.NUM_CODEBOOKS):
+        assert cosine(logits[step], precision_logits[step]) >= MIN_COSINE[precision]
+
+
 def test_audio_fp32_embeddings_keep_a_plain_gather(audio):
     """olive-recipes' audio export renames this graph's first Gather and quantizes its table."""
     graph = onnx.load(str(audio / "onnx/embeddings.onnx"), load_external_data=False).graph
@@ -537,3 +643,13 @@ def test_audio_genai_runtime(audio, precision: str):
     decoder = session(audio, files["decoder"])
     expected = decoder.run(["logits"], decoder_inputs(embeds, initialize_cache(decoder), 0))[0]
     np.testing.assert_allclose(first[0], expected[0, -1], atol=1e-5)
+
+
+@pytest.mark.parametrize("precision", ["q8", "q4"])
+def test_audio_genai_speech_output(audio, precision: str):
+    """onnxruntime-genai runs the quantized depthformer and audio embedding: an interleaved answer
+    turns to speech after 6 text tokens."""
+    chat = AudioChat(audio, precision)
+    answer = chat.answer("interleaved", *single_turn("hello"), max_new_tokens=6 + 12, random_seed=1)
+    assert len(answer.codes) == 9
+    assert answer.codes.min() >= 0 and answer.codes.max() <= 2048

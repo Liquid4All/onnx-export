@@ -159,7 +159,7 @@ exports/LFM2.5-Audio-1.5B-ONNX/
     └── ...                      # {graph}_{fp16,q4,q8}.onnx; embed_tokens.bin, mel_config.json for web runtimes
 ```
 
-The q4 and q8 decoders have an int8 LM head, and their bundles an int8 token table. Their configs keep the depthformer and audio embedding at fp16, because a quantized depthformer changes most audio codes.
+The q4 and q8 decoders have an int8 LM head, and their bundles an int8 token table. Their depthformer and audio embedding are int4 (q4) or int8 (q8) as in the [olive-recipes](https://github.com/microsoft/olive-recipes) packages, except the depthformer's per-codebook tables, which stay fp32: quantized, they make each audio frame several times slower on CPU.
 
 ## 4. Inference
 

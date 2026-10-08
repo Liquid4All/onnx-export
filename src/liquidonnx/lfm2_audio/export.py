@@ -25,9 +25,8 @@ Output Structure:
             ├── embed_tokens.bin/.json     # text embedding table for web runtimes
             └── mel_config.json
 
-    fp16, q4 and q8 add {graph}_{precision}.onnx; bundle() lists what each precision loads. The
-    depthformer and audio embedding stay fp16 in the q4 and q8 bundles: quantizing the depthformer
-    changes most audio codes.
+    fp16, q4 and q8 add {graph}_{precision}.onnx; bundle() lists what each precision loads. The q4
+    and q8 depthformers keep their per-codebook tables fp32.
 
 genai_config.json uses the first exported precision of q4, q8, fp16, fp32.
 
@@ -64,8 +63,11 @@ from liquidonnx.lfm2_audio.builder.detokenizer_builder import (
 )
 from liquidonnx.quantize import (
     convert_to_fp16,
-    get_model_size,
+    get_total_model_size_mb,
+    load_model,
+    quantize_gathers,
     quantize_model,
+    save_model,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,18 +89,23 @@ MODALITY_SWITCH_TOKEN_IDS = (
 # for: 2048 codes per codebook plus end-of-audio.
 NUM_CODEBOOKS = 8
 CODEBOOK_SIZE = 2049
+# olive-recipes #639's depthformer and audio embedding quantization: symmetric, as Q4_0 and Q8_0.
+# At 8 bits the depthformer needs int8 activations: with fp32 ones a frame takes 3-4x as long.
+AUDIO_OUTPUT_QUANT = {
+    "q4": {"bits": 4, "symmetric": True, "accuracy_level": 0},
+    "q8": {"bits": 8, "symmetric": True, "accuracy_level": 4},
+}
 
 
 def bundle(precision: str) -> dict[str, str]:
     """ONNX files (in onnx/) that make up one precision."""
     suffix = "" if precision == "fp32" else f"_{precision}"
-    fp16 = "" if precision == "fp32" else "_fp16"
     return {
         "decoder": f"decoder{suffix}.onnx",
         "embedding": embeddings_file(precision),
         "speech": f"audio_encoder{suffix}.onnx",
-        "depthformer": f"vocoder_depthformer{fp16}.onnx",
-        "audio_embedding": f"audio_embedding{fp16}.onnx",
+        "depthformer": f"vocoder_depthformer{suffix}.onnx",
+        "audio_embedding": f"audio_embedding{suffix}.onnx",
         "detokenizer": f"audio_detokenizer{suffix}.onnx",
     }
 
@@ -355,29 +362,37 @@ def derive_precision_files(
         block_size=block_size,
     )
 
-    for name in ("audio_encoder", "audio_detokenizer"):
-        fp32_path = onnx_dir / f"{name}.onnx"
-        output_path = onnx_dir / f"{name}_{precision}.onnx"
-        if precision == "fp16":
+    names = ("audio_encoder", "vocoder_depthformer", "audio_embedding", "audio_detokenizer")
+    paths = {
+        name: (onnx_dir / f"{name}.onnx", onnx_dir / f"{name}_{precision}.onnx") for name in names
+    }
+    if precision == "fp16":
+        for fp32_path, output_path in paths.values():
             convert_to_fp16(fp32_path, output_path, keep_io=True)
-            continue
+    else:
         bits = int(precision[1])
-        _, orig_mb = get_model_size(fp32_path)
+        for name in ("audio_encoder", "audio_detokenizer"):
+            quantize_model(
+                *paths[name],
+                bits=bits,
+                block_size=block_size,
+                exclude_lm_head=False,
+                symmetric=bits == 4,
+            )
+        # The depthformer's per-codebook tables are Gathers, which quantize_model leaves fp32. As
+        # GatherBlockQuantized, each step would dequantize a whole 2049 x 1024 table on the CPU.
+        quant = AUDIO_OUTPUT_QUANT[precision]
         quantize_model(
-            fp32_path,
-            output_path,
-            bits=bits,
-            block_size=block_size,
-            exclude_lm_head=False,
-            symmetric=bits == 4,
+            *paths["vocoder_depthformer"], block_size=block_size, exclude_lm_head=False, **quant
         )
-        _, quant_mb = get_model_size(output_path)
-        logger.info(f"  {name}: {orig_mb:.1f} -> {quant_mb:.1f} MB")
-
-    # The depthformer and audio embedding stay fp16 in every non-fp32 bundle; the audio
-    # embedding is a Gather, which weight-only quantization leaves at full size anyway.
-    for name in ("vocoder_depthformer", "audio_embedding"):
-        convert_to_fp16(onnx_dir / f"{name}.onnx", onnx_dir / f"{name}_fp16.onnx", keep_io=True)
+        fp32_path, output_path = paths["audio_embedding"]
+        embedding = load_model(fp32_path)
+        save_model(
+            quantize_gathers(embedding, bits=quant["bits"], block_size=block_size), output_path
+        )
+        for name, (fp32_path, output_path) in paths.items():
+            fp32_mb, quant_mb = map(get_total_model_size_mb, (fp32_path, output_path))
+            logger.info(f"  {name}: {fp32_mb:.1f} -> {quant_mb:.1f} MB")
     derive_embeddings(onnx_dir, precision, block_size)
 
 

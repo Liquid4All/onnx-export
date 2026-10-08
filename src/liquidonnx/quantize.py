@@ -2,8 +2,9 @@
 Quantization and precision conversion for ONNX models.
 
 Weight-only MatMulNBits quantization (quantize_model / quantize_matmuls) for the vision encoder and
-the audio graphs, and convert_to_fp16 for their fp16 versions and the fp16 and q4f16 decoders. The
-genai builder quantizes the decoders (liquidonnx.genai_builder.DECODER_PRESETS).
+the audio graphs, GatherBlockQuantized tables (quantize_gathers) for the audio embedding, and
+convert_to_fp16 for their fp16 versions and the fp16 and q4f16 decoders. The genai builder
+quantizes the decoders (liquidonnx.genai_builder.DECODER_PRESETS).
 """
 
 import logging
@@ -11,6 +12,7 @@ import pathlib
 
 import numpy as np
 import onnx
+from onnx import helper, numpy_helper
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     DefaultWeightOnlyQuantConfig,
     MatMulNBitsQuantizer,
@@ -30,14 +32,6 @@ def find_lm_head_node(model) -> str | None:
                 if "lm_head" in inp.lower():
                     return node.name
     return None
-
-
-def get_model_size(path: pathlib.Path) -> tuple[float, float]:
-    """Return (model_mb, data_mb)."""
-    model_size = path.stat().st_size / 1e6 if path.exists() else 0
-    data_path = path.with_suffix(".onnx_data")
-    data_size = data_path.stat().st_size / 1e6 if data_path.exists() else 0
-    return model_size, data_size
 
 
 def get_total_model_size_mb(path: pathlib.Path) -> float:
@@ -117,6 +111,65 @@ def quantize_int8_block(
         scale.squeeze(-1).astype(np.float32),
         zero_point.squeeze(-1).astype(np.uint8),
     )
+
+
+def quantize_symmetric_block(
+    weight: np.ndarray, bits: int, block_size: int = DEFAULT_BLOCK_SIZE
+) -> tuple[np.ndarray, np.ndarray]:
+    """Symmetric 4- or 8-bit quantization along the last axis: (quant, scales).
+
+    Each block's largest-magnitude weight maps to -2^(bits-1), as in Q4_0 and Olive's block
+    quantizer. quant is uint8 offset by 2^(bits-1), the zero point GatherBlockQuantized assumes
+    when it has none, with two 4-bit values per byte, low nibble first.
+    """
+    k = weight.shape[-1]
+    blocked = _blocks(weight, block_size)
+    half = 1 << (bits - 1)
+    w_max = blocked.max(axis=-1, keepdims=True)
+    w_min = blocked.min(axis=-1, keepdims=True)
+    scale = np.where(np.abs(w_max) > np.abs(w_min), w_max, w_min) / -half
+    quant = np.round(blocked / np.where(scale == 0, 1, scale)).clip(-half, half - 1) + half
+    quant = quant.astype(np.uint8).reshape(*blocked.shape[:-2], -1)
+    if bits == 4:
+        quant = quant[..., 0::2] | (quant[..., 1::2] << 4)
+    return quant[..., : (k * bits + 7) // 8], scale.squeeze(-1).astype(np.float32)
+
+
+def quantize_gathers(
+    model: onnx.ModelProto, *, bits: int, block_size: int = DEFAULT_BLOCK_SIZE
+) -> onnx.ModelProto:
+    """Gather from a constant table -> GatherBlockQuantized, blocks along the table's last axis
+    (quantize_symmetric_block)."""
+    graph = model.graph
+    tables = {init.name: init for init in graph.initializer}
+    for node in graph.node:
+        if node.op_type != "Gather" or node.input[0] not in tables:
+            continue
+        table = tables.pop(node.input[0])
+        weight = numpy_helper.to_array(table)
+        quant, scales = quantize_symmetric_block(weight, bits, block_size)
+        names = [f"{table.name}_quant", f"{table.name}_scales"]
+        graph.initializer.remove(table)
+        graph.initializer.extend(
+            [numpy_helper.from_array(quant, names[0]), numpy_helper.from_array(scales, names[1])]
+        )
+        axis = next((helper.get_attribute_value(a) for a in node.attribute if a.name == "axis"), 0)
+        node.CopyFrom(
+            helper.make_node(
+                "GatherBlockQuantized",
+                [names[0], node.input[1], names[1]],
+                node.output,
+                name=node.name,
+                domain="com.microsoft",
+                bits=bits,
+                block_size=block_size,
+                gather_axis=axis,
+                quantize_axis=weight.ndim - 1,
+            )
+        )
+    if all(opset.domain != "com.microsoft" for opset in model.opset_import):
+        model.opset_import.append(helper.make_opsetid("com.microsoft", 1))
+    return model
 
 
 def convert_to_fp16(
