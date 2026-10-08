@@ -113,13 +113,14 @@ exports/LFM2.5-VL-1.6B-ONNX/
 ├── config.json, processor_config.json, tokenizer.json, tokenizer_config.json, chat_template.jinja
 └── onnx/
     ├── decoder.onnx             # fp32 decoder (inputs_embeds in); decoder_{fp16,q4,q8}.onnx
-    ├── vision_encoder.onnx      # SigLIP2 + projector; vision_encoder_{fp16,q4,q8}.onnx
+    ├── vision_encoder.onnx      # SigLIP2 + projector; vision_encoder_fp16.onnx
+    ├── vision_encoder_q8.onnx   # int8, used with q4 and q8
     ├── embeddings.onnx          # token table + image feature scatter
     ├── embeddings_fp16.onnx     # fp16 table, used with fp16
     └── embeddings_q8.onnx       # int8 table, used with q4 and q8
 ```
 
-The q4 and q8 decoders have an int8 LM head.
+The q4 and q8 decoders have an int8 LM head. Both bundles load one int8 vision encoder (symmetric, block 128, fp32 activations); with int4 weights or int8 activations, some LFM2.5-VL-1.6B image tokens fall below 0.7 cosine.
 
 onnxruntime-genai resizes each image once instead of tiling it, as the upstream processor does with `do_image_splitting=False`. The image preprocessing follows the checkpoint's own processor (bilinear for LFM2.5-VL-450M/1.6B, bicubic for the others).
 

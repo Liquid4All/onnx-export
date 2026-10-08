@@ -190,11 +190,19 @@ def quantize_matmuls(
     bits: int,
     block_size: int = DEFAULT_BLOCK_SIZE,
     symmetric: bool = False,
+    accuracy_level: int = 4,
     exclude: list[str] | None = None,
 ) -> onnx.ModelProto:
-    """MatMul -> MatMulNBits (int4 or int8) for every MatMul not named in exclude."""
+    """MatMul -> MatMulNBits (int4 or int8) for every MatMul not named in exclude.
+
+    accuracy_level is MatMulNBits' compute type: 4 quantizes the activations to int8, 0 keeps them
+    in the input type.
+    """
     quant_type = "symmetric" if symmetric else "asymmetric"
-    logger.info(f"Quantizing to INT{bits} (block_size={block_size}, {quant_type})...")
+    logger.info(
+        f"Quantizing to INT{bits} (block_size={block_size}, {quant_type}, "
+        f"accuracy_level={accuracy_level})..."
+    )
     # The quantizer logs every node it leaves alone, hundreds of lines for an MoE graph.
     logging.getLogger("onnxruntime.quantization.matmul_nbits_quantizer").setLevel(logging.WARNING)
 
@@ -203,14 +211,14 @@ def quantize_matmuls(
         kwargs["algo_config"] = DefaultWeightOnlyQuantConfig(
             block_size=block_size,
             is_symmetric=symmetric,
-            accuracy_level=4,
+            accuracy_level=accuracy_level,
             bits=bits,
         )
     quantizer = MatMulNBitsQuantizer(
         model,
         block_size=block_size,
         is_symmetric=symmetric,
-        accuracy_level=4,
+        accuracy_level=accuracy_level,
         nodes_to_exclude=exclude or None,
         **kwargs,
     )
@@ -229,6 +237,7 @@ def quantize_model(
     block_size: int = DEFAULT_BLOCK_SIZE,
     exclude_lm_head: bool = True,
     symmetric: bool = False,
+    accuracy_level: int = 4,
 ) -> pathlib.Path:
     """Quantize ONNX model to INT4 or INT8 using MatMulNBits.
 
@@ -242,6 +251,7 @@ def quantize_model(
         block_size: Block size for quantization
         exclude_lm_head: Keep lm_head in FP32
         symmetric: Use symmetric quantization (no zero points). Default False matches community.
+        accuracy_level: MatMulNBits compute type (see quantize_matmuls)
     """
     logger.info(f"Loading {model_path}...")
     model = load_model(model_path)
@@ -256,7 +266,12 @@ def quantize_model(
             logger.warning("Could not find lm_head node")
 
     quantized = quantize_matmuls(
-        model, bits=bits, block_size=block_size, symmetric=symmetric, exclude=exclude
+        model,
+        bits=bits,
+        block_size=block_size,
+        symmetric=symmetric,
+        accuracy_level=accuracy_level,
+        exclude=exclude,
     )
     logger.info(f"Saving to {output_path}...")
     return save_model(quantized, output_path)
