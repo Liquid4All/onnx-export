@@ -183,8 +183,22 @@ def test_genai_config(export):
     _, _, output_dir = export
     config = json.loads((output_dir / "genai_config.json").read_text())
     assert config["model"]["decoder"]["filename"] == "onnx/model_q4.onnx"
+    assert config["model"]["decoder"]["session_options"]["session.set_denormal_as_zero"] == "1"
     for name in ("tokenizer.json", "tokenizer_config.json", "config.json"):
         assert (output_dir / name).exists()
+
+
+@pytest.mark.parametrize("precision", ["fp32", "q4"])
+def test_denormal_flush_keeps_logits(export, precision: str):
+    _, _, output_dir = export
+    flushed = decoder(output_dir, precision)
+    entry = flushed.get_session_options().get_session_config_entry("session.set_denormal_as_zero")
+    assert entry == "1"
+
+    path = output_dir / "onnx" / model_file(precision)
+    plain = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    feed = decoder_inputs(TOKENS, initialize_cache(plain), 0)
+    np.testing.assert_array_equal(flushed.run(None, feed)[0], plain.run(None, feed)[0])
 
 
 def test_q4f16_ignores_a_stale_q4(export, tmp_path):

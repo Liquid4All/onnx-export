@@ -24,6 +24,7 @@ import onnx
 
 from liquidonnx import remote_code_enabled
 from liquidonnx.quantize import get_total_model_size_mb, load_model, save_model
+from liquidonnx.session import SESSION_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,10 @@ def export_decoder(
         built = build_decoder(model, build_dir, extra_options)
 
         genai_config = json.loads((build_dir / "genai_config.json").read_text())
+        # genai passes unknown session_options keys to AddConfigEntry, and the multimodal
+        # graphs without session_options of their own reuse the decoder's.
+        genai_config["model"]["decoder"].setdefault("session_options", {}).update(SESSION_CONFIG)
+        (build_dir / "genai_config.json").write_text(json.dumps(genai_config, indent=4))
         decoder = load_model(built)
         pin_kv_head_size(decoder, genai_config["model"]["decoder"]["head_size"])
         output_path = save_model(decoder, onnx_dir / filename)

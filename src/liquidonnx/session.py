@@ -14,11 +14,23 @@ import onnxruntime as ort
 
 logger = logging.getLogger(__name__)
 
+# Symmetric RTN leaves subnormal fp32 block scales in near-zero weight blocks (746,432 in
+# LFM2-2.6B q4), and x86 arithmetic on subnormals is slow: flushing them lifts 2.6B q4 CPU
+# prefill about 1.5x with bit-identical logits. ORT sets the calling thread's mode once per
+# process, from the first session, so every session here carries the entry.
+SESSION_CONFIG = {"session.set_denormal_as_zero": "1"}
 
 SESSION_PROVIDERS = {
     "cpu": ["CPUExecutionProvider"],
     "cuda": ["CUDAExecutionProvider", "CPUExecutionProvider"],
 }
+
+
+def session_options() -> ort.SessionOptions:
+    options = ort.SessionOptions()
+    for key, value in SESSION_CONFIG.items():
+        options.add_session_config_entry(key, value)
+    return options
 
 
 def preload_cuda_libraries():
@@ -50,7 +62,7 @@ def load_onnx_session(
         preload_cuda_libraries()
         if not tf32:
             providers = [(provider, {"use_tf32": "0"}), *providers[1:]]
-    options = ort.SessionOptions()
+    options = session_options()
     options.intra_op_num_threads = threads
     logger.info(f"Loading {path.name} ({ep})...")
     session = ort.InferenceSession(str(path), sess_options=options, providers=providers)
