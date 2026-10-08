@@ -211,6 +211,8 @@ On CPU, MoE speed depends on the onnxruntime version. LFM2.5-8B-A1B q4 with onnx
 | 1.30.0 (PyPI) | 32 s | 61 tok/s | 1.3 tok/s |
 | 1.31.0.dev20261007001 (`uv.lock`) | 3.6 s | 225 tok/s | 59 tok/s |
 
+The inference CLIs log a warning when they load LFM2-MoE on CPU with onnxruntime older than 1.31; [2](#2-installation) shows how to switch a pip environment to the nightly.
+
 ### 4.4 Audio (ASR, TTS, Interleaved)
 
 LFM2.5-Audio has four modes, picked with `--mode`:

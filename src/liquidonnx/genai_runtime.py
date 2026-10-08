@@ -15,6 +15,7 @@ import pathlib
 from collections.abc import Callable
 
 import numpy as np
+import onnxruntime as ort
 import onnxruntime_genai as og
 from packaging.version import Version
 
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 EXECUTION_PROVIDERS = ("cpu", "cuda")
 GENAI_MIN_VERSION = Version("0.17.1")  # tested release; 0.17.0 added lfm2_moe, lfm2_vl, lfm2_audio
+MOE_ORT_MIN_VERSION = Version("1.31.0.dev0")  # fast CPU QMoE kernels; the 1.31 nightlies pass
 
 
 def _filenames(entries: dict) -> list[str]:
@@ -49,6 +51,16 @@ def check_genai_version(version: str):
         )
 
 
+def check_moe_onnxruntime_version(model_type: str, version: str):
+    """Warn that LFM2-MoE decodes slowly on CPU with an onnxruntime older than MOE_ORT_MIN_VERSION."""
+    if model_type == "lfm2_moe" and Version(version) < MOE_ORT_MIN_VERSION:
+        logger.warning(
+            f"LFM2-MoE decodes at about 1 tok/s on CPU with onnxruntime {version}, against about "
+            "59 tok/s with the onnxruntime 1.31 nightly. The README (2. Installation) shows which "
+            "installs get the nightly."
+        )
+
+
 def load_model(
     model_dir: pathlib.Path, files: dict | None = None, ep: str = "cpu", tf32: bool = True
 ) -> og.Model:
@@ -58,6 +70,9 @@ def load_model(
     """
     check_genai_version(og.__version__)
     config = og.Config(str(model_dir))
+    if ep == "cpu":
+        genai_config = json.loads((model_dir / "genai_config.json").read_text())
+        check_moe_onnxruntime_version(genai_config["model"]["type"], ort.__version__)
     if files:
         missing = [f for f in _filenames(files) if not (model_dir / f).exists()]
         if missing:

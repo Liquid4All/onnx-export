@@ -10,6 +10,7 @@ Run with:
 
 import collections
 import json
+import logging
 import pathlib
 import shutil
 
@@ -222,6 +223,36 @@ def test_genai_version_floor():
             check_genai_version(version)
     for version in ("0.17.1", "0.18.0-dev"):
         check_genai_version(version)
+
+
+@pytest.mark.parametrize(
+    ("version", "ep", "warns"),
+    [
+        ("1.30.0", "cpu", True),
+        ("1.31.0.dev20261007001", "cpu", False),
+        ("1.31.0", "cpu", False),
+        ("1.30.0", "cuda", False),
+    ],
+)
+def test_load_model_warns_on_slow_moe_onnxruntime(
+    export, version: str, ep: str, warns: bool, monkeypatch, caplog
+):
+    """LFM2-MoE on CPU warns once with onnxruntime before 1.31; 1.31 nightlies, CUDA and dense
+    models do not."""
+    kind, _, output_dir = export
+    monkeypatch.setattr(ort, "__version__", version)
+    monkeypatch.setattr(ort, "preload_dlls", lambda: None)
+    monkeypatch.setattr(og, "Model", lambda config: None)
+    with caplog.at_level(logging.WARNING, logger="liquidonnx.genai_runtime"):
+        load_model(output_dir, ep=ep)
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    if warns and kind == "moe":
+        assert len(messages) == 1
+        assert f"onnxruntime {version}" in messages[0]
+        assert "2. Installation" in messages[0]
+        assert "uv sync" not in messages[0]  # it would swap onnxruntime-gpu for the CPU nightly
+    else:
+        assert messages == []
 
 
 @pytest.mark.parametrize("ep", EXECUTION_PROVIDERS)
