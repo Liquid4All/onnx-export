@@ -360,6 +360,38 @@ def test_session_threads(text, threads: int):
     assert session.get_session_options().intra_op_num_threads == threads
 
 
+@pytest.mark.parametrize(
+    "family, argv, threads",
+    [("text", [], 13), ("vl", ["--threads", 2], 2)],
+    ids=["text-default", "vl-given"],
+)
+def test_gate_pins_the_thread_count(
+    request, tmp_path, monkeypatch, family: str, argv: list, threads: int
+):
+    """Every session runs 13 intra-op threads on any machine, the count of the 8B-A1B ceilings,
+    unless --threads says otherwise; the results and the report record the count."""
+    _, model, export = request.getfixturevalue(family)
+    tokens = random_tokens(model.config.get_text_config().vocab_size)
+    reference = write_reference(tmp_path / "ref.kld", torch_logits(model), tokens, family)
+    sessions = []
+    load = wikitext.load_onnx_session
+
+    def recording_load(*args, **kwargs):
+        sessions.append(load(*args, **kwargs))
+        return sessions[-1]
+
+    monkeypatch.setattr(wikitext, "load_onnx_session", recording_load)
+    output = tmp_path / "wikitext.json"
+    argv = [*argv, "--export", export, "--reference", reference, "--output", output]
+
+    results = run(monkeypatch, *argv, "--precision", "q4", "--chunks", 2)
+    assert "error" not in results["rows"]["q4"]
+    expected = [threads] * (2 if family == "vl" else 1)
+    assert [s.get_session_options().intra_op_num_threads for s in sessions] == expected
+    assert results["threads"] == threads
+    assert f"(cpu, {threads} threads)" in output.with_suffix(".md").read_text()
+
+
 def test_arguments_are_checked(text, tmp_path, monkeypatch, capsys):
     _, _, export = text
     output = tmp_path / "wikitext.json"
