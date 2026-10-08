@@ -124,6 +124,53 @@ def test_vl_logits_match_pytorch(vl, precision: str):
         np.testing.assert_allclose(actual, expected, atol=1e-4)
 
 
+# Patch grids (h, w) of the images genai sends to the vision encoder in one call.
+VISION_BATCHES = {
+    "single": [(26, 36)],
+    "mixed": [(18, 52), (44, 22)],  # neither image has the batch's max grid, 44x52
+    "nested": [(26, 36), (14, 20)],  # the smaller image has an axis under 16 patches
+    "strip": [(12, 80)],  # an axis under 16 patches downsamples the 16x16 position grid
+}
+
+
+def vision_batch(shapes: list[tuple[int, int]], num_patches: int = 1024) -> dict:
+    """Random patches, padded to num_patches as genai pads them."""
+    rng = np.random.default_rng(0)
+    pixel_values = np.zeros((len(shapes), num_patches, 3 * 16 * 16), dtype=np.float32)
+    mask = np.zeros((len(shapes), num_patches), dtype=np.int64)
+    for i, (h, w) in enumerate(shapes):
+        pixel_values[i, : h * w] = rng.uniform(-1, 1, (h * w, pixel_values.shape[-1]))
+        mask[i, : h * w] = 1
+    return {
+        "pixel_values": pixel_values,
+        "pixel_attention_mask": mask,
+        "spatial_shapes": np.array(shapes, dtype=np.int64),
+    }
+
+
+@pytest.mark.parametrize("precision", ["fp32", "fp16"])
+@pytest.mark.parametrize("shapes", list(VISION_BATCHES.values()), ids=list(VISION_BATCHES))
+def test_vl_vision_matches_pytorch_per_image(vl, shapes: list, precision: str):
+    """Every image gets the position grid resized to its own shape, antialiased as in Siglip2."""
+    model, _, output_dir = vl
+    feed = vision_batch(shapes)
+    with torch.no_grad():
+        features = model.model.get_image_features(
+            **{name: torch.from_numpy(value) for name, value in feed.items()}
+        ).pooler_output
+    expected = torch.cat(features).numpy()
+
+    actual = session(output_dir, vl_export.bundle(precision)["vision"]).run(None, feed)[0]
+
+    assert actual.shape == expected.shape
+    token_cosines = (expected * actual).sum(-1) / (
+        np.linalg.norm(expected, axis=-1) * np.linalg.norm(actual, axis=-1)
+    )
+    assert token_cosines.min() >= MIN_COSINE[precision]
+    if precision == "fp32":
+        np.testing.assert_allclose(actual, expected, atol=1e-5)
+
+
 @pytest.mark.parametrize("precision", ["fp32", "q4"])
 def test_vl_cached_decode_matches_prefill(vl, precision: str):
     """Prefill the image prompt, then feed three text tokens one call at a time."""

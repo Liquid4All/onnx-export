@@ -5,6 +5,7 @@ combining the SigLIP2 vision encoder with the MLP projector.
 """
 
 import logging
+import math
 
 import numpy as np
 import onnx
@@ -29,7 +30,7 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             ↓
         ┌─────────────────────────────────────┐
         │  Patch Embedding                    │
-        │  + Position Embedding (bilinear)    │
+        │  + Position Embedding (per image)   │
         └─────────────────────────────────────┘
             ↓
         ┌─────────────────────────────────────┐
@@ -101,41 +102,69 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         )
         return f"{p}/split_shapes/h", f"{p}/split_shapes/w"
 
-    def _extract_max_spatial_dims(self, output_prefix: str) -> tuple[str, str]:
-        """Extract max spatial dimensions from spatial_shapes input.
+    def _resize_weights(self, target: str, size: str, grid: int, prefix: str) -> str:
+        """Antialiased bilinear weights [B, grid, N] from one position-grid axis to each patch.
 
-        Returns the maximum H and W across all images in the batch.
-        Used by position embedding which needs max dimensions for Resize.
+        F.interpolate(mode="bilinear", align_corners=False, antialias=True) gives grid cell s the
+        weight max(0, 1 - |s + 0.5 - c| / k) for target index t, normalized over s, with
+        c = (t + 0.5) * grid / size and k = max(grid / size, 1). Scaled by 2 * max(size, grid) it
+        is max(0, 2 * max(size, grid) - |(2s + 1) * size - (2t + 1) * grid|), computed in int64
+        so that fp16 conversion cannot round the filter.
 
         Args:
-            output_prefix: Output node prefix
-
-        Returns:
-            Tuple of (max_h, max_w) as scalar int64 tensors
+            target: Target index t of each patch [B, 1, N] (int64)
+            size: Target axis length of each image [B, 1, 1] (int64)
+            grid: Position grid side
+            prefix: Output node prefix
         """
-        p = output_prefix
-        # ReduceMax across batch: [B, 2] → [2] to get max(H), max(W)
-        max_spatial = self.make_node(
-            "ReduceMax",
-            ["spatial_shapes", self.get_constant("INT64", [0])],
-            [f"{p}/max_spatial/output_0"],
-            keepdims=0,
+        p = prefix
+        odd = self.get_constant("INT64", (2 * np.arange(grid) + 1).reshape(1, grid, 1))
+        source = self.make_node("Mul", [odd, size], [f"{p}/source/output_0"])
+        target = self.make_node(
+            "Add",
+            [
+                self.make_node(
+                    "Mul",
+                    [target, self.get_constant("INT64", 2 * grid)],
+                    [f"{p}/target_scaled/output_0"],
+                ),
+                self.get_constant("INT64", grid),
+            ],
+            [f"{p}/target/output_0"],
         )
-
-        spatial_h = self.make_node(
-            "Gather",
-            [max_spatial, self.get_constant("INT64", 0)],
-            [f"{p}/spatial_h/output_0"],
-            axis=0,
+        distance = self.make_node(
+            "Abs",
+            [self.make_node("Sub", [source, target], [f"{p}/offset/output_0"])],
+            [f"{p}/distance/output_0"],
         )
-        spatial_w = self.make_node(
-            "Gather",
-            [max_spatial, self.get_constant("INT64", 1)],
-            [f"{p}/spatial_w/output_0"],
-            axis=0,
+        reach = self.make_node(
+            "Mul",
+            [
+                self.make_node(
+                    "Max", [size, self.get_constant("INT64", grid)], [f"{p}/support/output_0"]
+                ),
+                self.get_constant("INT64", 2),
+            ],
+            [f"{p}/reach/output_0"],
         )
-
-        return spatial_h, spatial_w
+        numerator = self.make_node(
+            "Max",
+            [
+                self.make_node("Sub", [reach, distance], [f"{p}/filter/output_0"]),
+                self.get_constant("INT64", 0),
+            ],
+            [f"{p}/numerator/output_0"],
+        )
+        numerator = self.make_node(
+            "Cast", [numerator], [f"{p}/numerator_float/output_0"], to=TensorProto.FLOAT
+        )
+        total = self.make_node(
+            "ReduceSum",
+            [numerator, self.get_constant("INT64", [1])],
+            [f"{p}/total/output_0"],
+            keepdims=1,
+        )
+        return self.make_node("Div", [numerator, total], [f"{p}/weights/output_0"])
 
     def _compute_aligned_max_dims(
         self, h_per_batch: str, w_per_batch: str, prefix: str
@@ -603,9 +632,9 @@ class VisionEmbedBuilder(ONNXBuilderBase):
             patch_embeds [B, N, hidden]
                 ↓
             ┌─────────────────────────────────────┐
-            │  Position Embeddings                │
-            │  Bilinear interpolation 16x16 → HxW │
-            │  Tile across batch                  │
+            │  Position Embeddings, per image     │
+            │  16x16 grid → h[b]×w[b]             │
+            │  (antialiased bilinear, MatMul)     │
             └─────────────────────────────────────┘
                 ↓
             pos_embeds [B, N, hidden]
@@ -614,12 +643,11 @@ class VisionEmbedBuilder(ONNXBuilderBase):
                 ↓
             patch_embeddings [B, N, hidden]
 
-        Position embeddings are stored as 16x16 learned embeddings and bilinearly
-        interpolated to match the input spatial size.
+        Each image resizes the learned 16x16 grid to its own spatial shape as Siglip2 does
+        (F.interpolate bilinear, antialias=True), and its padding patches take the first position.
         """
         # Community naming: model.embeddings.patch_embedding
         pytorch_prefix = "vision_model.embeddings.patch_embedding"
-        H = self.vision_config.hidden_size
 
         linear_weight = self.weights[f"{pytorch_prefix}.weight"]
         linear_bias = self.weights[f"{pytorch_prefix}.bias"]
@@ -642,169 +670,92 @@ class VisionEmbedBuilder(ONNXBuilderBase):
         )
         # === Position embeddings ===
         pe = "/model/embeddings/pos_embed"
-        input_shape = self.make_node("Shape", ["pixel_values"], [f"{pe}/input_shape/output_0"])
+        table = self.weights["vision_model.embeddings.position_embedding.weight"]  # [grid*grid, H]
+        grid = math.isqrt(table.shape[0])
+        # Transposed so the table is MatMul's A operand: weight-only quantizers leave it fp32.
+        self.add_initializer(f"{pe}/table", table.T)
 
-        # === Position embedding interpolation ===
-        # Strategy: Size position embeddings for the largest image in the batch,
-        # then filter/slice for each image. This trades memory (unused positions
-        # for smaller images) for simplicity (single Resize op instead of per-image).
-        # The Compress operator later removes padding tokens, so extra positions
-        # don't affect the final output.
-        pe = "/model/embeddings/pos_embed"
-        spatial_h, spatial_w = self._extract_max_spatial_dims(pe)
-
-        # Use Resize for position embedding interpolation
-        pos_emb_prefix = "vision_model.embeddings.position_embedding"
-        pos_emb_weight = self.weights[f"{pos_emb_prefix}.weight"]
-        pos_emb_4d = pos_emb_weight.reshape(16, 16, H).transpose(2, 0, 1)
-        pos_emb_4d = pos_emb_4d[np.newaxis, ...]  # [1, H, 16, 16]
-        self.add_initializer(f"{pe}/base_weight", pos_emb_4d)
-
-        axes_0 = self.get_constant("INT64", [0])
-        spatial_h_unsq = self.make_node("Unsqueeze", [spatial_h, axes_0], [f"{pe}/h_unsq/output_0"])
-        spatial_w_unsq = self.make_node("Unsqueeze", [spatial_w, axes_0], [f"{pe}/w_unsq/output_0"])
-
-        sizes = self.make_node(
-            "Concat",
-            [
-                self.get_constant("INT64", [1]),
-                self.get_constant("INT64", [H]),
-                spatial_h_unsq,
-                spatial_w_unsq,
-            ],
-            [f"{pe}/sizes/output_0"],
-            axis=0,
-        )
-
-        self.add_initializer(f"{pe}/empty_roi", np.array([], dtype=np.float32))
-        resized = self.make_node(
-            "Resize",
-            [f"{pe}/base_weight", f"{pe}/empty_roi", "", sizes],
-            [f"{pe}/resized/output_0"],
-            mode="linear",
-            coordinate_transformation_mode="half_pixel",
-        )
-
-        transposed = self.make_node(
-            "Transpose", [resized], [f"{pe}/transposed/output_0"], perm=[0, 2, 3, 1]
-        )
-        pos_emb_final = self.make_node(
-            "Reshape",
-            [transposed, self.get_constant("INT64", [1, -1, H])],
-            [f"{pe}/final/output_0"],
-        )
-
-        # Get batch size and num_patches from input shape
-        batch_size = self.make_node(
-            "Gather",
-            [input_shape, self.get_constant("INT64", 0)],
-            [f"{pe}/batch_size/output_0"],
-            axis=0,
-        )
+        h, w = self._split_spatial_shapes(pe)  # [B, 1] each
         num_patches = self.make_node(
             "Gather",
-            [input_shape, self.get_constant("INT64", 1)],
+            [
+                self.make_node("Shape", ["pixel_values"], [f"{pe}/input_shape/output_0"]),
+                self.get_constant("INT64", 1),
+            ],
             [f"{pe}/num_patches/output_0"],
             axis=0,
         )
-
-        # Handle padding (input may have more patches than H*W)
-        # Fill padded positions with first token's position embedding
-        first_token = self.make_node(
-            "Slice",
-            [
-                pos_emb_final,
-                self.get_constant("INT64", [0]),
-                self.get_constant("INT64", [1]),
-                self.get_constant("INT64", [1]),
-            ],
-            [f"{pe}/padding/slice_first_token/output_0"],
-        )
-
-        actual_num_patches = self.make_node(
-            "Mul", [spatial_h, spatial_w], [f"{pe}/padding/actual_num_patches/output_0"]
-        )
-
-        indices = self.make_node(
-            "Range",
-            [
-                self.get_constant("INT64", 0),
-                num_patches,
-                self.get_constant("INT64", 1),
-            ],
-            [f"{pe}/padding/indices/output_0"],
-        )
-
-        # Valid mask: indices < actual_num_patches
-        is_valid = self.make_node(
-            "Less", [indices, actual_num_patches], [f"{pe}/padding/is_valid_mask/output_0"]
-        )
-        is_valid_3d = self.make_node(
+        index = self.make_node(
             "Unsqueeze",
-            [is_valid, self.get_constant("INT64", [0, 2])],
-            [f"{pe}/padding/unsqueeze_mask/output_0"],
-        )
-
-        num_patches_unsq = self.make_node(
-            "Unsqueeze", [num_patches, axes_0], [f"{pe}/padding/num_patches_unsq/output_0"]
-        )
-        expand_shape = self.make_node(
-            "Concat",
             [
-                self.get_constant("INT64", [1]),
-                num_patches_unsq,
-                self.get_constant("INT64", [H]),
-            ],
-            [f"{pe}/padding/expand_shape/output_0"],
-            axis=0,
-        )
-        first_token_expanded = self.make_node(
-            "Expand",
-            [first_token, expand_shape],
-            [f"{pe}/padding/first_token_expanded/output_0"],
-        )
-
-        padding_size = self.make_node(
-            "Sub", [num_patches, actual_num_patches], [f"{pe}/padding/padding_size/output_0"]
-        )
-        padding_size_unsq = self.make_node(
-            "Unsqueeze", [padding_size, axes_0], [f"{pe}/padding/padding_size_unsq/output_0"]
-        )
-        pads = self.make_node(
-            "Concat",
-            [
-                self.get_constant("INT64", [0, 0, 0, 0]),
-                padding_size_unsq,
+                self.make_node(
+                    "Range",
+                    [self.get_constant("INT64", 0), num_patches, self.get_constant("INT64", 1)],
+                    [f"{pe}/range/output_0"],
+                ),
                 self.get_constant("INT64", [0]),
             ],
-            [f"{pe}/padding/pads/output_0"],
-            axis=0,
+            [f"{pe}/index/output_0"],
         )
-        pos_emb_padded = self.make_node(
-            "Pad", [pos_emb_final, pads], [f"{pe}/padding/padded/output_0"], mode="constant"
-        )
-
-        pos_emb_with_padding = self.make_node(
+        # Padding patches (index ≥ h·w) take position 0, as in Siglip2.
+        index = self.make_node(
             "Where",
-            [is_valid_3d, pos_emb_padded, first_token_expanded],
-            [f"{pe}/padding/with_padding/output_0"],
-        )
+            [
+                self.make_node(
+                    "Less",
+                    [index, self.make_node("Mul", [h, w], [f"{pe}/count/output_0"])],
+                    [f"{pe}/valid/output_0"],
+                ),
+                index,
+                self.get_constant("INT64", 0),
+            ],
+            [f"{pe}/patch_index/output_0"],
+        )  # [B, N]
 
-        batch_unsq = self.make_node(
-            "Unsqueeze", [batch_size, axes_0], [f"{pe}/batch_unsq/output_0"]
+        axes_1 = self.get_constant("INT64", [1])
+        axes_2 = self.get_constant("INT64", [2])
+        axis_weights = []
+        for axis, length, op in (("row", h, "Div"), ("col", w, "Mod")):
+            target = self.make_node(
+                "Unsqueeze",
+                [self.make_node(op, [index, w], [f"{pe}/{axis}/index/output_0"]), axes_1],
+                [f"{pe}/{axis}/index_3d/output_0"],
+            )  # [B, 1, N]
+            size = self.make_node("Unsqueeze", [length, axes_2], [f"{pe}/{axis}/size/output_0"])
+            axis_weights.append(self._resize_weights(target, size, grid, f"{pe}/{axis}"))
+
+        # [B, grid, 1, N] * [B, 1, grid, N] → [B, grid*grid, N]
+        weights = self.make_node(
+            "Reshape",
+            [
+                self.make_node(
+                    "Mul",
+                    [
+                        self.make_node(
+                            "Unsqueeze",
+                            [axis_weights[0], axes_2],
+                            [f"{pe}/row/weights_4d/output_0"],
+                        ),
+                        self.make_node(
+                            "Unsqueeze",
+                            [axis_weights[1], axes_1],
+                            [f"{pe}/col/weights_4d/output_0"],
+                        ),
+                    ],
+                    [f"{pe}/weights_4d/output_0"],
+                ),
+                self.get_constant("INT64", [0, grid * grid, -1]),
+            ],
+            [f"{pe}/weights/output_0"],
         )
-        tile_repeats = self.make_node(
-            "Concat",
-            [batch_unsq, self.get_constant("INT64", [1, 1])],
-            [f"{pe}/tile_repeats/output_0"],
-            axis=0,
+        # [H, grid*grid] @ [B, grid*grid, N] → [B, H, N] → [B, N, H]
+        pos_embeds = self.make_node(
+            "Transpose",
+            [self.make_node("MatMul", [f"{pe}/table", weights], [f"{pe}/MatMul/output_0"])],
+            [f"{pe}/output_0"],
+            perm=[0, 2, 1],
         )
-        pos_emb_tiled = self.make_node(
-            "Tile", [pos_emb_with_padding, tile_repeats], [f"{pe}/tiled/output_0"]
-        )
-        return self.make_node(
-            "Add", [patch_embeds, pos_emb_tiled], ["/model/embeddings/Add/output_0"]
-        )
+        return self.make_node("Add", [patch_embeds, pos_embeds], ["/model/embeddings/Add/output_0"])
 
     def build_encoder_layer(self, layer_idx: int, hidden_state: str) -> str:
         """Build a single SigLIP2 transformer encoder layer.
