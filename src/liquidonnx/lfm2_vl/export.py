@@ -2,9 +2,9 @@
 """
 Export LFM2-VL models to ONNX for onnxruntime-genai.
 
-The decoder comes from the onnxruntime-genai model builder (fp32, CPU EP, inputs_embeds in; see
-liquidonnx.genai_builder). This repository builds the vision encoder and the embedding model that
-splices image features into the token embeddings, and derives every precision.
+The fp32 and q8 decoders come from the onnxruntime-genai model builder (CPU EP, inputs_embeds in;
+see liquidonnx.genai_builder). This repository builds the vision encoder and the embedding model
+that splices image features into the token embeddings, and derives the other precisions.
 
 Output Structure:
     {output-dir}/exports/{model-name}-ONNX/
@@ -31,8 +31,8 @@ Usage:
     # Export with specific precisions
     uv run lfm2-vl-export LiquidAI/LFM2-VL-450M --precision fp16 q4
 
-    # Derive precisions from an existing fp32 export
-    uv run lfm2-vl-export LiquidAI/LFM2-VL-450M --precision q8 --skip-export
+    # Add precisions to an existing export without rebuilding fp32
+    uv run lfm2-vl-export LiquidAI/LFM2-VL-450M --precision q4 --skip-export
 """
 
 import argparse
@@ -50,12 +50,11 @@ from liquidonnx.export_cli import (
     output_dir,
     parse_precisions,
 )
-from liquidonnx.genai_builder import export_decoder
+from liquidonnx.genai_builder import export_decoder, export_precision
 from liquidonnx.lfm2_vl.builder import LFM2VLConfig, VisionEmbedBuilder
 from liquidonnx.quantize import (
     DEFAULT_BLOCK_SIZE,
     convert_to_fp16,
-    derive_precision,
     quantize_model,
     save_model,
 )
@@ -64,6 +63,7 @@ logger = logging.getLogger(__name__)
 
 PRECISIONS = ("fp16", "q4", "q8")
 DEFAULT_ORDER = ("q4", "q8", "fp16")
+DECODER_OPTIONS = {"exclude_embeds": "true"}
 GENAI_PROCESSOR_CONFIG = "genai_processor_config.json"
 INTERPOLATION = {2: "LINEAR", 3: "CUBIC"}  # PIL resample -> onnxruntime-extensions Resize
 # LFM2.5-VL-3B's pre-tokenizer pattern, which onnxruntime-extensions cannot parse, and the
@@ -132,7 +132,7 @@ def export_vl_model(model_path: str, output_dir: pathlib.Path):
     gc.collect()
 
     # === 3. Decoder (onnxruntime-genai model builder) ===
-    export_decoder(model_path, output_dir, "decoder.onnx", {"exclude_embeds": "true"})
+    export_decoder(model_path, output_dir, "decoder.onnx", DECODER_OPTIONS)
 
     # === 4. Processor and tokenizer ===
     AutoProcessor.from_pretrained(
@@ -151,15 +151,24 @@ def fix_tokenizer_pattern(tokenizer_path: pathlib.Path):
 
 
 def derive_precision_files(
-    onnx_dir: pathlib.Path,
+    model_path: str,
+    output_dir: pathlib.Path,
     precision: str,
     block_size: int = DEFAULT_BLOCK_SIZE,
     q4_symmetric: bool = True,
 ):
     """Write the files bundle(precision) loads."""
+    onnx_dir = output_dir / "onnx"
     files = bundle(precision)
-    derive_precision(
-        onnx_dir, precision, name="decoder", block_size=block_size, q4_symmetric=q4_symmetric
+    export_precision(
+        model_path,
+        output_dir,
+        "lfm2_vl",
+        precision,
+        name="decoder",
+        extra_options=DECODER_OPTIONS,
+        block_size=block_size,
+        q4_symmetric=q4_symmetric,
     )
 
     vision = onnx_dir / files["vision"]
@@ -293,9 +302,13 @@ def main():
         export_vl_model(args.model, export_dir)
 
     for precision in precisions:
-        log_step(f"Deriving {precision}")
+        log_step(f"Exporting {precision}")
         derive_precision_files(
-            onnx_dir, precision, block_size=args.block_size, q4_symmetric=not args.q4_asymmetric
+            args.model,
+            export_dir,
+            precision,
+            block_size=args.block_size,
+            q4_symmetric=not args.q4_asymmetric,
         )
 
     # Rebuilding fp32 makes precisions from earlier runs stale; --skip-export keeps them valid.

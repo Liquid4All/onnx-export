@@ -15,7 +15,11 @@ from liquidonnx.lfm2.export import main as export_main
 
 
 def main():
-    export_main(MOE_PRECISIONS, description="Export LFM2-MoE models to ONNX for onnxruntime-genai")
+    export_main(
+        MOE_PRECISIONS,
+        description="Export LFM2-MoE models to ONNX for onnxruntime-genai",
+        family="lfm2_moe",
+    )
 
 
 if __name__ == "__main__":

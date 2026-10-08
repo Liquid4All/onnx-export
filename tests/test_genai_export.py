@@ -20,6 +20,7 @@ import onnxruntime as ort
 import onnxruntime_genai as og
 import pytest
 import torch
+from helpers import assert_same_graph, derive_reference
 from transformers import (
     AutoTokenizer,
     Lfm2Config,
@@ -29,7 +30,7 @@ from transformers import (
 )
 
 from liquidonnx.compare.metrics import greedy
-from liquidonnx.genai_builder import export_decoder
+from liquidonnx.genai_builder import export_decoder, export_precision
 from liquidonnx.genai_runtime import (
     EXECUTION_PROVIDERS,
     check_genai_version,
@@ -49,6 +50,7 @@ from liquidonnx.session import (
 CPU_EP, CUDA_EP = "CPUExecutionProvider", "CUDAExecutionProvider"
 TOKENS = np.array([[1, 5, 77, 300, 42, 9, 128, 64, 3, 250]], dtype=np.int64)
 HEAD_SIZE = 16
+FAMILIES = {"dense": "lfm2", "moe": "lfm2_moe"}
 COMMON = {
     "vocab_size": 512,
     "hidden_size": 64,
@@ -105,9 +107,10 @@ def export(request, tmp_path_factory):
     model = make_checkpoint(request.param, root / "checkpoint")
     output_dir = root / "export"
     output_dir.mkdir()
-    export_decoder(str(root / "checkpoint"), output_dir)
+    checkpoint = str(root / "checkpoint")
+    export_decoder(checkpoint, output_dir)
     for precision in ALL_PRECISIONS:
-        derive_precision(output_dir / "onnx", precision, reuse_q4=True)
+        export_precision(checkpoint, output_dir, FAMILIES[request.param], precision, reuse_q4=True)
     set_default_decoder(output_dir, list(ALL_PRECISIONS))
     return request.param, model, output_dir
 
@@ -177,6 +180,26 @@ def test_graph_layout(export):
             if node.op_type == "QMoE":
                 attrs = {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
                 assert attrs["expert_weight_bits"] == bits
+
+
+@pytest.mark.parametrize("precision", ["q8", "q4f32"])
+def test_builder_presets_match_quantize(export, precision: str, tmp_path):
+    """The builder runs write the decoders liquidonnx.quantize derives from fp32."""
+    _, _, output_dir = export
+    expected = derive_reference(output_dir / "onnx", tmp_path, precision)
+    assert_same_graph(output_dir / "onnx" / model_file(precision), expected)
+
+
+def test_asymmetric_q4f32_matches_quantize(export, tmp_path):
+    """--q4-asymmetric reaches the q4f32 builder run, which writes nothing but the decoder."""
+    kind, _, output_dir = export
+    checkpoint = str(output_dir.parent / "checkpoint")
+    built = export_precision(checkpoint, tmp_path, FAMILIES[kind], "q4f32", q4_symmetric=False)
+    reference_dir = tmp_path / "reference"
+    reference_dir.mkdir()
+    expected = derive_reference(output_dir / "onnx", reference_dir, "q4f32", q4_symmetric=False)
+    assert_same_graph(built, expected)
+    assert not (tmp_path / "genai_config.json").exists()
 
 
 def test_genai_config(export):
