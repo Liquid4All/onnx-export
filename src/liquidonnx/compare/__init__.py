@@ -13,6 +13,9 @@ device in ~/.cache/liquidonnx/compare. --device cuda runs the references on the 
 and the ONNX sessions and onnxruntime-genai on the CUDA EP, also without TF32. Run from the
 repository: the VL images and audio clips are tests/test_lfm2_vl/assets and samples/audio.
 
+PyTorch answers greedily without the checkpoint's generation_config (LFM2.5-8B-A1B's
+repetition_penalty), so each answer token is the argmax of the reference logits, as on onnxruntime.
+
 Usage:
     uv run lfm2-compare text --model LiquidAI/LFM2.5-350M --export exports/LFM2.5-350M-ONNX
     uv run lfm2-compare moe --model LiquidAI/LFM2.5-8B-A1B --export exports/LFM2.5-8B-A1B-ONNX \\
@@ -98,8 +101,10 @@ def cached_reference(
         inputs = (module.CASES, image_splitting)
     else:
         inputs = module.CASES
-    key = repr((checkpoint_revision(model, checkpoint), inputs, max_new))
-    digest = hashlib.sha256(key.encode()).hexdigest()[:12]
+    key = (checkpoint_revision(model, checkpoint), inputs, max_new)
+    if family != "audio":
+        key += ("argmax",)  # earlier answers took the checkpoint's repetition_penalty
+    digest = hashlib.sha256(repr(key).encode()).hexdigest()[:12]
     tag = "" if device == "cpu" else f"-{device}"  # CPU references keep their pre-device names
     path = cache_dir() / "compare" / f"{pathlib.Path(model).name}-{family}{tag}-{digest}.npz"
     if path.exists():

@@ -39,6 +39,35 @@ def precisions(export: pathlib.Path) -> list[str]:
     return [p for p in ("fp32", *ALL_PRECISIONS) if (export / "onnx" / model_file(p)).exists()]
 
 
+def plain_greedy(model) -> None:
+    """Make generate() answer with the argmax of the model's logits.
+
+    With do_sample=False, generate() still applies the logit processors of the checkpoint's
+    generation_config, such as LFM2.5-8B-A1B's repetition_penalty of 1.05. Its answers then
+    disagree with the argmax of the logits the decoders are scored on, which caps every
+    precision's greedy score. Only the special tokens are kept.
+    """
+    from transformers import GenerationConfig
+
+    config = model.generation_config
+    model.generation_config = GenerationConfig(
+        bos_token_id=config.bos_token_id,
+        eos_token_id=config.eos_token_id,
+        pad_token_id=config.pad_token_id,
+    )
+
+
+def check_answer(answer: list[int], logits: np.ndarray, name: str) -> None:
+    """Warn when a greedy answer leaves the argmax of its logits: the decoders' greedy answers
+    follow the argmax, so they cannot match the reference past that token."""
+    off = np.flatnonzero(logits.argmax(-1) != np.asarray(answer))
+    if len(off):
+        logger.warning(
+            f"reference {name}: answer token {off[0]} of {len(answer)} is not the argmax of "
+            "its logits"
+        )
+
+
 def reference(checkpoint: pathlib.Path, prompts: int, max_new: int, device: str) -> list[dict]:
     """Greedy answers of the fp32 PyTorch model and the logits that predict each answer token."""
     import torch
@@ -46,8 +75,9 @@ def reference(checkpoint: pathlib.Path, prompts: int, max_new: int, device: str)
 
     tokenizer = AutoTokenizer.from_pretrained(checkpoint)
     model = AutoModelForCausalLM.from_pretrained(checkpoint, dtype=torch.float32).to(device).eval()
+    plain_greedy(model)
     items = []
-    for text in PROMPTS[:prompts]:
+    for i, text in enumerate(PROMPTS[:prompts]):
         rendered = tokenizer.apply_chat_template(
             [{"role": "user", "content": text}], add_generation_prompt=True, tokenize=False
         )
@@ -60,14 +90,15 @@ def reference(checkpoint: pathlib.Path, prompts: int, max_new: int, device: str)
             # A full forward pass, not generate()'s own logits: MoE routing depends on the batch
             # shape, and the ONNX decoder is scored against the model, not one run of it.
             logits = model(out).logits[0].float().cpu().numpy()
-        answer = out[0, len(ids) :].tolist()
+        answer, logits = out[0, len(ids) :].tolist(), logits[len(ids) - 1 : -1]
         logger.info(f"reference {len(ids)}+{len(answer)} tokens in {time.time() - start:.1f}s")
+        check_answer(answer, logits, f"prompt {i}")
         items.append(
             {
                 "rendered": rendered,
                 "prompt": ids,
                 "answer": answer,
-                "logits": logits[len(ids) - 1 : -1],
+                "logits": logits,
                 "text": tokenizer.decode(answer, skip_special_tokens=True),
             }
         )

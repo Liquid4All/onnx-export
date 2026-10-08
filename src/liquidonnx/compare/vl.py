@@ -19,7 +19,7 @@ from liquidonnx.compare.metrics import (
     merge_sequences,
     sequence_match,
 )
-from liquidonnx.compare.text import eos_ids
+from liquidonnx.compare.text import check_answer, eos_ids, plain_greedy
 from liquidonnx.embeddings import embed
 from liquidonnx.genai_runtime import generate, load_model
 from liquidonnx.lfm2_vl.export import PRECISIONS, bundle, genai_files
@@ -61,6 +61,7 @@ def reference(
         image_splitting = processor.image_processor.do_image_splitting
     model = AutoModelForImageTextToText.from_pretrained(checkpoint, dtype=torch.float32)
     model = model.to(device).eval()
+    plain_greedy(model)
     captured = {}
 
     def grab(_module, _args, kwargs):
@@ -84,8 +85,10 @@ def reference(
         start = time.time()
         with torch.no_grad():
             out = model.generate(**inputs, max_new_tokens=max_new, do_sample=False)
-            logits = model(**{**inputs, "input_ids": out, "attention_mask": torch.ones_like(out)})
+            forward = model(**{**inputs, "input_ids": out, "attention_mask": torch.ones_like(out)})
         answer = out[0, ids.shape[1] :].tolist()
+        logits = forward.logits[0, ids.shape[1] - 1 : -1].float().cpu().numpy()
+        check_answer(answer, logits, f"{images}")
         item = {
             "images": images,
             "image_splitting": image_splitting,
@@ -93,7 +96,7 @@ def reference(
             "prompt": ids[0].cpu().numpy(),
             "answer": answer,
             "embeds": captured["embeds"],  # [S, H]: text and image features, prompt + answer
-            "logits": logits.logits[0, ids.shape[1] - 1 : -1].float().cpu().numpy(),
+            "logits": logits,
             "text": processor.tokenizer.decode(answer, skip_special_tokens=True),
         }
         if pil:
