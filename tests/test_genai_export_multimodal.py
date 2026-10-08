@@ -200,6 +200,7 @@ def test_vl_genai_config(vl):
     model = json.loads((output_dir / "genai_config.json").read_text())["model"]
     assert model["type"] == "lfm2_vl"
     assert model["decoder"]["filename"] == "onnx/decoder_q4.onnx"
+    assert model["decoder"]["session_options"]["session.set_denormal_as_zero"] == "1"
     assert model["embedding"]["filename"] == "onnx/embeddings_fp16.onnx"
     assert model["vision"]["filename"] == "onnx/vision_encoder_q4.onnx"
     assert model["vision"]["max_num_patches"] == 1024
@@ -310,6 +311,7 @@ def test_audio_genai_config(audio):
     assert model["type"] == "lfm2_audio"
     assert model["audio_token_id"] == audio_export.AUDIO_TOKEN_ID
     assert not set(model["eos_token_id"]) & set(audio_export.MODALITY_SWITCH_TOKEN_IDS)
+    assert model["decoder"]["session_options"]["session.set_denormal_as_zero"] == "1"
     files = [
         model["decoder"]["filename"],
         model["embedding"]["filename"],
