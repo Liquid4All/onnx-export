@@ -136,7 +136,9 @@ exports/LFM2.5-VL-1.6B-ONNX/
 
 The q4 and q8 decoders have an int8 LM head. Both bundles load one int8 vision encoder (symmetric, block 128, fp32 activations); with int4 weights or int8 activations, some LFM2.5-VL-1.6B image tokens fall below 0.7 cosine.
 
-onnxruntime-genai resizes each image once instead of tiling it, as the upstream processor does with `do_image_splitting=False`. The image preprocessing follows the checkpoint's own processor (bilinear for LFM2.5-VL-450M/1.6B, bicubic for the others).
+Each image is resized once instead of tiled, as the upstream processor does with `do_image_splitting=False`. `lfm2-vl-infer` and `lfm2-compare` prepare the images with the checkpoint's own processor (`processor_config.json`) and hand the tensors to onnxruntime-genai (`liquidonnx.lfm2_vl.infer.CheckpointProcessor`).
+
+onnxruntime-genai's own image processor (`genai_processor_config.json`, behind `create_multimodal_processor()`) resizes the same way (bilinear for LFM2.5-VL-450M/1.6B, bicubic for the others), but it rejects a prompt whose tallest image is not also its widest, such as a wide photo with a tall one ("image_sizes reports 288x832, larger than the 704x352 pixel_values batch"). Other applications can build the inputs as `CheckpointProcessor` does: the Hugging Face processor's tensors under the names in `model.vision.inputs` of `genai_config.json`, plus `num_image_tokens`, through `generator.set_inputs`.
 
 ### 3.3 LFM2-MoE Mixture of Experts
 

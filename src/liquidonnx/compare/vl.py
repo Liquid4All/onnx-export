@@ -1,7 +1,8 @@
 """LFM2-VL exports against the PyTorch model.
 
-The reference runs with do_image_splitting=False, which is what onnxruntime-genai does: it resizes
-each image once instead of tiling it.
+The reference resizes each image once instead of tiling it (do_image_splitting=False), and so does
+the export's processor that makes the onnxruntime-genai inputs, as in lfm2-vl-infer
+(liquidonnx.lfm2_vl.infer.CheckpointProcessor).
 """
 
 import logging
@@ -9,7 +10,6 @@ import pathlib
 import time
 
 import numpy as np
-import onnxruntime_genai as og
 
 from liquidonnx.compare.metrics import (
     greedy,
@@ -23,6 +23,7 @@ from liquidonnx.compare.text import eos_ids
 from liquidonnx.embeddings import embed
 from liquidonnx.genai_runtime import generate, load_model
 from liquidonnx.lfm2_vl.export import PRECISIONS, bundle, genai_files
+from liquidonnx.lfm2_vl.infer import CheckpointProcessor
 from liquidonnx.quantize import get_total_model_size_mb
 from liquidonnx.session import cached_outputs, load_onnx_session
 
@@ -33,6 +34,8 @@ CASES = [
     (["cardinal.jpg"], "Describe this image in one sentence."),
     (["bluejay.jpg"], "What bird is this and what color is it?"),
     (["cardinal.jpg", "bluejay.jpg"], "Compare these two images."),
+    # onnxruntime-genai's own processor rejects these: the tall image is not also the widest
+    (["wide.jpg", "tall.jpg"], "Which bird is in each image?"),
     ([], "What is the capital of France? Answer in one sentence."),
 ]
 PIXEL_INPUTS = ("pixel_values", "pixel_attention_mask", "spatial_shapes")
@@ -157,11 +160,10 @@ def score_genai(
     export: pathlib.Path, precision: str, refs: list[dict], eos: set[int], ep: str
 ) -> dict:
     model = load_model(export, genai_files(precision), ep, tf32=False)
-    processor = model.create_multimodal_processor()
+    processor = CheckpointProcessor(export)
     answers, same_ids = [], 0
     for ref in refs:
-        paths = [str(ASSETS / f) for f in ref["images"]]
-        inputs = processor(ref["rendered"], images=og.Images.open(*paths) if paths else None)
+        inputs = processor(ref["rendered"], [str(ASSETS / f) for f in ref["images"]])
         ids = inputs["input_ids"].as_numpy()[0]
         same_ids += ids.tolist() == ref["prompt"].tolist()
         answer = generate(model, inputs, len(ref["answer"])).get_sequence(0)[len(ids) :]

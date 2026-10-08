@@ -33,6 +33,8 @@ from test_lfm2_audio.synthetic import write_wav as write_tone
 from tokenizers import Regex, Tokenizer, models, pre_tokenizers
 from transformers import AutoProcessor, Lfm2VlConfig, Lfm2VlForConditionalGeneration
 
+from liquidonnx.compare import has_errors
+from liquidonnx.compare import vl as compare_vl
 from liquidonnx.embeddings import QUANT_TABLE, TABLE, TOKEN_ID, embed
 from liquidonnx.genai_builder import Q4F32, export_decoder
 from liquidonnx.genai_runtime import generate, load_model
@@ -40,11 +42,13 @@ from liquidonnx.lfm2_audio import export as audio_export
 from liquidonnx.lfm2_audio.builder import depthformer_builder
 from liquidonnx.lfm2_audio.infer import AudioChat, chat_prompt, single_turn
 from liquidonnx.lfm2_vl import export as vl_export
-from liquidonnx.lfm2_vl.infer import VLChat
+from liquidonnx.lfm2_vl import infer as vl_infer
 from liquidonnx.session import decoder_inputs, initialize_cache, load_onnx_session, update_cache
 from liquidonnx.verify import compare_token_cosine
 
-IMAGE = pathlib.Path(__file__).parent / "test_lfm2_vl/assets/cardinal.jpg"
+ASSETS = pathlib.Path(__file__).parent / "test_lfm2_vl/assets"
+IMAGE = ASSETS / "cardinal.jpg"
+MIXED = (ASSETS / "wide.jpg", ASSETS / "tall.jpg")  # patch grids 18x52 and 44x22
 PRECISIONS = ["fp32", "fp16", "q8", "q4"]
 MIN_COSINE = {"fp32": 0.99999, "fp16": 0.9999, "q8": 0.999, "q4": 0.97}
 
@@ -173,12 +177,17 @@ def vl(tmp_path_factory):
     return model, processor, output_dir
 
 
-def vl_inputs(processor) -> dict:
-    """One image, resized once as onnxruntime-genai does (no tiling)."""
-    messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Hi"}]}]
-    text = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    image = Image.open(IMAGE).convert("RGB")
-    return processor(text=text, images=[image], return_tensors="pt", do_image_splitting=False)
+def vl_prompt(processor, images: tuple[pathlib.Path, ...]) -> str:
+    content = [*({"type": "image"} for _ in images), {"type": "text", "text": "Hi"}]
+    messages = [{"role": "user", "content": content}]
+    return processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+
+
+def vl_inputs(processor, images: tuple[pathlib.Path, ...] = (IMAGE,)) -> dict:
+    """The images resized once, as lfm2-vl-infer and onnxruntime-genai do (no tiling)."""
+    pil = [Image.open(path).convert("RGB") for path in images]
+    text = vl_prompt(processor, images)
+    return processor(text=text, images=pil, return_tensors="pt", do_image_splitting=False)
 
 
 def vl_features(output_dir: pathlib.Path, precision: str, inputs: dict) -> np.ndarray:
@@ -359,14 +368,26 @@ def test_vl_int8_vision_encoder(vl):
 
 
 def vl_genai_inputs(model: og.Model, processor) -> og.NamedTensors:
-    messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Hi"}]}]
-    prompt = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    prompt = vl_prompt(processor, (IMAGE,))
     return model.create_multimodal_processor()(prompt, images=og.Images.open(str(IMAGE)))
+
+
+def genai_answer(model, inputs: og.NamedTensors, max_new_tokens: int = 4):
+    """The greedy sequence and the logits of the prompt's last position."""
+    first = []
+
+    def step(generator):
+        if not first:
+            first.append(np.asarray(generator.get_output("logits"))[0, -1])
+
+    generator = generate(model, inputs, max_new_tokens, step)
+    return generator.get_sequence(0).tolist(), first[0]
 
 
 @pytest.mark.parametrize("precision", ["fp32", "q8", "q4"])
 def test_vl_genai_runtime(vl, precision: str):
-    """The lfm2_vl pipeline, loaded as the CLI does, against the same files in plain onnxruntime."""
+    """The lfm2_vl pipeline with genai's own processor, against the same files in plain
+    onnxruntime."""
     _, processor, output_dir = vl
     model = load_model(output_dir, vl_export.genai_files(precision))
 
@@ -375,20 +396,77 @@ def test_vl_genai_runtime(vl, precision: str):
     reference_inputs = vl_inputs(processor)
     assert genai_ids.tolist() == reference_inputs["input_ids"][0].tolist()
 
-    first = []
-
-    def step(generator):
-        if not first:
-            first.append(np.asarray(generator.get_output("logits"))[0, -1])
-
-    generator = generate(model, inputs, 4, step)
-    assert len(generator.get_sequence(0)) > len(genai_ids)
+    sequence, logits = genai_answer(model, inputs)
+    assert len(sequence) > len(genai_ids)
 
     # genai resizes the image with onnxruntime-extensions, so its pixels differ slightly.
     decoder = session(output_dir, vl_export.bundle(precision)["decoder"])
     embeds = vl_embeds(output_dir, precision, reference_inputs)
     expected = decoder.run(None, decoder_inputs(embeds, initialize_cache(decoder), 0))[0]
-    assert cosine(expected[0, -1], first[0]) >= 0.999
+    assert cosine(expected[0, -1], logits) >= 0.999
+
+
+@pytest.mark.parametrize("count", [0, 1], ids=["text", "image"])
+def test_vl_checkpoint_processor_matches_genai(vl, tmp_path, count: int):
+    """lfm2-vl-infer's inputs against genai's processor: the same names, dtypes, shapes and
+    values, pixels within 2/255 (std 0.5), and the same greedy answer; with genai's pixels, the
+    same logits."""
+    _, processor, output_dir = vl
+    png = tmp_path / "cardinal.png"
+    Image.open(IMAGE).save(png)  # decoded once: the two JPEG decoders differ by a few steps
+    paths = [str(png)] * count
+    model = load_model(output_dir, vl_export.genai_files("fp32"))
+    prompt = vl_prompt(processor, (png,) * count)
+    genai_inputs = model.create_multimodal_processor()(
+        prompt, images=og.Images.open(*paths) if paths else None
+    )
+    checkpoint_processor = vl_infer.CheckpointProcessor(output_dir)
+    inputs = checkpoint_processor(prompt, paths)
+
+    names = {"image_attention_mask": "pixel_attention_mask", "image_sizes": "spatial_shapes"}
+    expected = {names.get(n, n): genai_inputs[n].as_numpy() for n in genai_inputs.keys()}
+    actual = {name: inputs[name].as_numpy() for name in inputs.keys()}
+    assert sorted(actual) == sorted(expected)
+    for name, value in expected.items():
+        assert (actual[name].dtype, actual[name].shape) == (value.dtype, value.shape), name
+        if name == "pixel_values":
+            np.testing.assert_allclose(actual[name], value, atol=2 / 255 / 0.5)
+            assert np.abs(actual[name] - value).mean() < 1e-4
+        else:
+            np.testing.assert_array_equal(actual[name], value, err_msg=name)
+
+    sequence, logits = genai_answer(model, genai_inputs, 8)
+    assert genai_answer(model, inputs, 8)[0] == sequence
+
+    inputs = checkpoint_processor(prompt, paths)
+    if paths:
+        inputs["pixel_values"] = expected["pixel_values"]
+    np.testing.assert_array_equal(genai_answer(model, inputs)[1], logits)
+
+
+@pytest.mark.parametrize("precision", ["fp32", "q4"])
+def test_vl_checkpoint_processor_runs_mixed_aspect_images(vl, precision: str):
+    """A wide and a tall image, which genai's own processor rejects, against the same files in
+    plain onnxruntime given the Hugging Face features; at fp32 also against PyTorch."""
+    model, processor, output_dir = vl
+    genai_model = load_model(output_dir, vl_export.genai_files(precision))
+    inputs = vl_infer.CheckpointProcessor(output_dir)(
+        vl_prompt(processor, MIXED), [str(path) for path in MIXED]
+    )
+    assert inputs["spatial_shapes"].as_numpy().tolist() == [[18, 52], [44, 22]]
+    sequence, logits = genai_answer(genai_model, inputs)
+
+    reference_inputs = vl_inputs(processor, MIXED)
+    prompt_ids = reference_inputs["input_ids"][0].tolist()
+    assert sequence[: len(prompt_ids)] == prompt_ids
+    decoder = session(output_dir, vl_export.bundle(precision)["decoder"])
+    embeds = vl_embeds(output_dir, precision, reference_inputs)
+    expected = decoder.run(None, decoder_inputs(embeds, initialize_cache(decoder), 0))[0]
+    np.testing.assert_allclose(logits, expected[0, -1], atol=1e-5)
+    if precision == "fp32":
+        with torch.no_grad():
+            pytorch = model(**reference_inputs).logits[0, -1].numpy()
+        np.testing.assert_allclose(logits, pytorch, atol=1e-4)
 
 
 @pytest.mark.parametrize("precision", ["fp32", "q4"])
@@ -401,20 +479,35 @@ def test_vl_genai_continues_after_an_image_token(vl, precision: str):
 
 def test_vl_chat_keeps_images(vl, monkeypatch):
     """lfm2-vl-infer re-sends an image with every turn after the one it came with."""
-    chat = VLChat(vl[2])
-    prompts, processor = [], chat.processor
+    chat = vl_infer.VLChat(vl[2])
+    sent = []
 
-    def record(prompt, images=None):
-        prompts.append(prompt)
-        return processor(prompt, images=images)
+    def record(model, inputs, *args):
+        sent.append(
+            (inputs["pixel_values"].as_numpy().shape[0], inputs["num_image_tokens"].as_numpy()[0])
+        )
+        return generate(model, inputs, *args)
 
-    monkeypatch.setattr(chat, "processor", record)
+    monkeypatch.setattr(vl_infer, "generate", record)
     chat.attach([str(IMAGE)])
     chat.send("Hi", 4, stream=False)
     chat.send("And now?", 4, stream=False)
 
-    assert [prompt.count("<image>") for prompt in prompts] == [1, 1]
+    assert sent == [(1, 234), (1, 234)]
     assert chat.images() == [str(IMAGE)]
+
+
+def test_vl_compare_scores_every_case(vl):
+    """lfm2-compare vl on the tiny export: every case through plain onnxruntime and
+    onnxruntime-genai, the mixed-aspect one included."""
+    _, _, output_dir = vl
+    refs = compare_vl.reference(output_dir.parent / "checkpoint", 4, "cpu")
+    assert [path.name for path in MIXED] in [ref["images"] for ref in refs]
+    row = compare_vl.score(output_dir, "fp32", refs, True, "cpu")
+    assert not has_errors(row), row
+    assert row["genai"]["prompt_ids_equal"] == f"{len(refs)}/{len(refs)}"
+    assert row["genai"]["greedy"] == row["decoder"]["greedy"]
+    assert row["vision"]["cosine_min"] >= MIN_COSINE["fp32"]
 
 
 def pre_tokenize(pattern: str, text: str) -> list[str]:
