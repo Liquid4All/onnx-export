@@ -114,8 +114,8 @@ def istft_same_padding(spectrum: np.ndarray, n_fft: int, hop_length: int) -> np.
 class Detokenizer:
     """audio_detokenizer.onnx plus the inverse STFT: audio codes -> waveform."""
 
-    def __init__(self, path: pathlib.Path):
-        self.session = load_onnx_session(path)
+    def __init__(self, path: pathlib.Path, ep: str = "cpu"):
+        self.session = load_onnx_session(path, ep)
 
     def __call__(self, codes: np.ndarray) -> np.ndarray:
         # genai drops end-of-audio frames; codebooks 1-7 can still sample 2048, past the table's 2047.
@@ -143,7 +143,7 @@ class AudioChat:
         self.tokenizer = og.Tokenizer(self.model)
         self.processor = self.model.create_multimodal_processor()
         files = bundle(precision or default_precision(model_dir))
-        self.detokenizer = Detokenizer(model_dir / "onnx" / files["detokenizer"])
+        self.detokenizer = Detokenizer(model_dir / "onnx" / files["detokenizer"], ep)
 
     def answer(
         self,

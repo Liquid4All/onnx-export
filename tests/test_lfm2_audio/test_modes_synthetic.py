@@ -12,6 +12,8 @@ import pathlib
 import numpy as np
 import pytest
 
+from liquidonnx.genai_runtime import load_model
+from liquidonnx.lfm2_audio import infer
 from liquidonnx.lfm2_audio.infer import (
     AUDIO_MARKER,
     HOP_LENGTH,
@@ -23,6 +25,7 @@ from liquidonnx.lfm2_audio.infer import (
     single_turn,
     write_wav,
 )
+from liquidonnx.session import load_onnx_session
 
 from .synthetic import build_model_dir
 from .synthetic import write_wav as write_tone
@@ -70,6 +73,23 @@ def test_detokenizer_waveform(model_dir, tmp_path):
 
     write_wav(str(tmp_path / "out.wav"), wave)
     assert (tmp_path / "out.wav").stat().st_size > 2 * len(wave)
+
+
+def test_chat_passes_its_ep_to_the_detokenizer(model_dir, monkeypatch):
+    """--ep reaches the detokenizer as well as onnxruntime-genai (both still load on CPU here)."""
+    eps = []
+
+    def on_cpu(load):
+        def recorded(*args):
+            eps.append(args[-1])
+            return load(*args[:-1])
+
+        return recorded
+
+    monkeypatch.setattr(infer, "load_model", on_cpu(load_model))
+    monkeypatch.setattr(infer, "load_onnx_session", on_cpu(load_onnx_session))
+    AudioChat(model_dir, ep="cuda")
+    assert eps == ["cuda", "cuda"]
 
 
 @pytest.mark.parametrize(

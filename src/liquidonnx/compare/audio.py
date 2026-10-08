@@ -130,7 +130,7 @@ def reference(checkpoint: pathlib.Path, max_new: int) -> list[dict]:
 
 def score_decoder(path: pathlib.Path, refs: list[dict]) -> dict:
     """The decoder fed liquid-audio's embeddings of the text-only answers."""
-    session = load_onnx_session(path, ["CPUExecutionProvider"])
+    session = load_onnx_session(path)
     forced, hidden_diff = [], 0.0
     for ref in refs:
         if "embeds" not in ref:

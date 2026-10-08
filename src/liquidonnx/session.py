@@ -15,7 +15,10 @@ import onnxruntime as ort
 logger = logging.getLogger(__name__)
 
 
-_cuda_works = None  # Cache CUDA availability check
+SESSION_PROVIDERS = {
+    "cpu": ["CPUExecutionProvider"],
+    "cuda": ["CUDAExecutionProvider", "CPUExecutionProvider"],
+}
 
 
 def preload_cuda_libraries():
@@ -30,75 +33,25 @@ def preload_cuda_libraries():
         preload()
 
 
-def get_providers() -> list[str]:
-    """Get available execution providers, preferring CUDA if it works."""
-    global _cuda_works
+def load_onnx_session(path: pathlib.Path, ep: str = "cpu") -> ort.InferenceSession:
+    """The graph at path on an execution provider of SESSION_PROVIDERS.
 
-    available = ort.get_available_providers()
-    if "CUDAExecutionProvider" not in available:
-        return ["CPUExecutionProvider"]
-
-    # Check if CUDA actually works (cuDNN available, etc.)
-    if _cuda_works is None:
-        preload_cuda_libraries()
-        try:
-            # Create a minimal session to test CUDA
-            import tempfile
-
-            from onnx import TensorProto, helper
-
-            # Minimal valid ONNX model (use IR version 8 for compatibility)
-            X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
-            Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
-            node = helper.make_node("Identity", ["X"], ["Y"])
-            graph = helper.make_graph([node], "test", [X], [Y])
-            model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
-            model.ir_version = 8
-
-            with tempfile.NamedTemporaryFile(suffix=".onnx", delete=True) as f:
-                import onnx
-
-                onnx.save(model, f.name)
-                ort.InferenceSession(f.name, providers=["CUDAExecutionProvider"])
-            _cuda_works = True
-            logger.info("CUDA execution provider available")
-        except Exception as e:
-            _cuda_works = False
-            logger.info(f"CUDA not available, using CPU: {e}")
-
-    if _cuda_works:
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    return ["CPUExecutionProvider"]
-
-
-def load_onnx_session(
-    path: pathlib.Path, providers: list[str] | None = None
-) -> ort.InferenceSession:
-    """Load ONNX model as inference session.
-
-    Args:
-        path: Path to ONNX model
-        providers: Execution providers to use. If None, auto-detects (CUDA if available, else CPU).
-
-    Returns:
-        ONNX Runtime InferenceSession
+    onnxruntime runs on CPU when the CUDA EP fails to load, so a CUDA session without it fails.
     """
     if not path.exists():
         raise FileNotFoundError(f"ONNX file not found: {path}")
-    if providers is None:
-        providers = get_providers()  # preloads the CUDA libraries before probing CUDA
-    elif "CUDAExecutionProvider" in providers:
+    if ep == "cuda":
         preload_cuda_libraries()
-
-    # Try with preferred providers, fallback to CPU if CUDA fails
-    try:
-        logger.info(f"Loading {path.name} with {providers[0]}...")
-        return ort.InferenceSession(str(path), providers=providers)
-    except Exception as e:
-        if "CUDAExecutionProvider" in providers and "CPUExecutionProvider" in providers:
-            logger.warning(f"CUDA failed ({e}), falling back to CPU...")
-            return ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
-        raise
+    logger.info(f"Loading {path.name} ({ep})...")
+    session = ort.InferenceSession(str(path), providers=SESSION_PROVIDERS[ep])
+    provider = SESSION_PROVIDERS[ep][0]
+    if provider not in session.get_providers():
+        raise RuntimeError(
+            f"onnxruntime {ort.__version__} ran {path.name} without {provider} (available: "
+            f"{', '.join(ort.get_available_providers())}); CUDA needs onnxruntime-gpu and the "
+            "CUDA and cuDNN libraries, see onnxruntime's log above"
+        )
+    return session
 
 
 ONNX_TYPE_TO_NUMPY = {
