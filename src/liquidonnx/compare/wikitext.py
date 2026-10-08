@@ -100,13 +100,13 @@ BASELINES = {
         "q4f16": (0.2022, 0.0053),
     },
     "LFM2.5-VL-450M": {
-        "q4": (0.0658, 0.0015),
-        "q8": (0.001139, 0.000033),
+        "q4": (0.0643, 0.0014),
+        "q8": (0.001411, 0.000058),
         "fp16": (1.315e-5, 2.6e-7),
     },
     "LFM2.5-Audio-1.5B": {
         "q4": (0.03200, 0.00057),
-        "q8": (0.0003891, 0.0000050),
+        "q8": (0.0003947, 0.0000056),
         "fp16": (5.444e-6, 1.12e-7),
     },
 }
@@ -396,10 +396,11 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
         parser.error(f"{args.reference} does not exist")
 
     config = json.loads((args.export / "genai_config.json").read_text())["model"]
+    family = PRECISIONS
+    if "embedding" in config:
+        family = ("fp32", *(audio_export if "speech" in config else vl_export).PRECISIONS)
     exported = [
-        p
-        for p in PRECISIONS
-        if all(f.exists() for f in export_files(args.export, config, p).values())
+        p for p in family if all(f.exists() for f in export_files(args.export, config, p).values())
     ]
     if args.precision:
         precisions = args.precision

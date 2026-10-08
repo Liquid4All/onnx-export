@@ -29,10 +29,11 @@ MODELS = [
 
 PROMPTS = ["Hello, how are you?", "The quick brown fox", "Describe this image:"]
 
-# (file, tolerance key): the fp32 table, and the fp16 one every quantized precision uses
+# (file, tolerance key): the fp32 and fp16 tables, and the int8 one q4 and q8 use
 EMBEDDINGS = [
     pytest.param("embeddings.onnx", None, id="fp32"),
     pytest.param("embeddings_fp16.onnx", "fp16", id="fp16"),
+    pytest.param("embeddings_q8.onnx", "q8", id="q8"),
 ]
 
 

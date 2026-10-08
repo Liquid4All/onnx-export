@@ -23,7 +23,7 @@ from test_lfm2_audio.synthetic import HIDDEN, build_model_dir
 from tokenizers import Regex, Tokenizer, models, pre_tokenizers
 from transformers import AutoProcessor, Lfm2VlConfig, Lfm2VlForConditionalGeneration
 
-from liquidonnx.embeddings import embed
+from liquidonnx.embeddings import QUANT_TABLE, TABLE, TOKEN_ID, embed
 from liquidonnx.genai_builder import Q4F32, Q8, export_decoder
 from liquidonnx.genai_runtime import generate, load_model
 from liquidonnx.lfm2_audio import export as audio_export
@@ -45,6 +45,37 @@ def session(output_dir: pathlib.Path, filename: str):
 
 def cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float((a * b).sum() / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+
+def initializers(path: pathlib.Path) -> dict[str, np.ndarray]:
+    graph = onnx.load(str(path)).graph
+    return {init.name: onnx.numpy_helper.to_array(init) for init in graph.initializer}
+
+
+def signature(session) -> list[tuple]:
+    return [(v.name, v.type, v.shape) for v in [*session.get_inputs(), *session.get_outputs()]]
+
+
+def check_int8_embeddings(output_dir: pathlib.Path):
+    """The q4 and q8 embedding model against the fp32 one: the same I/O, each looked-up value
+    within half an int8 step (blocks of 32 along H) of the fp32 table, features passed through."""
+    fp32 = initializers(output_dir / "onnx/embeddings.onnx")
+    int8 = initializers(output_dir / "onnx/embeddings_q8.onnx")
+    table, token_id = fp32[TABLE], int(fp32[TOKEN_ID])
+    assert TABLE not in int8
+    assert (int8[QUANT_TABLE[0]].dtype, int8[QUANT_TABLE[0]].shape) == (np.uint8, table.shape)
+
+    quantized = session(output_dir, "embeddings_q8.onnx")
+    assert signature(quantized) == signature(session(output_dir, "embeddings.onnx"))
+
+    features = np.random.default_rng(0).standard_normal((1, table.shape[1])).astype(np.float32)
+    actual = embed(quantized, np.arange(len(table))[None], features)[0]
+    np.testing.assert_array_equal(actual[token_id], features[0])
+
+    blocks = table.reshape(len(table), -1, 32)
+    half_step = np.repeat((blocks.max(-1) - blocks.min(-1)) / 255 / 2, 32, axis=1)
+    within = np.abs(actual - table) <= half_step + 1e-6
+    assert np.delete(within, token_id, axis=0).all()
 
 
 # === VL ===
@@ -218,7 +249,7 @@ def test_vl_genai_config(vl):
     assert model["type"] == "lfm2_vl"
     assert model["decoder"]["filename"] == "onnx/decoder_q4.onnx"
     assert model["decoder"]["session_options"]["session.set_denormal_as_zero"] == "1"
-    assert model["embedding"]["filename"] == "onnx/embeddings_fp16.onnx"
+    assert model["embedding"]["filename"] == "onnx/embeddings_q8.onnx"
     assert model["vision"]["filename"] == "onnx/vision_encoder_q4.onnx"
     assert model["vision"]["max_num_patches"] == 1024
     for section in ("decoder", "embedding", "vision"):
@@ -232,6 +263,10 @@ def test_vl_genai_config(vl):
     )
     assert resize["interpolation"] == "LINEAR"  # LFM2.5-VL-1.6B resamples bilinearly
     assert (resize["min_pixels"], resize["max_pixels"]) == (64 * 32**2, 256 * 32**2)
+
+
+def test_vl_int8_embeddings(vl):
+    check_int8_embeddings(vl[2])
 
 
 @pytest.mark.parametrize("precision", ["fp32", "q8", "q4"])
@@ -341,7 +376,7 @@ def test_audio_genai_config(audio):
     ]
     assert files == [
         "onnx/decoder_q4.onnx",
-        "onnx/embeddings_fp16.onnx",
+        "onnx/embeddings_q8.onnx",
         "onnx/audio_encoder_q4.onnx",
         "onnx/vocoder_depthformer_fp16.onnx",
         "onnx/audio_embedding_fp16.onnx",
@@ -405,6 +440,17 @@ def test_audio_embeddings_scatter_features(audio):
     expected = table[input_ids[0]].copy()
     expected[2:5] = features
     np.testing.assert_array_equal(embed(embeddings, input_ids, features)[0], expected)
+
+
+def test_audio_int8_embeddings(audio):
+    check_int8_embeddings(audio)
+
+
+def test_audio_fp32_embeddings_keep_a_plain_gather(audio):
+    """olive-recipes' audio export renames this graph's first Gather and quantizes its table."""
+    graph = onnx.load(str(audio / "onnx/embeddings.onnx"), load_external_data=False).graph
+    assert next(node for node in graph.node if node.op_type == "Gather").input[0] == TABLE
+    assert all(node.domain == "" for node in graph.node)
 
 
 @pytest.mark.parametrize("precision", ["fp16", "q8", "q4"])

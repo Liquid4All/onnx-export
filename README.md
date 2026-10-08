@@ -115,7 +115,8 @@ exports/LFM2.5-VL-1.6B-ONNX/
     ├── decoder.onnx             # fp32 decoder (inputs_embeds in); decoder_{fp16,q4,q8}.onnx
     ├── vision_encoder.onnx      # SigLIP2 + projector; vision_encoder_{fp16,q4,q8}.onnx
     ├── embeddings.onnx          # token table + image feature scatter
-    └── embeddings_fp16.onnx     # fp16 table, used with fp16, q4 and q8
+    ├── embeddings_fp16.onnx     # fp16 table, used with fp16
+    └── embeddings_q8.onnx       # int8 table, used with q4 and q8
 ```
 
 The q4 and q8 decoders have an int8 LM head.
@@ -149,7 +150,7 @@ exports/LFM2.5-Audio-1.5B-ONNX/
 ├── config.json, tokenizer.json, tokenizer_config.json
 └── onnx/
     ├── decoder.onnx             # fp32 decoder (inputs_embeds in, logits + hidden_states out)
-    ├── embeddings.onnx          # token table + audio feature scatter (embeddings_fp16.onnx too)
+    ├── embeddings.onnx          # token table + audio feature scatter (embeddings_{fp16,q8}.onnx too)
     ├── audio_encoder.onnx       # Conformer speech encoder
     ├── audio_embedding.onnx     # audio codes -> decoder input
     ├── vocoder_depthformer.onnx # decoder hidden state -> frame of 8 audio codes
@@ -157,7 +158,7 @@ exports/LFM2.5-Audio-1.5B-ONNX/
     └── ...                      # {graph}_{fp16,q4,q8}.onnx; embed_tokens.bin, mel_config.json for web runtimes
 ```
 
-The q4 and q8 decoders have an int8 LM head. Their configs keep the depthformer and audio embedding at fp16, because a quantized depthformer changes most audio codes.
+The q4 and q8 decoders have an int8 LM head, and their bundles an int8 token table. Their configs keep the depthformer and audio embedding at fp16, because a quantized depthformer changes most audio codes.
 
 ## 4. Inference
 
