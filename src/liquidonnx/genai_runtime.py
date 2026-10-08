@@ -18,6 +18,8 @@ import numpy as np
 import onnxruntime_genai as og
 from packaging.version import Version
 
+from liquidonnx.session import preload_cuda_libraries
+
 logger = logging.getLogger(__name__)
 
 EXECUTION_PROVIDERS = ("cpu", "cuda")
@@ -59,6 +61,8 @@ def load_model(model_dir: pathlib.Path, files: dict | None = None, ep: str = "cp
     if ep != "cpu":
         config.clear_providers()
         config.append_provider(ep)
+    if ep == "cuda":
+        preload_cuda_libraries()
     logger.info(f"Loading {model_dir} ({ep}) with onnxruntime-genai {og.__version__}...")
     return og.Model(config)
 

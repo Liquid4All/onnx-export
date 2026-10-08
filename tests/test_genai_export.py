@@ -15,6 +15,8 @@ import shutil
 
 import numpy as np
 import onnx
+import onnxruntime as ort
+import onnxruntime_genai as og
 import pytest
 import torch
 from transformers import (
@@ -27,11 +29,23 @@ from transformers import (
 
 from liquidonnx.compare.metrics import greedy
 from liquidonnx.genai_builder import export_decoder
-from liquidonnx.genai_runtime import check_genai_version, generate, load_model
+from liquidonnx.genai_runtime import (
+    EXECUTION_PROVIDERS,
+    check_genai_version,
+    generate,
+    load_model,
+)
 from liquidonnx.lfm2.export import ALL_PRECISIONS, genai_files, model_file, set_default_decoder
 from liquidonnx.quantize import derive_precision
-from liquidonnx.session import cached_outputs, decoder_inputs, initialize_cache, load_onnx_session
+from liquidonnx.session import (
+    cached_outputs,
+    decoder_inputs,
+    initialize_cache,
+    load_onnx_session,
+    preload_cuda_libraries,
+)
 
+CPU_EP, CUDA_EP = "CPUExecutionProvider", "CUDAExecutionProvider"
 TOKENS = np.array([[1, 5, 77, 300, 42, 9, 128, 64, 3, 250]], dtype=np.int64)
 HEAD_SIZE = 16
 COMMON = {
@@ -208,3 +222,41 @@ def test_genai_version_floor():
             check_genai_version(version)
     for version in ("0.17.1", "0.18.0-dev"):
         check_genai_version(version)
+
+
+@pytest.mark.parametrize("ep", EXECUTION_PROVIDERS)
+def test_load_model_preloads_cuda_libraries(export, ep: str, monkeypatch):
+    """--ep cuda loads the CUDA libraries before the model, --ep cpu does not."""
+    calls = []
+    monkeypatch.setattr(ort, "preload_dlls", lambda: calls.append("preload"))
+    monkeypatch.setattr(og, "Model", lambda config: calls.append("model"))
+    load_model(export[2], ep=ep)
+    assert calls == {"cpu": ["model"], "cuda": ["preload", "model"]}[ep]
+
+
+@pytest.mark.parametrize(
+    ("available", "providers", "expected"),
+    [
+        ([CPU_EP], None, [CPU_EP]),
+        ([CUDA_EP, CPU_EP], None, ["preload", CUDA_EP, CUDA_EP]),  # the CUDA probe, the session
+        ([CUDA_EP, CPU_EP], [CPU_EP], [CPU_EP]),
+        ([CUDA_EP, CPU_EP], [CUDA_EP, CPU_EP], ["preload", CUDA_EP]),
+    ],
+)
+def test_sessions_preload_cuda_libraries(available, providers, expected, monkeypatch, tmp_path):
+    """Single-graph sessions load the CUDA libraries before any CUDA session, and only then."""
+    calls = []
+    monkeypatch.setattr(ort, "preload_dlls", lambda: calls.append("preload"))
+    monkeypatch.setattr(ort, "get_available_providers", lambda: available)
+    monkeypatch.setattr(ort, "InferenceSession", lambda path, providers: calls.append(providers[0]))
+    monkeypatch.setattr("liquidonnx.session._cuda_works", None)
+    path = tmp_path / "model.onnx"
+    path.touch()
+    load_onnx_session(path, providers)
+    assert calls == expected
+
+
+def test_preload_cuda_libraries_without_preload_dlls(monkeypatch):
+    """onnxruntime-gpu releases without preload_dlls still load models."""
+    monkeypatch.delattr(ort, "preload_dlls")
+    preload_cuda_libraries()
