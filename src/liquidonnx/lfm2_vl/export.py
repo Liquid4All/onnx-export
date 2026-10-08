@@ -41,8 +41,6 @@ import json
 import logging
 import pathlib
 
-import onnx
-
 from liquidonnx import remote_code_enabled
 from liquidonnx.embeddings import build_embeddings, embeddings_to_fp16
 from liquidonnx.export_cli import (
@@ -56,9 +54,8 @@ from liquidonnx.genai_builder import export_decoder
 from liquidonnx.lfm2_vl.builder import LFM2VLConfig, VisionEmbedBuilder
 from liquidonnx.quantize import (
     DEFAULT_BLOCK_SIZE,
+    convert_to_fp16,
     derive_precision,
-    get_total_model_size_mb,
-    load_model,
     quantize_model,
     save_model,
 )
@@ -94,50 +91,6 @@ def bundle(precision: str) -> dict[str, str]:
 def genai_files(precision: str) -> dict:
     """genai_config.json model entries that load one precision."""
     return {name: {"filename": f"onnx/{file}"} for name, file in bundle(precision).items()}
-
-
-def convert_vision_to_fp16(input_path: pathlib.Path, output_path: pathlib.Path) -> pathlib.Path:
-    """fp16 vision encoder with fp32 inputs and outputs."""
-    from onnxruntime.transformers.float16 import convert_float_to_float16
-
-    logger.info(f"Converting {input_path.name} to FP16...")
-    model = load_model(input_path)
-
-    # The converter casts the empty roi/scales inputs of Resize, which breaks shape inference;
-    # restore them after conversion.
-    resize_orig_inputs = {n.name: list(n.input) for n in model.graph.node if n.op_type == "Resize"}
-    empty_initializers = {}
-    for init in model.graph.initializer:
-        if "empty" in init.name.lower():
-            empty_initializers[init.name] = onnx.TensorProto()
-            empty_initializers[init.name].CopyFrom(init)
-
-    # disable_shape_infer=True is required for models with com.microsoft custom ops
-    model_fp16 = convert_float_to_float16(
-        model, keep_io_types=True, force_fp16_initializers=True, disable_shape_infer=True
-    )
-
-    for node in model_fp16.graph.node:
-        orig_inputs = resize_orig_inputs.get(node.name) if node.op_type == "Resize" else None
-        if not orig_inputs:
-            continue
-        for index in (1, 2):  # roi, scales
-            if (
-                len(node.input) > index
-                and len(orig_inputs) > index
-                and "cast" in node.input[index].lower()
-                and "empty" in orig_inputs[index].lower()
-            ):
-                node.input[index] = orig_inputs[index]
-    for init in model_fp16.graph.initializer:
-        if init.name in empty_initializers:
-            init.CopyFrom(empty_initializers[init.name])
-
-    save_model(model_fp16, output_path)
-    orig_mb = get_total_model_size_mb(input_path)
-    fp16_mb = get_total_model_size_mb(output_path)
-    logger.info(f"  {input_path.name}: {orig_mb:.1f} -> {fp16_mb:.1f} MB")
-    return output_path
 
 
 def export_vl_model(model_path: str, output_dir: pathlib.Path):
@@ -211,7 +164,7 @@ def derive_precision_files(
 
     vision = onnx_dir / files["vision"]
     if precision == "fp16":
-        convert_vision_to_fp16(onnx_dir / "vision_encoder.onnx", vision)
+        convert_to_fp16(onnx_dir / "vision_encoder.onnx", vision, keep_io=True)
     else:
         bits = int(precision[1])
         quantize_model(
