@@ -5,7 +5,8 @@ An export folder is an onnxruntime-genai model: genai_config.json names the grap
 precision, and every other precision is loaded by overlaying its file names (each family's
 export module has genai_files(precision)).
 
-Expects onnxruntime-genai built from liquidonnx.genai_builder.GENAI_COMMIT (see README).
+Needs onnxruntime-genai 0.17.1 or later (PyPI), or a build of main; CI tests the build of main at
+liquidonnx.genai_builder.GENAI_COMMIT (see README).
 """
 
 import json
@@ -15,10 +16,12 @@ from collections.abc import Callable
 
 import numpy as np
 import onnxruntime_genai as og
+from packaging.version import Version
 
 logger = logging.getLogger(__name__)
 
 EXECUTION_PROVIDERS = ("cpu", "cuda")
+GENAI_MIN_VERSION = Version("0.17.1")  # tested release; 0.17.0 added lfm2_moe, lfm2_vl, lfm2_audio
 
 
 def _filenames(entries: dict) -> list[str]:
@@ -31,8 +34,22 @@ def _filenames(entries: dict) -> list[str]:
     return names
 
 
+def check_genai_version(version: str):
+    """Fail on an onnxruntime-genai release older than GENAI_MIN_VERSION.
+
+    Builds of main report a dev version (e.g. 0.18.0-dev) and pass.
+    """
+    parsed = Version(version)
+    if not parsed.is_devrelease and parsed < GENAI_MIN_VERSION:
+        raise RuntimeError(
+            f"liquidonnx needs onnxruntime-genai {GENAI_MIN_VERSION} or later, or a build of main; "
+            f"found {version}. Run `uv sync` or see the README."
+        )
+
+
 def load_model(model_dir: pathlib.Path, files: dict | None = None, ep: str = "cpu") -> og.Model:
     """The export at model_dir; files replaces genai_config.json model entries (a precision)."""
+    check_genai_version(og.__version__)
     config = og.Config(str(model_dir))
     if files:
         missing = [f for f in _filenames(files) if not (model_dir / f).exists()]

@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "onnx>=1.22.0",
     "onnxruntime>=1.30.0",  # Audio graphs verified against 1.30; the old nightly index had no macOS wheels
-    "onnxruntime-genai>=0.16.0",  # Placeholder; build main at GENAI_COMMIT (README)
+    "onnxruntime-genai>=0.17.1",  # 0.17 added lfm2_moe/vl/audio; CI tests main at GENAI_COMMIT
     "transformers>=5.17.0",
     "numpy>=2.2.0,<2.6",  # numba (via librosa) requires numpy < 2.6
     "torch>=2.0.0",
@@ -16,6 +16,7 @@ dependencies = [
     "onnx-ir>=1.0.0",
     "scipy>=1.12.0",  # WAV output of lfm2-audio-infer
     "onnxscript>=0.7.2",
+    "packaging",  # onnxruntime-genai version check in genai_runtime
 ]
 
 [project.optional-dependencies]

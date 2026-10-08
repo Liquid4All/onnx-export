@@ -6,7 +6,6 @@ import pathlib
 
 import pytest
 import torch
-from helpers import require_genai
 
 from liquidonnx.lfm2_audio.export import bundle
 
@@ -36,7 +35,6 @@ def audio_chat(exports_dir: pathlib.Path):
     """precision -> AudioChat on exports/LFM2.5-Audio-1.5B-ONNX, loaded once per module."""
     from liquidonnx.lfm2_audio.infer import AudioChat
 
-    require_genai("lfm2_audio")
     model_dir = exports_dir / "LFM2.5-Audio-1.5B-ONNX"
     if not model_dir.exists():
         pytest.skip(

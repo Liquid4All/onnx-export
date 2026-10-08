@@ -16,7 +16,7 @@ import pathlib
 import numpy as np
 import onnxruntime_genai as og
 import pytest
-from helpers import generate_pytorch, generate_with_logits, get_export_dir, require_genai
+from helpers import generate_pytorch, generate_with_logits, get_export_dir
 from PIL import Image
 
 from liquidonnx.genai_runtime import load_model
@@ -101,7 +101,6 @@ def test_coherence(
     scenario: str,
     prompts: list[str],
 ):
-    require_genai("lfm2_vl")
     model_id, model, processor = pytorch_model
     export = get_export_dir(exports_dir, model_id)
     missing = [f for f in bundle(precision).values() if not (export / "onnx" / f).exists()]
