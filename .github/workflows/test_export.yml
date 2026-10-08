@@ -21,8 +21,8 @@ name: Test Export
 #
 # liquidonnx tracks onnxruntime-genai main: uv.lock installs the 0.17.1 release, but
 # the job builds onnxruntime-genai at the commit the model builder is pinned to
-# (liquidonnx.genai_builder.GENAI_COMMIT), cached per commit and onnxruntime version,
-# and runs every family on that build.
+# (liquidonnx.genai_builder.GENAI_COMMIT), cached per commit and header version,
+# and runs every family on that build, on the onnxruntime nightly uv.lock installs.
 #
 # Large checkpoints may exceed the runner's disk/RAM — keep to a small model
 # (the defaults export in a few minutes). CPU inference on a hosted runner is
@@ -71,6 +71,8 @@ concurrency:
 jobs:
   export:
     runs-on: ubuntu-latest
+    env:
+      ORT: '1.30.0'  # onnxruntime release whose headers the onnxruntime-genai build uses
     # Expose the inline smoke-test result so the `run-inference` gate can turn
     # it into its own pass/fail check without re-running anything.
     outputs:
@@ -90,13 +92,11 @@ jobs:
       - run: uv python install 3.12
       - run: uv sync
 
-      - name: Resolve the onnxruntime-genai commit and onnxruntime version
+      - name: Resolve the onnxruntime-genai commit
         id: genai
         run: |
           commit=$(uv run python -c 'from liquidonnx.genai_builder import GENAI_COMMIT; print(GENAI_COMMIT)')
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          ort=$(uv run python -c 'import onnxruntime; print(onnxruntime.__version__)')
-          echo "ort=$ort" >> "$GITHUB_OUTPUT"
 
       - name: Restore the onnxruntime-genai build
         id: genai-cache
@@ -104,17 +104,18 @@ jobs:
         with:
           path: genai-python
           # Bump the build<N> suffix whenever the build command below changes.
-          key: onnxruntime-genai-${{ runner.os }}-${{ steps.genai.outputs.commit }}-ort${{ steps.genai.outputs.ort }}-build1
+          key: onnxruntime-genai-${{ runner.os }}-${{ steps.genai.outputs.commit }}-ort${{ env.ORT }}-build1
 
       # The build leaves an importable Python package in build/Linux/Release/wheel (packaging
-      # the wheel itself needs pip). It runs on the onnxruntime from uv.lock, so it is built
-      # against that release's headers. build.py --parallel means an unbounded make -j, which
-      # runs the runner out of memory; CMAKE_BUILD_PARALLEL_LEVEL caps it at the core count.
+      # the wheel itself needs pip). It compiles against the headers of the onnxruntime
+      # release in ORT: the nightly in uv.lock has no GitHub release archive, and the build
+      # loads the venv's onnxruntime at run time. build.py --parallel means an unbounded
+      # make -j, which runs the runner out of memory; CMAKE_BUILD_PARALLEL_LEVEL caps it at
+      # the core count.
       - name: Build onnxruntime-genai
         if: steps.genai-cache.outputs.cache-hit != 'true'
         env:
           COMMIT: ${{ steps.genai.outputs.commit }}
-          ORT: ${{ steps.genai.outputs.ort }}
         run: |
           set -euo pipefail
           curl -sSfL "https://github.com/microsoft/onnxruntime/releases/download/v$ORT/onnxruntime-linux-x64-$ORT.tgz" | tar xz
@@ -136,7 +137,9 @@ jobs:
           echo "PYTHONPATH=$GITHUB_WORKSPACE/genai-python" >> "$GITHUB_ENV"
           PYTHONPATH="$GITHUB_WORKSPACE/genai-python" uv run python - "$GITHUB_WORKSPACE/genai-python/" <<'EOF'
           import sys
+          import onnxruntime as ort
           import onnxruntime_genai as og
+          print("onnxruntime", ort.__version__, ort.__file__)
           print("onnxruntime-genai", og.__version__, og.__file__)
           if not og.__file__.startswith(sys.argv[1]):
               sys.exit(f"onnxruntime_genai was not imported from {sys.argv[1]}")

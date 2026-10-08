@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 
 dependencies = [
     "onnx>=1.22.0",
-    "onnxruntime>=1.30.0",  # Audio graphs verified against 1.30; the old nightly index had no macOS wheels
+    "onnxruntime>=1.30.0",  # floor for pip installs; uv.lock pins a nightly ([tool.uv] below)
     "onnxruntime-genai>=0.17.1",  # 0.17 added lfm2_moe/vl/audio; CI tests main at GENAI_COMMIT
     "transformers>=5.17.0",
     "numpy>=2.2.0,<2.6",  # numba (via librosa) requires numpy < 2.6
@@ -53,6 +53,18 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/liquidonnx"]
+
+# The nightly's CPU QMoE kernels decode LFM2-MoE about 44x faster than 1.30.0.
+[tool.uv]
+override-dependencies = ["onnxruntime>=1.31.0.dev0"]
+
+[[tool.uv.index]]
+name = "ort-nightly"
+url = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/"
+explicit = true  # only the packages pinned in [tool.uv.sources] come from this feed
+
+[tool.uv.sources]
+onnxruntime = { index = "ort-nightly" }
 
 [tool.pytest.ini_options]
 addopts = "-s"
