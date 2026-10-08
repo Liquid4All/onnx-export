@@ -316,10 +316,12 @@ uv run lfm2-compare audio --model LiquidAI/LFM2.5-Audio-1.5B --export ./exports/
 
 `--device cuda` runs the reference, the ONNX sessions and onnxruntime-genai on the GPU with TF32 off, so fp32 stays fp32 (needs the CUDA packages in [2](#2-installation)). References are cached per device. `lfm2-compare vl --no-image-splitting` resizes each image once in the reference and in onnxruntime-genai instead of tiling it.
 
-`lfm2-compare wikitext` is the quality gate for quantized precisions. It scores them on wikitext-2 with the protocol of [olive-recipes #638](https://github.com/microsoft/olive-recipes/pull/638): 64 chunks of 512 tokens, the second half of each scored, KLD ± SE over the chunks and same-top %. The reference is an fp32 one in llama.cpp's KL-divergence base format, given with `--reference` or computed from `--model`. The command exits with 1 when a precision is above `--max-kld` or, for the LFM2.5 models it knows, above today's KLD + 2 SE. The ONNX sessions run 13 intra-op threads on any machine, the count the ceilings were measured at, because onnxruntime's CPU MoE kernel gives different scores at different thread counts; `--threads` overrides it. `--help` explains the token streams.
+`lfm2-compare wikitext` is the quality gate for quantized precisions. It scores them on wikitext-2 with the protocol of [olive-recipes #638](https://github.com/microsoft/olive-recipes/pull/638): 64 chunks of 512 tokens, the second half of each scored, KLD ± SE over the chunks and same-top %. The reference is an fp32 one in llama.cpp's KL-divergence base format, given with `--reference` or computed from `--model`. The command exits with 1 when a precision is above `--max-kld` or, for the LFM2.5 models it knows, above today's KLD + 2 SE on `--device`. The ceilings are per execution provider, because the CPU and CUDA kernels score differently: CPU gating covers q4 (and q4f32), and CUDA gating, measured on an H100 with TF32 off, covers q8, fp16 and q4f16. Each device scores those precisions by default; a precision without a ceiling on its device is reported as "no ceiling", not as a pass. The ONNX sessions run 13 intra-op threads on any machine, the count the ceilings were measured at, because onnxruntime's CPU MoE kernel gives different scores at different thread counts; `--threads` overrides it. `--help` explains the token streams.
 
 ```bash
 uv run lfm2-compare wikitext --export ./exports/LFM2.5-350M-ONNX --reference ref.kld
+uv run --no-sync lfm2-compare wikitext --export ./exports/LFM2.5-350M-ONNX --reference ref.kld \
+    --device cuda
 uv run lfm2-compare wikitext --export ./exports/LFM2.5-350M-ONNX --model LiquidAI/LFM2.5-350M \
     --text wikitext-2-raw/wiki.test.raw --reference-device cuda
 ```

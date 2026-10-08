@@ -20,8 +20,10 @@ Hugging Face tokenizers give exactly llama.cpp 4e7481175's stream for LFM2.5-350
 liquid-audio, so audio exports take --reference only.
 
 A precision fails, and the command exits with 1, when its KLD is above --max-kld or, without it,
-above its ceiling in BASELINES. The ONNX sessions run a fixed number of intra-op threads
-(--threads) on every machine, as the scores of MoE models depend on it.
+above its ceiling in BASELINES for --device: the CPU ceilings cover q4 and q4f32, the CUDA ones q8,
+fp16 and q4f16, and each device scores those by default. A precision without a ceiling on its
+device is reported as "no ceiling", not as a pass. The ONNX sessions run a fixed number of
+intra-op threads (--threads) on every machine, as the scores of MoE models depend on it.
 
 Usage:
     uv run lfm2-compare wikitext --export exports/LFM2.5-350M-ONNX \\
@@ -60,58 +62,57 @@ from liquidonnx.session import decoder_inputs, initialize_cache, load_onnx_sessi
 logger = logging.getLogger(__name__)
 
 PRECISIONS = ("fp32", "fp16", "q4", "q4f16", "q4f32", "q8")
-# Each device scores the precisions built for it unless --precision says otherwise.
-DEVICE_PRECISIONS = {"cpu": ("q4", "q4f32", "q8"), "cuda": ("fp16", "q4f16")}
+# Each device scores the precisions it has ceilings for unless --precision says otherwise.
+DEVICE_PRECISIONS = {"cpu": ("q4", "q4f32"), "cuda": ("q8", "fp16", "q4f16")}
 CHUNKS = 64  # llama-perplexity --chunks
 BATCH = 4  # chunks per forward pass of the reference model, as make_ref.py
 # onnxruntime's QMoE CPU kernel sums the experts in an order that depends on the intra-op thread
 # count, so MoE scores move with the machine's core count unless the count is fixed
 THREADS = 13
 
-# KLD ± SE against H100 fp32 references: q4, q4f32 and q8 on the CPU EP, fp16 and q4f16 on the
-# CUDA EP (q4f16 on onnxruntime-gpu 1.30.0). A precision fails above KLD + 2 SE. The text, MoE and
-# VL q4 rows, and the q4f16 rows converted from them, are the genai builder's k_quant build on the
-# locked onnxruntime nightly, which lacks onnxruntime#32814: with it, q4 scores 0.467 / 0.106 /
-# 0.146 / 0.187 on 350M / 1.2B / 2.6B / 8B. The other rows do not depend on #32814. The 8B-A1B q4
-# and q8 rows hold at THREADS (13) intra-op threads only: at 12, q4 scores +0.17%, and q8 scored
-# -2.9% before its LM head went int8.
+# KLD ± SE per device against H100 fp32 references: on the CPU EP of the locked onnxruntime
+# nightly, and on the H100's CUDA EP with TF32 off (onnxruntime-gpu 1.30.0). A row gates its own
+# device only: q8 scores 1.5x to 3.7x higher on the CPU, so a CPU ceiling would let a CUDA q8 grow
+# 1.7x to 4x unnoticed. A precision fails above KLD + 2 SE. The text, MoE and VL q4 rows, and the
+# q4f16 rows converted from them, are the genai builder's k_quant build on the locked onnxruntime
+# nightly, which lacks onnxruntime#32814: with it, q4 scores 0.467 / 0.106 / 0.146 / 0.187 on
+# 350M / 1.2B / 2.6B / 8B. The other rows do not depend on #32814. The 8B-A1B q4 and q8 rows hold
+# at THREADS (13) intra-op threads only (the CUDA EP leaves q8's int8 QMoE nodes to the CPU EP):
+# at 12 threads q4 scores +0.17%, at 4 CUDA q8 -0.3%.
 BASELINES = {
-    "LFM2.5-350M": {
-        "q4": (0.4896, 0.0120),
-        "q4f32": (0.7908, 0.0182),
-        "q8": (0.007649, 0.000163),
-        "q4f16": (0.4860, 0.0119),
-        "fp16": (4.372e-5, 9.6e-7),
+    "cpu": {
+        "LFM2.5-350M": {"q4": (0.4896, 0.0120), "q4f32": (0.7908, 0.0182)},
+        "LFM2.5-1.2B-Instruct": {"q4": (0.1537, 0.0131), "q4f32": (0.1584, 0.0107)},
+        "LFM2.5-2.6B": {"q4": (0.1657, 0.0041), "q4f32": (0.2310, 0.0051)},
+        "LFM2.5-8B-A1B": {"q4": (0.2103, 0.0060)},
+        "LFM2.5-VL-450M": {"q4": (0.0643, 0.0014)},
+        "LFM2.5-Audio-1.5B": {"q4": (0.03200, 0.00057)},
     },
-    "LFM2.5-1.2B-Instruct": {
-        "q4": (0.1537, 0.0131),
-        "q4f32": (0.1584, 0.0107),
-        "q8": (0.001866, 0.000144),
-        "q4f16": (0.1524, 0.0134),
-        "fp16": (1.636e-5, 3.9e-7),
-    },
-    "LFM2.5-2.6B": {
-        "q4": (0.1657, 0.0041),
-        "q4f32": (0.2310, 0.0051),
-        "q8": (0.002636, 0.000118),
-        "q4f16": (0.1638, 0.0040),
-        "fp16": (2.154e-5, 8.1e-7),
-    },
-    "LFM2.5-8B-A1B": {
-        "q4": (0.2103, 0.0060),
-        "q8": (0.02564, 0.00153),
-        # with weights_prepacked=0 on the QMoE nodes: without it the CUDA EP misreads the experts
-        "q4f16": (0.2022, 0.0053),
-    },
-    "LFM2.5-VL-450M": {
-        "q4": (0.0643, 0.0014),
-        "q8": (0.001411, 0.000058),
-        "fp16": (1.315e-5, 2.6e-7),
-    },
-    "LFM2.5-Audio-1.5B": {
-        "q4": (0.03200, 0.00057),
-        "q8": (0.0003947, 0.0000056),
-        "fp16": (5.444e-6, 1.12e-7),
+    "cuda": {
+        "LFM2.5-350M": {
+            "q8": (0.002742, 0.0000619),
+            "fp16": (4.372e-5, 9.6e-7),
+            "q4f16": (0.4860, 0.0119),
+        },
+        "LFM2.5-1.2B-Instruct": {
+            "q8": (0.0008429, 0.0000858),
+            "fp16": (1.636e-5, 3.9e-7),
+            "q4f16": (0.1524, 0.0134),
+        },
+        "LFM2.5-2.6B": {
+            "q8": (0.0009020, 0.0000365),
+            "fp16": (2.154e-5, 8.1e-7),
+            "q4f16": (0.1638, 0.0040),
+        },
+        "LFM2.5-8B-A1B": {
+            "q8": (0.01698, 0.00082),
+            # not deterministic on CUDA (0.00513 to 0.00565 over 8 runs): the worst run
+            "fp16": (0.00565, 0.000400),
+            # with weights_prepacked=0 on the QMoE nodes: without it the CUDA EP misreads the experts
+            "q4f16": (0.2022, 0.0053),
+        },
+        "LFM2.5-VL-450M": {"q8": (0.0003829, 0.0000093), "fp16": (1.315e-5, 2.6e-7)},
+        "LFM2.5-Audio-1.5B": {"q8": (0.0001238, 0.0000018), "fp16": (5.444e-6, 1.12e-7)},
     },
 }
 
@@ -286,13 +287,15 @@ def score(
     }
 
 
-def ceiling(names: list[str], precision: str, max_kld: float | None) -> float | None:
-    """--max-kld, else the first of names with a baseline for the precision: KLD + 2 SE."""
+def ceiling(names: list[str], device: str, precision: str, max_kld: float | None) -> float | None:
+    """--max-kld, else the first of names with a baseline for the precision on the device:
+    KLD + 2 SE."""
     if max_kld is not None:
         return max_kld
+    models = BASELINES.get(device, {})
     for name in names:
-        if precision in BASELINES.get(name, {}):
-            kld, se = BASELINES[name][precision]
+        if precision in models.get(name, {}):
+            kld, se = models[name][precision]
             return kld + 2 * se
     return None
 
@@ -314,7 +317,7 @@ def report(results: dict) -> str:
             lines.append(f"| {precision} | error: {row['error'][:120]} | | | | | FAIL |")
             continue
         limit = "—" if row["ceiling"] is None else f"{row['ceiling']:.4g}"
-        gate = {None: "—", True: "pass", False: "FAIL"}[row["pass"]]
+        gate = {None: "no ceiling", True: "pass", False: "FAIL"}[row["pass"]]
         lines.append(
             f"| {precision} | {row['kld_mean']:.4g} ± {row['kld_mean_err_chunks']:.2g} "
             f"| {row['same_top_pct']:.2f}% | {limit} | {row['size_mb']:.0f} "
@@ -377,7 +380,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--max-kld",
         type=float,
-        help="Fail any precision above this KLD (default: the model's ceilings, if known)",
+        help="Fail any precision above this KLD (default: the model's ceilings on --device, if "
+        "known)",
     )
     parser.add_argument(
         "--output",
@@ -473,8 +477,11 @@ def run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
         )
         row = guarded(score, files, reference, chunks, args.device, args.threads, dump)
         if "error" not in row:
-            row["ceiling"] = ceiling(names, precision, args.max_kld)
+            row["ceiling"] = ceiling(names, args.device, precision, args.max_kld)
             row["pass"] = None if row["ceiling"] is None else row["kld_mean"] <= row["ceiling"]
+            if row["ceiling"] is None:
+                known = ", ".join(dict.fromkeys(names))
+                logger.warning(f"{precision}: no {args.device} ceiling for {known}; not gated")
         results["rows"][precision] = row
         logger.info(f"{precision}: {json.dumps(row)}")
 
