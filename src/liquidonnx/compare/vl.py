@@ -1,8 +1,8 @@
 """LFM2-VL exports against the PyTorch model.
 
-The reference resizes each image once instead of tiling it (do_image_splitting=False), and so does
-the export's processor that makes the onnxruntime-genai inputs, as in lfm2-vl-infer
-(liquidonnx.lfm2_vl.infer.CheckpointProcessor).
+The reference splits large images into tiles plus a thumbnail when image_splitting says so
+(default: the checkpoint's do_image_splitting), and so does the export's processor that makes the
+onnxruntime-genai inputs, as in lfm2-vl-infer (liquidonnx.lfm2_vl.infer.CheckpointProcessor).
 """
 
 import logging
@@ -48,13 +48,17 @@ def precisions(export: pathlib.Path) -> list[str]:
     ]
 
 
-def reference(checkpoint: pathlib.Path, max_new: int, device: str) -> list[dict]:
+def reference(
+    checkpoint: pathlib.Path, max_new: int, device: str, image_splitting: bool | None = None
+) -> list[dict]:
     """Greedy answers, their logits, the merged input embeddings and the image features."""
     import torch
     from PIL import Image
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
     processor = AutoProcessor.from_pretrained(checkpoint)
+    if image_splitting is None:
+        image_splitting = processor.image_processor.do_image_splitting
     model = AutoModelForImageTextToText.from_pretrained(checkpoint, dtype=torch.float32)
     model = model.to(device).eval()
     captured = {}
@@ -73,7 +77,7 @@ def reference(checkpoint: pathlib.Path, max_new: int, device: str) -> list[dict]
         inputs = processor(
             text=rendered,
             return_tensors="pt",
-            do_image_splitting=False,
+            do_image_splitting=image_splitting,
             **({"images": pil} if pil else {}),
         ).to(device)
         ids = inputs["input_ids"]
@@ -84,6 +88,7 @@ def reference(checkpoint: pathlib.Path, max_new: int, device: str) -> list[dict]
         answer = out[0, ids.shape[1] :].tolist()
         item = {
             "images": images,
+            "image_splitting": image_splitting,
             "rendered": rendered,
             "prompt": ids[0].cpu().numpy(),
             "answer": answer,
@@ -160,7 +165,7 @@ def score_genai(
     export: pathlib.Path, precision: str, refs: list[dict], eos: set[int], ep: str
 ) -> dict:
     model = load_model(export, genai_files(precision), ep, tf32=False)
-    processor = CheckpointProcessor(export)
+    processor = CheckpointProcessor(export, refs[0]["image_splitting"])
     answers, same_ids = [], 0
     for ref in refs:
         inputs = processor(ref["rendered"], [str(ASSETS / f) for f in ref["images"]])
