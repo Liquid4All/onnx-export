@@ -35,6 +35,8 @@ from transformers import AutoProcessor, Lfm2VlConfig, Lfm2VlForConditionalGenera
 
 from liquidonnx.compare import has_errors
 from liquidonnx.compare import vl as compare_vl
+from liquidonnx.compare.metrics import greedy
+from liquidonnx.compare.text import eos_ids
 from liquidonnx.embeddings import QUANT_TABLE, TABLE, TOKEN_ID, embed
 from liquidonnx.genai_builder import Q4F32, export_decoder
 from liquidonnx.genai_runtime import generate, load_model
@@ -49,6 +51,10 @@ from liquidonnx.verify import compare_token_cosine
 ASSETS = pathlib.Path(__file__).parent / "test_lfm2_vl/assets"
 IMAGE = ASSETS / "cardinal.jpg"
 MIXED = (ASSETS / "wide.jpg", ASSETS / "tall.jpg")  # patch grids 18x52 and 44x22
+# Resized once, patch grids 26x36 and 44x22; split, the 1280x960 cardinal is 3x2 tiles of 32x32
+# patches plus its 26x36 thumbnail, and the 480x960 tall image is under the splitting threshold.
+TILED = (IMAGE, ASSETS / "tall.jpg")
+TILED_SHAPES = [[32, 32]] * 6 + [[26, 36], [44, 22]]
 PRECISIONS = ["fp32", "fp16", "q8", "q4"]
 MIN_COSINE = {"fp32": 0.99999, "fp16": 0.9999, "q8": 0.999, "q4": 0.97}
 
@@ -183,11 +189,13 @@ def vl_prompt(processor, images: tuple[pathlib.Path, ...]) -> str:
     return processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
 
 
-def vl_inputs(processor, images: tuple[pathlib.Path, ...] = (IMAGE,)) -> dict:
-    """The images resized once, as lfm2-vl-infer and onnxruntime-genai do (no tiling)."""
+def vl_inputs(
+    processor, images: tuple[pathlib.Path, ...] = (IMAGE,), image_splitting: bool = False
+) -> dict:
+    """The Hugging Face processor's inputs; resized once by default, as genai's processor does."""
     pil = [Image.open(path).convert("RGB") for path in images]
     text = vl_prompt(processor, images)
-    return processor(text=text, images=pil, return_tensors="pt", do_image_splitting=False)
+    return processor(text=text, images=pil, return_tensors="pt", do_image_splitting=image_splitting)
 
 
 def vl_features(output_dir: pathlib.Path, precision: str, inputs: dict) -> np.ndarray:
@@ -408,9 +416,9 @@ def test_vl_genai_runtime(vl, precision: str):
 
 @pytest.mark.parametrize("count", [0, 1], ids=["text", "image"])
 def test_vl_checkpoint_processor_matches_genai(vl, tmp_path, count: int):
-    """lfm2-vl-infer's inputs against genai's processor: the same names, dtypes, shapes and
-    values, pixels within 2/255 (std 0.5), and the same greedy answer; with genai's pixels, the
-    same logits."""
+    """lfm2-vl-infer's inputs without image splitting against genai's processor, which never
+    tiles: the same names, dtypes, shapes and values, pixels within 2/255 (std 0.5), and the same
+    greedy answer; with genai's pixels, the same logits."""
     _, processor, output_dir = vl
     png = tmp_path / "cardinal.png"
     Image.open(IMAGE).save(png)  # decoded once: the two JPEG decoders differ by a few steps
@@ -420,7 +428,7 @@ def test_vl_checkpoint_processor_matches_genai(vl, tmp_path, count: int):
     genai_inputs = model.create_multimodal_processor()(
         prompt, images=og.Images.open(*paths) if paths else None
     )
-    checkpoint_processor = vl_infer.CheckpointProcessor(output_dir)
+    checkpoint_processor = vl_infer.CheckpointProcessor(output_dir, image_splitting=False)
     inputs = checkpoint_processor(prompt, paths)
 
     names = {"image_attention_mask": "pixel_attention_mask", "image_sizes": "spatial_shapes"}
@@ -450,7 +458,7 @@ def test_vl_checkpoint_processor_runs_mixed_aspect_images(vl, precision: str):
     plain onnxruntime given the Hugging Face features; at fp32 also against PyTorch."""
     model, processor, output_dir = vl
     genai_model = load_model(output_dir, vl_export.genai_files(precision))
-    inputs = vl_infer.CheckpointProcessor(output_dir)(
+    inputs = vl_infer.CheckpointProcessor(output_dir, image_splitting=False)(
         vl_prompt(processor, MIXED), [str(path) for path in MIXED]
     )
     assert inputs["spatial_shapes"].as_numpy().tolist() == [[18, 52], [44, 22]]
@@ -477,9 +485,73 @@ def test_vl_genai_continues_after_an_image_token(vl, precision: str):
     check_genai_continues_after(genai_model, inputs, model.config.image_token_id)
 
 
-def test_vl_chat_keeps_images(vl, monkeypatch):
-    """lfm2-vl-infer re-sends an image with every turn after the one it came with."""
-    chat = vl_infer.VLChat(vl[2])
+@pytest.mark.parametrize("precision", ["fp32", "q8", "q4"])
+def test_vl_checkpoint_processor_splits_large_images(vl, precision: str):
+    """With the checkpoint's do_image_splitting, an image over the splitting threshold reaches
+    genai as tiles plus a thumbnail, next to an image under it: the Hugging Face processor's prompt
+    with its tile tokens and its pixels, an encoder feature per image token (equal to PyTorch's at
+    fp32), and the greedy answer of the same files in plain onnxruntime."""
+    model, processor, output_dir = vl
+    assert processor.image_processor.do_image_splitting
+    inputs = vl_infer.CheckpointProcessor(output_dir)(
+        vl_prompt(processor, TILED), [str(path) for path in TILED]
+    )
+    reference_inputs = vl_inputs(processor, TILED, image_splitting=True)
+    for name in ("input_ids", *compare_vl.PIXEL_INPUTS):
+        np.testing.assert_array_equal(
+            inputs[name].as_numpy(), reference_inputs[name].numpy(), err_msg=name
+        )
+    assert inputs["spatial_shapes"].as_numpy().tolist() == TILED_SHAPES
+    vision = json.loads((output_dir / "genai_config.json").read_text())["model"]["vision"]
+    max_num_patches = vision["max_num_patches"]  # a 512x512 tile is 32x32 patches
+    assert inputs["pixel_values"].as_numpy().shape[:2] == (len(TILED_SHAPES), max_num_patches)
+    prompt = reference_inputs["input_ids"][0].numpy()
+    text = processor.tokenizer.decode(prompt)
+    assert (text.count("<|img_row_"), text.count("<|img_thumbnail|>")) == (6, 1)
+    assert "<|img_row_2_col_3|>" in text
+
+    features = vl_features(output_dir, precision, reference_inputs)
+    image_tokens = 6 * 256 + 13 * 18 + 22 * 11
+    assert inputs["num_image_tokens"].as_numpy().tolist() == [image_tokens]
+    assert np.count_nonzero(prompt == processor.image_token_id) == image_tokens
+    assert features.shape[0] == image_tokens
+    if precision == "fp32":
+        pixels = {name: reference_inputs[name] for name in compare_vl.PIXEL_INPUTS}
+        with torch.no_grad():
+            expected = torch.cat(model.model.get_image_features(**pixels).pooler_output)
+        np.testing.assert_allclose(features, expected.numpy(), atol=1e-5)
+
+    sequence, logits = genai_answer(
+        load_model(output_dir, vl_export.genai_files(precision)), inputs, 8
+    )
+
+    files = vl_export.bundle(precision)
+    decoder = session(output_dir, files["decoder"])
+    embeddings = session(output_dir, files["embedding"])
+    embeds = embed(embeddings, prompt[None], features)
+
+    def lookup(ids):
+        return embeds if ids.shape[1] == len(prompt) else embed(embeddings, ids)
+
+    answer = greedy(decoder, prompt, 8, eos_ids(output_dir), lookup)
+    assert sequence == [*prompt.tolist(), *answer]
+    expected = decoder.run(None, decoder_inputs(embeds, initialize_cache(decoder), 0))[0]
+    np.testing.assert_allclose(logits, expected[0, -1], atol=1e-5)
+    if precision == "fp32":
+        with torch.no_grad():
+            pytorch = model(**reference_inputs).logits[0, -1].numpy()
+        np.testing.assert_allclose(logits, pytorch, atol=1e-4)
+
+
+@pytest.mark.parametrize(
+    "image_splitting,sent_per_turn",
+    [(None, (7, 6 * 256 + 234)), (False, (1, 234))],
+    ids=["checkpoint", "resize-once"],
+)
+def test_vl_chat_keeps_images(vl, monkeypatch, image_splitting, sent_per_turn):
+    """lfm2-vl-infer re-sends an image with every turn after the one it came with, as tiles plus a
+    thumbnail unless image splitting is off."""
+    chat = vl_infer.VLChat(vl[2], image_splitting=image_splitting)
     sent = []
 
     def record(model, inputs, *args):
@@ -493,16 +565,22 @@ def test_vl_chat_keeps_images(vl, monkeypatch):
     chat.send("Hi", 4, stream=False)
     chat.send("And now?", 4, stream=False)
 
-    assert sent == [(1, 234), (1, 234)]
+    assert sent == [sent_per_turn] * 2
     assert chat.images() == [str(IMAGE)]
 
 
-def test_vl_compare_scores_every_case(vl):
+@pytest.mark.parametrize(
+    "image_splitting,crops", [(None, 7), (False, 1)], ids=["checkpoint", "resize-once"]
+)
+def test_vl_compare_scores_every_case(vl, image_splitting, crops: int):
     """lfm2-compare vl on the tiny export: every case through plain onnxruntime and
-    onnxruntime-genai, the mixed-aspect one included."""
+    onnxruntime-genai, the mixed-aspect one included, with the reference's image splitting."""
     _, _, output_dir = vl
-    refs = compare_vl.reference(output_dir.parent / "checkpoint", 4, "cpu")
+    refs = compare_vl.reference(output_dir.parent / "checkpoint", 4, "cpu", image_splitting)
     assert [path.name for path in MIXED] in [ref["images"] for ref in refs]
+    assert {ref["image_splitting"] for ref in refs} == {crops > 1}
+    cardinal = next(ref for ref in refs if ref["images"] == [IMAGE.name])
+    assert len(cardinal["pixel_inputs"]["spatial_shapes"]) == crops
     row = compare_vl.score(output_dir, "fp32", refs, True, "cpu")
     assert not has_errors(row), row
     assert row["genai"]["prompt_ids_equal"] == f"{len(refs)}/{len(refs)}"

@@ -3,14 +3,17 @@
 Chat with an LFM2-VL export through onnxruntime-genai, with images on any turn.
 
 Images stay in the conversation once attached, and every turn re-sends them. The checkpoint's own
-processor prepares them (see CheckpointProcessor): it resizes each image once instead of splitting
-it into tiles.
+processor prepares them (see CheckpointProcessor). Every LFM2-VL and LFM2.5-VL checkpoint sets
+do_image_splitting, so an image of more than twice max_image_tokens worth of pixels (524,288,
+about 724x724) becomes 512x512 tiles plus a thumbnail; --no-image-splitting resizes each image
+once instead.
 
 Usage:
     uv run lfm2-vl-infer --model exports/LFM2.5-VL-1.6B-ONNX
     uv run lfm2-vl-infer --model exports/LFM2.5-VL-1.6B-ONNX --images photo.jpg
     uv run lfm2-vl-infer --model exports/LFM2.5-VL-1.6B-ONNX --images a.jpg b.jpg --prompt "Compare"
     uv run lfm2-vl-infer --model exports/LFM2.5-VL-1.6B-ONNX --precision fp16
+    uv run lfm2-vl-infer --model exports/LFM2.5-VL-1.6B-ONNX --images page.png --no-image-splitting
 """
 
 import argparse
@@ -37,16 +40,22 @@ class CheckpointProcessor:
     """onnxruntime-genai inputs for a prompt and its images, made by the export's Hugging Face
     processor (processor_config.json) instead of genai's own (genai_processor_config.json).
 
-    genai's processor rejects every prompt whose tallest image is not also its widest. The Hugging
-    Face processor pads each image's patches on their own, to the max_num_patches genai pads to.
-    Both resize each image once (do_image_splitting=False); from the same decoded image, their
-    pixels are a 1/255 step or two apart.
+    genai's processor rejects every prompt whose tallest image is not also its widest, and it
+    never tiles. The Hugging Face processor pads each image's patches on their own, to the
+    max_num_patches genai pads to. With image_splitting (default: the checkpoint's
+    do_image_splitting) it splits a large image into tiles plus a thumbnail, which the vision
+    encoder takes as separate images, and puts the tile tokens in the prompt. Without, both
+    processors resize each image once; from the same decoded image, their pixels are a 1/255 step
+    or two apart.
     """
 
-    def __init__(self, model_dir: pathlib.Path):
+    def __init__(self, model_dir: pathlib.Path, image_splitting: bool | None = None):
         from transformers import AutoProcessor
 
         self.hf = AutoProcessor.from_pretrained(model_dir)
+        if image_splitting is None:
+            image_splitting = self.hf.image_processor.do_image_splitting
+        self.image_splitting = image_splitting
         config = json.loads((model_dir / "genai_config.json").read_text())
         inputs = config["model"]["vision"]["inputs"]
         self.names = {key: inputs[entry] for key, entry in VISION_INPUTS.items()}
@@ -57,7 +66,10 @@ class CheckpointProcessor:
 
         pil = [Image.open(path).convert("RGB") for path in images]
         features = self.hf(
-            text=prompt, images=pil or None, return_tensors="np", do_image_splitting=False
+            text=prompt,
+            images=pil or None,
+            return_tensors="np",
+            do_image_splitting=self.image_splitting,
         )
         input_ids = features["input_ids"]
         inputs = og.NamedTensors()
@@ -75,10 +87,16 @@ class CheckpointProcessor:
 class VLChat:
     """A conversation with an LFM2-VL export; images join the next message sent."""
 
-    def __init__(self, model_dir: pathlib.Path, precision: str | None = None, ep: str = "cpu"):
+    def __init__(
+        self,
+        model_dir: pathlib.Path,
+        precision: str | None = None,
+        ep: str = "cpu",
+        image_splitting: bool | None = None,
+    ):
         self.model = load_model(model_dir, precision and genai_files(precision), ep)
         self.tokenizer = og.Tokenizer(self.model)
-        self.processor = CheckpointProcessor(model_dir)
+        self.processor = CheckpointProcessor(model_dir, image_splitting)
         self.messages: list[dict] = []
         self.pending: list[str] = []
 
@@ -140,6 +158,12 @@ def main():
     parser.add_argument("--model", required=True, type=pathlib.Path, help="Export folder")
     add_runtime_arguments(parser, PRECISIONS)
     parser.add_argument("--images", nargs="*", default=[], help="Images for the first turn")
+    parser.add_argument(
+        "--image-splitting",
+        action=argparse.BooleanOptionalAction,
+        help="Split large images into 512x512 tiles plus a thumbnail, as the reference processor "
+        "does (default: the checkpoint's do_image_splitting, on for LFM2-VL and LFM2.5-VL)",
+    )
     parser.add_argument("--prompt", default=None, help="Initial prompt (optional)")
     parser.add_argument("--max-tokens", type=int, default=100, help="Max tokens to generate")
     parser.add_argument("--no-stream", action="store_true", help="Disable streaming output")
@@ -147,7 +171,7 @@ def main():
 
     logging.basicConfig(level=logging.INFO)
 
-    chat = VLChat(args.model, args.precision, args.ep)
+    chat = VLChat(args.model, args.precision, args.ep, args.image_splitting)
     chat.attach(args.images)
     run_chat_loop(
         chat, args, "LFM2-VL", "'images <path> [<path> ...]' attaches images to the next message"

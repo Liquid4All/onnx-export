@@ -136,9 +136,9 @@ exports/LFM2.5-VL-1.6B-ONNX/
 
 The q4 and q8 decoders have an int8 LM head. Both bundles load one int8 vision encoder (symmetric, block 128, fp32 activations); with int4 weights or int8 activations, some LFM2.5-VL-1.6B image tokens fall below 0.7 cosine.
 
-Each image is resized once instead of tiled, as the upstream processor does with `do_image_splitting=False`. `lfm2-vl-infer` and `lfm2-compare` prepare the images with the checkpoint's own processor (`processor_config.json`) and hand the tensors to onnxruntime-genai (`liquidonnx.lfm2_vl.infer.CheckpointProcessor`).
+`lfm2-vl-infer` and `lfm2-compare` prepare the images with the checkpoint's own processor (`processor_config.json`) and hand the tensors to onnxruntime-genai (`liquidonnx.lfm2_vl.infer.CheckpointProcessor`). Every LFM2-VL and LFM2.5-VL checkpoint sets `do_image_splitting`, so an image of more than twice `max_image_tokens` worth of pixels (524,288, about 724x724) becomes a grid of 512x512 tiles (`min_tiles` to `max_tiles`, 2 to 10) plus a thumbnail resized once, and the prompt carries the processor's tile tokens (`<|img_row_1_col_1|>` ... `<|img_thumbnail|>`). The vision encoder takes each tile and the thumbnail as a separate image; a tile is 32x32 patches, the `max_num_patches` (1024) of `genai_config.json`, and 256 image tokens, so a large image costs up to 2,816 image tokens instead of 256. `--no-image-splitting` resizes each image once instead, as the processor does with `do_image_splitting=False`.
 
-onnxruntime-genai's own image processor (`genai_processor_config.json`, behind `create_multimodal_processor()`) resizes the same way (bilinear for LFM2.5-VL-450M/1.6B, bicubic for the others), but it rejects a prompt whose tallest image is not also its widest, such as a wide photo with a tall one ("image_sizes reports 288x832, larger than the 704x352 pixel_values batch"). Other applications can build the inputs as `CheckpointProcessor` does: the Hugging Face processor's tensors under the names in `model.vision.inputs` of `genai_config.json`, plus `num_image_tokens`, through `generator.set_inputs`.
+onnxruntime-genai's own image processor (`genai_processor_config.json`, behind `create_multimodal_processor()`) never tiles: it resizes each image once (bilinear for LFM2.5-VL-450M/1.6B, bicubic for the others), and it rejects a prompt whose tallest image is not also its widest, such as a wide photo with a tall one ("image_sizes reports 288x832, larger than the 704x352 pixel_values batch"). Other applications can build the inputs as `CheckpointProcessor` does: the Hugging Face processor's tensors under the names in `model.vision.inputs` of `genai_config.json`, plus `num_image_tokens`, through `generator.set_inputs`.
 
 ### 3.3 LFM2-MoE Mixture of Experts
 
@@ -214,12 +214,17 @@ uv run lfm2-vl-infer --model ./exports/LFM2.5-VL-1.6B-ONNX \
     --images image1.jpg image2.jpg \
     --prompt "Compare these two images"
 
+# A large image resized once instead of tiled: fewer image tokens, less detail
+uv run lfm2-vl-infer --model ./exports/LFM2.5-VL-1.6B-ONNX \
+    --images page.png --no-image-splitting \
+    --prompt "What is the title of this page?"
+
 # Text-only, fp16
 uv run lfm2-vl-infer --model ./exports/LFM2.5-VL-1.6B-ONNX --precision fp16 \
     --prompt "Hello, how are you?"
 ```
 
-In the chat, `images <path> [<path> ...]` attaches images to the next message; they stay in the conversation for later turns.
+In the chat, `images <path> [<path> ...]` attaches images to the next message; they stay in the conversation for later turns. Large images are split into tiles plus a thumbnail, as the checkpoint's processor does ([3.2](#32-lfm2-vl-vision-language-models)).
 
 ### 4.3 MoE
 
@@ -309,7 +314,7 @@ uv run lfm2-compare vl --model LiquidAI/LFM2.5-VL-1.6B --export ./exports/LFM2.5
 uv run lfm2-compare audio --model LiquidAI/LFM2.5-Audio-1.5B --export ./exports/LFM2.5-Audio-1.5B-ONNX
 ```
 
-`--device cuda` runs the reference, the ONNX sessions and onnxruntime-genai on the GPU with TF32 off, so fp32 stays fp32 (needs the CUDA packages in [2](#2-installation)). References are cached per device.
+`--device cuda` runs the reference, the ONNX sessions and onnxruntime-genai on the GPU with TF32 off, so fp32 stays fp32 (needs the CUDA packages in [2](#2-installation)). References are cached per device. `lfm2-compare vl --no-image-splitting` resizes each image once in the reference and in onnxruntime-genai instead of tiling it.
 
 `lfm2-compare wikitext` is the quality gate for quantized precisions. It scores them on wikitext-2 with the protocol of [olive-recipes #638](https://github.com/microsoft/olive-recipes/pull/638): 64 chunks of 512 tokens, the second half of each scored, KLD ± SE over the chunks and same-top %. The reference is an fp32 one in llama.cpp's KL-divergence base format, given with `--reference` or computed from `--model`. The command exits with 1 when a precision is above `--max-kld` or, for the LFM2.5 models it knows, above today's KLD + 2 SE. The ONNX sessions run 13 intra-op threads on any machine, the count the ceilings were measured at, because onnxruntime's CPU MoE kernel gives different scores at different thread counts; `--threads` overrides it. `--help` explains the token streams.
 

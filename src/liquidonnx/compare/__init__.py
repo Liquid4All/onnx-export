@@ -18,6 +18,8 @@ Usage:
     uv run lfm2-compare moe --model LiquidAI/LFM2.5-8B-A1B --export exports/LFM2.5-8B-A1B-ONNX \\
         --prompts 4 --max-new 32 --device cuda
     uv run lfm2-compare vl --model LiquidAI/LFM2.5-VL-1.6B --export exports/LFM2.5-VL-1.6B-ONNX
+    uv run lfm2-compare vl --model LiquidAI/LFM2.5-VL-1.6B --export exports/LFM2.5-VL-1.6B-ONNX \\
+        --no-image-splitting
     uv run lfm2-compare audio --model LiquidAI/LFM2.5-Audio-1.5B \\
         --export exports/LFM2.5-Audio-1.5B-ONNX --precision fp32 q4
 
@@ -81,15 +83,21 @@ def cached_reference(
     prompts: int,
     max_new: int,
     device: str = "cpu",
+    image_splitting: bool | None = None,
 ):
     """The reference answers, computed once per checkpoint revision, inputs, answer length and
-    device.
+    device; image_splitting (VL) overrides the checkpoint's do_image_splitting.
 
     Hugging Face checkpoints are keyed by commit, so a reference computed on one host can be
     copied to another. An unreadable cache file is recomputed and overwritten.
     """
     module = load_family(family)
-    inputs = module.PROMPTS[:prompts] if family in ("text", "moe") else module.CASES
+    if family in ("text", "moe"):
+        inputs = module.PROMPTS[:prompts]
+    elif family == "vl":
+        inputs = (module.CASES, image_splitting)
+    else:
+        inputs = module.CASES
     key = repr((checkpoint_revision(model, checkpoint), inputs, max_new))
     digest = hashlib.sha256(key.encode()).hexdigest()[:12]
     tag = "" if device == "cpu" else f"-{device}"  # CPU references keep their pre-device names
@@ -112,6 +120,8 @@ def cached_reference(
         torch.backends.cudnn.allow_tf32 = False
     if family in ("text", "moe"):
         items = module.reference(checkpoint, prompts, max_new, device)
+    elif family == "vl":
+        items = module.reference(checkpoint, max_new, device, image_splitting)
     else:
         items = module.reference(checkpoint, max_new, device)
     if device == "cuda":
@@ -257,7 +267,16 @@ def main():
         "(default: compare-{export name}.json)",
     )
     for family in ("text", "moe", "vl", "audio"):
-        commands.add_parser(family, parents=[shared], help=f"{family} export against its model")
+        family_parser = commands.add_parser(
+            family, parents=[shared], help=f"{family} export against its model"
+        )
+        if family == "vl":
+            family_parser.add_argument(
+                "--image-splitting",
+                action=argparse.BooleanOptionalAction,
+                help="Split large images into tiles plus a thumbnail in the reference and genai "
+                "(default: the checkpoint's do_image_splitting, on for LFM2-VL and LFM2.5-VL)",
+            )
     wikitext_parser = commands.add_parser(
         "wikitext",
         help="wikitext-2 KLD gate (olive-recipes #638's protocol)",
@@ -281,7 +300,10 @@ def main():
 
     checkpoint = resolve_checkpoint(args.model)
     max_new = args.max_new or MAX_NEW[args.family]
-    refs = cached_reference(args.model, checkpoint, args.family, args.prompts, max_new, args.device)
+    options = {"image_splitting": args.image_splitting} if args.family == "vl" else {}
+    refs = cached_reference(
+        args.model, checkpoint, args.family, args.prompts, max_new, args.device, **options
+    )
 
     results = {
         "model": args.model,

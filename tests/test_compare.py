@@ -19,6 +19,7 @@ from transformers import AutoTokenizer, Lfm2Config, Lfm2ForCausalLM
 
 from liquidonnx import compare
 from liquidonnx.compare import text
+from liquidonnx.compare import vl as compare_vl
 from liquidonnx.genai_builder import export_decoder
 from liquidonnx.genai_runtime import EXECUTION_PROVIDERS, load_model
 from liquidonnx.session import load_onnx_session
@@ -139,6 +140,52 @@ def test_cpu_references_keep_their_names(tmp_path, monkeypatch, runs):
         "LFM2.5-350M-text-0b7c2174540b.npz",
         "LFM2.5-350M-text-cuda-0b7c2174540b.npz",
     ]
+
+
+def test_vl_references_per_image_splitting(checkpoint, monkeypatch):
+    """A VL reference is computed once per --image-splitting setting; the checkpoint's own setting
+    (None) gets a key of its own, so references cached when VL always resized once are not
+    reused."""
+    runs = []
+
+    def reference(checkpoint, max_new, device, image_splitting):
+        runs.append(image_splitting)
+        return ITEMS
+
+    monkeypatch.setattr(compare_vl, "reference", reference)
+    for image_splitting in (None, True, False, None, False, True):
+        compare.cached_reference(
+            str(checkpoint), checkpoint, "vl", 8, 4, image_splitting=image_splitting
+        )
+    assert runs == [None, True, False]
+    assert len(cache_files(checkpoint)) == 3
+
+
+@pytest.mark.parametrize(
+    "flag,image_splitting",
+    [([], None), (["--image-splitting"], True), (["--no-image-splitting"], False)],
+    ids=["checkpoint", "on", "off"],
+)
+def test_vl_image_splitting_reaches_the_reference(flag, image_splitting, monkeypatch, tmp_path):
+    calls = []
+    decoder = {
+        "teacher_forced": {"kl_mean": 0.0, "kl_max": 0.0, "top1": 1.0, "max_abs": 0.0},
+        "greedy": {"exact": 1, "of": 1, "prefix_frac": 1.0},
+        "size_mb": 1.0,
+    }
+    monkeypatch.setattr(compare, "resolve_checkpoint", lambda model: tmp_path / "snapshot")
+    monkeypatch.setattr(
+        compare, "cached_reference", lambda *args, **kwargs: calls.append(kwargs) or []
+    )
+    monkeypatch.setattr(compare_vl, "precisions", lambda export: ["q4"])
+    monkeypatch.setattr(compare_vl, "score", lambda *args: {"decoder": decoder})
+    argv = ["vl", "--model", "m", "--export", str(tmp_path), "--no-genai", *flag]
+    argv += ["--output", str(tmp_path / "c.json")]
+    monkeypatch.setattr(sys, "argv", ["lfm2-compare", *argv])
+
+    compare.main()
+
+    assert calls == [{"image_splitting": image_splitting}]
 
 
 @pytest.mark.parametrize("device", EXECUTION_PROVIDERS)
