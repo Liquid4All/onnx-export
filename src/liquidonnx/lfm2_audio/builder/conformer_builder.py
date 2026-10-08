@@ -26,6 +26,7 @@ import onnx
 from onnx import TensorProto, helper
 
 from liquidonnx.builder_base import ONNXBuilderBase
+from liquidonnx.lfm2_audio.checkpoint import checkpoint_dir
 
 from .config import ConformerConfig
 
@@ -992,16 +993,13 @@ class ConformerEncoderBuilder(ONNXBuilderBase):
             )
 
     def load_weights(self, model_path: str):
-        """Load weights from HuggingFace model."""
-        from huggingface_hub import hf_hub_download
+        """Load weights from a Hub model ID or a local checkpoint."""
         from safetensors import safe_open
 
         logger.info(f"Loading conformer weights from {model_path}...")
+        safetensors_path = checkpoint_dir(model_path) / "model.safetensors"
 
-        # Download safetensors file
-        safetensors_path = hf_hub_download(model_path, "model.safetensors")
-
-        with safe_open(safetensors_path, framework="np", device="cpu") as f:
+        with safe_open(str(safetensors_path), framework="np", device="cpu") as f:
             for key in f.keys():
                 if key.startswith("conformer.") or key.startswith("audio_adapter."):
                     self.weights[key] = f.get_tensor(key)

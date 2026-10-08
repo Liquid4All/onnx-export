@@ -157,6 +157,8 @@ Same layout as the text models. The experts become `QMoE` int4 (q4, q4f16) or in
 uv run lfm2-audio-export LiquidAI/LFM2.5-Audio-1.5B --precision
 ```
 
+The model can also be a local checkpoint folder (`hf download LiquidAI/LFM2.5-Audio-1.5B --local-dir LFM2.5-Audio-1.5B`). From the Hub, the export downloads only the files it reads, without liquid-audio's Mimi codec or demo media.
+
 Output:
 
 ```

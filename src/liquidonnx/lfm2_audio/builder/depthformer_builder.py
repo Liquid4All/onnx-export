@@ -16,6 +16,7 @@ import onnx
 from onnx import TensorProto, helper
 
 from liquidonnx.builder_base import ONNXBuilderBase
+from liquidonnx.lfm2_audio.checkpoint import checkpoint_dir
 
 logger = logging.getLogger(__name__)
 
@@ -681,15 +682,14 @@ class DepthformerUnifiedBuilder(ONNXBuilderBase):
         return self.make_matmul(x_normed, logits_weight, "logits")
 
     def load_weights(self, model_path: str):
-        """Load all depthformer and depth_linear weights from HuggingFace model."""
-        from huggingface_hub import hf_hub_download
+        """Load the depthformer and depth_linear weights of a Hub model ID or a local checkpoint."""
         from safetensors.torch import load_file
 
         logger.info(f"Loading depthformer weights from {model_path}...")
-        safetensors_path = hf_hub_download(model_path, "model.safetensors")
+        safetensors_path = checkpoint_dir(model_path) / "model.safetensors"
 
         # Use torch to handle bfloat16
-        weights_torch = load_file(safetensors_path)
+        weights_torch = load_file(str(safetensors_path))
 
         for key, tensor in weights_torch.items():
             # Load depth_linear, depthformer, and depth_embeddings weights

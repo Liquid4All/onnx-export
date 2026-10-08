@@ -6,8 +6,12 @@ small random weights. The decoder comes from the genai builder, run on a checkpo
 random decoder weights. Shapes of the published model that the pipeline and the web harness rely
 on (8 codebooks, 2049 codebook vocab, depthformer dim 1024 / 6 layers / 8 KV heads, detokenizer
 output 1282) are kept; everything else is shrunk.
+
+write_full_checkpoint() writes a checkpoint folder holding every graph's weights instead, for
+lfm2-audio-export to read; its depthformer has SmallDepthformer's shape.
 """
 
+import dataclasses
 import json
 import pathlib
 
@@ -71,6 +75,18 @@ DETOK_CONFIG = {
 }
 
 AUDIO_VOCAB = 8 * 2049
+
+SMALL_ENCODER = ConformerConfig(n_layers=2, d_model=128, n_heads=4, subsampling_conv_channels=64)
+
+
+class SmallDepthformer(DepthformerUnifiedBuilder):
+    """The depthformer builder at the size of write_full_checkpoint()'s weights."""
+
+    def __init__(self):
+        super().__init__()
+        self.input_hidden_size = HIDDEN
+        self.dim, self.num_layers, self.intermediate_size = 64, 1, 64
+        self.num_heads, self.num_kv_heads, self.head_dim = 4, 2, 16
 
 
 def _w(rng: np.random.Generator, *shape: int) -> np.ndarray:
@@ -331,6 +347,24 @@ def write_checkpoint(
     return path
 
 
+def write_full_checkpoint(path: pathlib.Path, seed: int = 0) -> pathlib.Path:
+    """An LFM2.5-Audio checkpoint folder as the Hub repos lay it out, with every graph's weights."""
+    rng = np.random.default_rng(seed)
+    weights = {
+        **decoder_weights(rng),
+        **conformer_weights(SMALL_ENCODER, HIDDEN, rng),
+        **depthformer_weights(SmallDepthformer(), rng),
+    }
+    config = {**decoder_config(), "encoder": dataclasses.asdict(SMALL_ENCODER)}
+    write_checkpoint(path, weights, config)
+
+    detokenizer = path / "audio_detokenizer"
+    detokenizer.mkdir()
+    (detokenizer / "config.json").write_text(json.dumps(DETOK_CONFIG))
+    save_file(detokenizer_weights(DETOK_CONFIG, rng), str(detokenizer / "model.safetensors"))
+    return path
+
+
 def build_model_dir(root: pathlib.Path, seed: int = 0) -> pathlib.Path:
     """Write a complete synthetic export under root and return its path."""
     rng = np.random.default_rng(seed)
@@ -353,10 +387,7 @@ def build_model_dir(root: pathlib.Path, seed: int = 0) -> pathlib.Path:
     export_embed_tokens(weights, config, onnx_dir)
     save_mel_config(onnx_dir)
 
-    small_encoder = ConformerConfig(
-        n_layers=2, d_model=128, n_heads=4, subsampling_conv_channels=64
-    )
-    onnx.save(build_encoder(rng, small_encoder), str(onnx_dir / "audio_encoder.onnx"))
+    onnx.save(build_encoder(rng, SMALL_ENCODER), str(onnx_dir / "audio_encoder.onnx"))
     onnx.save(build_detokenizer(rng), str(onnx_dir / "audio_detokenizer.onnx"))
     onnx.save(build_depthformer(rng), str(onnx_dir / "vocoder_depthformer.onnx"))
 

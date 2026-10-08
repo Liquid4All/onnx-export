@@ -34,6 +34,7 @@ Usage:
     uv run lfm2-audio-export LiquidAI/LFM2.5-Audio-1.5B
     uv run lfm2-audio-export LiquidAI/LFM2.5-Audio-1.5B --precision fp16
     uv run lfm2-audio-export LiquidAI/LFM2.5-Audio-1.5B --precision q4
+    uv run lfm2-audio-export path/to/LFM2.5-Audio-1.5B  # a local checkpoint folder
 """
 
 import argparse
@@ -61,6 +62,7 @@ from liquidonnx.lfm2_audio.builder.depthformer_builder import export_vocoder_dep
 from liquidonnx.lfm2_audio.builder.detokenizer_builder import (
     export_audio_detokenizer_builder,
 )
+from liquidonnx.lfm2_audio.checkpoint import checkpoint_dir
 from liquidonnx.quantize import (
     convert_to_fp16,
     get_total_model_size_mb,
@@ -125,14 +127,13 @@ def genai_files(precision: str) -> dict:
 
 
 def load_audio_model_weights(model_path: str) -> dict[str, np.ndarray]:
-    from huggingface_hub import hf_hub_download
     from safetensors import safe_open
 
     logger.info(f"Loading weights from {model_path}...")
-    safetensors_path = hf_hub_download(model_path, "model.safetensors")
+    safetensors_path = checkpoint_dir(model_path) / "model.safetensors"
 
     weights = {}
-    with safe_open(safetensors_path, framework="np", device="cpu") as f:
+    with safe_open(str(safetensors_path), framework="np", device="cpu") as f:
         for key in f.keys():
             weights[key] = f.get_tensor(key)
 
@@ -141,11 +142,7 @@ def load_audio_model_weights(model_path: str) -> dict[str, np.ndarray]:
 
 
 def load_audio_config(model_path: str) -> dict:
-    from huggingface_hub import hf_hub_download
-
-    config_path = hf_hub_download(model_path, "config.json")
-    with open(config_path) as f:
-        return json.load(f)
+    return json.loads((checkpoint_dir(model_path) / "config.json").read_text())
 
 
 # === 1. Audio Encoder Export (builder) ===
@@ -353,7 +350,7 @@ def derive_precision_files(
     """Write the files bundle(precision) loads."""
     onnx_dir = output_dir / "onnx"
     export_precision(
-        model_path,
+        str(checkpoint_dir(model_path)),
         output_dir,
         "lfm2_audio",
         precision,
@@ -480,8 +477,10 @@ def export_full_model(model_path: str, output_dir: pathlib.Path):
     onnx_dir = output_dir / "onnx"
     onnx_dir.mkdir(exist_ok=True)
 
-    config = load_audio_config(model_path)
-    weights = load_audio_model_weights(model_path)
+    # export_decoder would download the whole Hub repo, so every step gets the resolved folder.
+    checkpoint = str(checkpoint_dir(model_path))
+    config = load_audio_config(checkpoint)
+    weights = load_audio_model_weights(checkpoint)
 
     export_audio_embedding(weights, config, onnx_dir)
     export_audio_embedding_binary(weights, config, onnx_dir)
@@ -495,10 +494,10 @@ def export_full_model(model_path: str, output_dir: pathlib.Path):
     weights.clear()
     gc.collect()
 
-    export_decoder(model_path, output_dir, "decoder.onnx", DECODER_OPTIONS)
-    export_audio_encoder_builder(model_path, config, onnx_dir)
-    export_vocoder_depthformer(model_path, onnx_dir)
-    export_audio_detokenizer_builder(model_path, onnx_dir)
+    export_decoder(checkpoint, output_dir, "decoder.onnx", DECODER_OPTIONS)
+    export_audio_encoder_builder(checkpoint, config, onnx_dir)
+    export_vocoder_depthformer(checkpoint, onnx_dir)
+    export_audio_detokenizer_builder(checkpoint, onnx_dir)
     save_mel_config(onnx_dir)
     return output_dir
 
