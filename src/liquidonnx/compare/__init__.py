@@ -25,9 +25,11 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import pathlib
 import platform
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -67,7 +69,7 @@ def cached_reference(model: str, checkpoint: pathlib.Path, family: str, prompts:
     """The reference answers, computed once per checkpoint revision, inputs and answer length.
 
     Hugging Face checkpoints are keyed by commit, so a reference computed on one host can be
-    copied to another.
+    copied to another. An unreadable cache file is recomputed and overwritten.
     """
     module = load_family(family)
     inputs = module.PROMPTS[:prompts] if family in ("text", "moe") else module.CASES
@@ -75,17 +77,37 @@ def cached_reference(model: str, checkpoint: pathlib.Path, family: str, prompts:
     digest = hashlib.sha256(key.encode()).hexdigest()[:12]
     path = cache_dir() / "compare" / f"{pathlib.Path(model).name}-{family}-{digest}.npz"
     if path.exists():
-        logger.info(f"Reference: {path}")
-        return list(np.load(path, allow_pickle=True)["items"])
+        try:
+            with np.load(path, allow_pickle=True) as cache:
+                items = list(cache["items"])
+        except Exception as e:  # a corrupt pickle can raise almost any type
+            logger.warning(f"Recomputing the unreadable reference {path}: {e!r}")
+        else:
+            logger.info(f"Reference: {path}")
+            return items
 
     logger.info(f"Running the reference model of {checkpoint}...")
     if family in ("text", "moe"):
         items = module.reference(checkpoint, prompts, max_new)
     else:
         items = module.reference(checkpoint, max_new)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(path, items=np.array(items, dtype=object))
+    save_reference(path, items)
     return items
+
+
+def save_reference(path: pathlib.Path, items: list) -> None:
+    """Write through a temporary file renamed over path, so no reader sees a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    tmp = pathlib.Path(name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            np.savez(f, items=np.array(items, dtype=object))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _answers(result: dict) -> str:
