@@ -20,9 +20,14 @@ Usage:
     uv run lfm2-compare vl --model LiquidAI/LFM2.5-VL-1.6B --export exports/LFM2.5-VL-1.6B-ONNX
     uv run lfm2-compare audio --model LiquidAI/LFM2.5-Audio-1.5B \\
         --export exports/LFM2.5-Audio-1.5B-ONNX --precision fp32 q4
+
+lfm2-compare wikitext scores the precisions on wikitext-2 against an fp32 reference instead, and
+fails above per-model KLD ceilings (liquidonnx.compare.wikitext):
+    uv run lfm2-compare wikitext --export exports/LFM2.5-350M-ONNX --reference ref.kld
 """
 
 import argparse
+import contextlib
 import gc
 import hashlib
 import json
@@ -117,19 +122,26 @@ def cached_reference(
     return items
 
 
-def save_reference(path: pathlib.Path, items: list) -> None:
-    """Write through a temporary file renamed over path, so no reader sees a partial file."""
+@contextlib.contextmanager
+def atomic_write(path: pathlib.Path):
+    """A binary file renamed over path once the block completes, so no reader sees a partial
+    file; on an error path stays as it was."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     tmp = pathlib.Path(name)
     try:
         with os.fdopen(fd, "wb") as f:
-            np.savez(f, items=np.array(items, dtype=object))
+            yield f
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def save_reference(path: pathlib.Path, items: list) -> None:
+    with atomic_write(path) as f:
+        np.savez(f, items=np.array(items, dtype=object))
 
 
 def _answers(result: dict) -> str:
@@ -209,41 +221,56 @@ def has_errors(value) -> bool:
 
 
 def main():
+    from liquidonnx.compare import wikitext
+
     parser = argparse.ArgumentParser(
         description="Score an export against its reference model",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("family", choices=["text", "moe", "vl", "audio"])
-    parser.add_argument("--model", required=True, help="Reference checkpoint (HF ID or path)")
-    parser.add_argument("--export", required=True, type=pathlib.Path, help="Export folder")
-    parser.add_argument(
+    commands = parser.add_subparsers(dest="family", required=True)
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument("--model", required=True, help="Reference checkpoint (HF ID or path)")
+    shared.add_argument("--export", required=True, type=pathlib.Path, help="Export folder")
+    shared.add_argument(
         "--precision", nargs="*", help="Precisions to score (default: every one exported)"
     )
-    parser.add_argument("--prompts", type=int, default=8, help="Text prompts (text, moe)")
-    parser.add_argument(
+    shared.add_argument("--prompts", type=int, default=8, help="Text prompts (text, moe)")
+    shared.add_argument(
         "--max-new",
         type=int,
         help="Reference answer length (default: "
         f"{', '.join(f'{f} {n}' for f, n in MAX_NEW.items())})",
     )
-    parser.add_argument("--no-genai", action="store_true", help="Skip onnxruntime-genai")
-    parser.add_argument(
+    shared.add_argument("--no-genai", action="store_true", help="Skip onnxruntime-genai")
+    shared.add_argument(
         "--device",
         choices=EXECUTION_PROVIDERS,
         default="cpu",
         help="Device of the reference, the ONNX sessions and onnxruntime-genai; cuda turns TF32 "
         "off (default: cpu)",
     )
-    parser.add_argument(
+    shared.add_argument(
         "--output",
         type=pathlib.Path,
         help="Results JSON; a markdown report is written next to it "
         "(default: compare-{export name}.json)",
     )
+    for family in ("text", "moe", "vl", "audio"):
+        commands.add_parser(family, parents=[shared], help=f"{family} export against its model")
+    wikitext_parser = commands.add_parser(
+        "wikitext",
+        help="wikitext-2 KLD gate (olive-recipes #638's protocol)",
+        description=wikitext.__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    wikitext.add_arguments(wikitext_parser)
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
+    if args.family == "wikitext":
+        wikitext.run(args, wikitext_parser)
+        return
 
     module = load_family(args.family)
     available = module.precisions(args.export)
