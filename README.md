@@ -45,6 +45,20 @@ pip install --pre --no-deps --upgrade \
     --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ onnxruntime
 ```
 
+`--ep cuda` (Linux) needs the CUDA builds, `onnxruntime-gpu` and `onnxruntime-genai-cuda`, in place of `onnxruntime` and `onnxruntime-genai`. They are separate distributions, so `uv sync` and a plain `uv run` would put the CPU packages back: install the rest of the lock without them and run with `uv run --no-sync`. The PyPI CUDA wheels are built for CUDA 13 and need NVIDIA driver 580 or later.
+
+```bash
+uv venv --clear
+uv export --frozen --no-hashes --no-emit-project \
+    | grep -vE '^onnxruntime(-genai)?==' > /tmp/requirements-cuda.txt
+uv pip install --no-deps -r /tmp/requirements-cuda.txt
+uv pip install --no-deps -e .
+uv pip install "onnxruntime-gpu[cuda,cudnn]==1.30.0" onnxruntime-genai-cuda==0.17.1
+uv run --no-sync lfm2-infer --model ./exports/LFM2.5-350M-ONNX --precision q4f16 --ep cuda
+```
+
+In this environment the CPU execution provider comes from onnxruntime-gpu 1.30.0, which runs LFM2-MoE about 44 times slower than the nightly (see [4.3](#43-moe)).
+
 This repository tracks onnxruntime-genai `main`: the model builder runs at a pinned commit of `main` (`liquidonnx.genai_builder.GENAI_COMMIT`), and CI tests the runtime built from that same commit. To run on that build, build the pinned commit and put its Python package first on the path:
 
 ```bash
@@ -163,7 +177,9 @@ The q4 and q8 decoders have an int8 LM head, and their bundles an int8 token tab
 
 ## 4. Inference
 
-The inference CLIs run the export folder on onnxruntime-genai, with interactive multi-turn chat and streaming output. They load the precision `genai_config.json` points at; `--precision` picks another one, and `--ep cuda` runs on CUDA (needs `onnxruntime-genai-cuda`).
+The inference CLIs run the export folder on onnxruntime-genai, with interactive multi-turn chat and streaming output. They load the precision `genai_config.json` points at; `--precision` picks another one, and `--ep cuda` runs on CUDA (with the packages in [2](#2-installation)).
+
+On CUDA, use fp16 or q4f16 for text and MoE (`lfm2-export --precision q4f16` adds it for text), and fp16 for VL and Audio. The other precisions keep fp32 activations, so their GroupQueryAttention nodes, and the experts of MoE q4, run on the CPU: on an H100 with a 1024-token prompt, LFM2.5-350M decodes at 975 tok/s with q4f16 and 124 tok/s with q4. The MoE decoders mark their QMoE experts `weights_prepacked=0`, without which the CUDA EP misreads them; older MoE exports print garbage on CUDA and need re-exporting.
 
 ### 4.1 Text Generation
 
@@ -289,7 +305,7 @@ uv run lfm2-compare vl --model LiquidAI/LFM2.5-VL-1.6B --export ./exports/LFM2.5
 uv run lfm2-compare audio --model LiquidAI/LFM2.5-Audio-1.5B --export ./exports/LFM2.5-Audio-1.5B-ONNX
 ```
 
-`--device cuda` runs the reference, the ONNX sessions and onnxruntime-genai on the GPU with TF32 off, so fp32 stays fp32 (needs `onnxruntime-gpu` and `onnxruntime-genai-cuda`). References are cached per device.
+`--device cuda` runs the reference, the ONNX sessions and onnxruntime-genai on the GPU with TF32 off, so fp32 stays fp32 (needs the CUDA packages in [2](#2-installation)). References are cached per device.
 
 `lfm2-compare wikitext` is the quality gate for quantized precisions. It scores them on wikitext-2 with the protocol of [olive-recipes #638](https://github.com/microsoft/olive-recipes/pull/638): 64 chunks of 512 tokens, the second half of each scored, KLD ± SE over the chunks and same-top %. The reference is an fp32 one in llama.cpp's KL-divergence base format, given with `--reference` or computed from `--model`. The command exits with 1 when a precision is above `--max-kld` or, for the LFM2.5 models it knows, above today's KLD + 2 SE. `--help` explains the token streams.
 
