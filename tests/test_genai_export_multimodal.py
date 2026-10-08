@@ -11,6 +11,7 @@ Run with:
 
 import json
 import pathlib
+import shutil
 
 import numpy as np
 import onnx
@@ -367,6 +368,8 @@ def test_audio_genai_config(audio):
     assert model["audio_token_id"] == audio_export.AUDIO_TOKEN_ID
     assert not set(model["eos_token_id"]) & set(audio_export.MODALITY_SWITCH_TOKEN_IDS)
     assert model["decoder"]["session_options"]["session.set_denormal_as_zero"] == "1"
+    assert model["audio_output"]["interleaved_n_text"] == 6
+    assert model["audio_output"]["interleaved_n_audio"] == 9
     files = [
         model["decoder"]["filename"],
         model["embedding"]["filename"],
@@ -422,6 +425,20 @@ def test_audio_genai_config_checks_token_ids(audio, tmp_path):
     (tmp_path / "tokenizer.json").write_text(json.dumps(tokenizer))
     with pytest.raises(ValueError, match="reserved_123"):
         audio_export.write_genai_config(tmp_path, "q4")
+
+
+def test_audio_genai_config_checks_codebooks(audio, tmp_path):
+    shutil.copy(audio / "tokenizer.json", tmp_path)
+    config = json.loads((audio / "config.json").read_text())
+    (tmp_path / "config.json").write_text(json.dumps({**config, "codebooks": 4}))
+    with pytest.raises(ValueError, match="4 codebooks"):
+        audio_export.write_genai_config(tmp_path, "q4")
+
+
+def test_audio_embedding_checks_codebook_size(tmp_path):
+    weights = {"audio_embedding.embedding.weight": np.zeros((8 * 2048, 4), dtype=np.float32)}
+    with pytest.raises(ValueError, match="16384 rows"):
+        audio_export.export_audio_embedding_binary(weights, {}, tmp_path)
 
 
 def test_audio_embeddings_scatter_features(audio):

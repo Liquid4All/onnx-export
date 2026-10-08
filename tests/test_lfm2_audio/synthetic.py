@@ -227,6 +227,10 @@ def decoder_weights(rng) -> dict[str, np.ndarray]:
 
 def decoder_config() -> dict:
     return {
+        "codebooks": 8,
+        "interleaved_n_text": 6,
+        # LFM2.5-Audio-1.5B-JP's count rather than onnxruntime-genai's default of 12
+        "interleaved_n_audio": 9,
         "lfm": {
             "hidden_size": HIDDEN,
             "num_hidden_layers": len(LAYER_TYPES),
@@ -239,7 +243,7 @@ def decoder_config() -> dict:
             "max_position_embeddings": 4096,
             "norm_eps": 1e-5,
             "rope_theta": 1000000.0,
-        }
+        },
     }
 
 

@@ -103,12 +103,21 @@ def test_chat_passes_its_ep_to_the_detokenizer(model_dir, monkeypatch):
     ],
 )
 def test_modes_run(chat, tone, mode: str, text: str | None, audio: bool):
-    answer = chat.answer(mode, *single_turn(text, tone if audio else None), max_new_tokens=24)
+    answer = chat.answer(
+        mode, *single_turn(text, tone if audio else None), max_new_tokens=24, random_seed=0
+    )
     assert isinstance(answer.text, str)
     assert answer.codes.shape[1] == NUM_CODEBOOKS
     if len(answer.codes):
         assert answer.codes.min() >= 0 and answer.codes.max() <= 2048
         assert chat.detokenizer(answer.codes).shape == (len(answer.codes) * SAMPLES_PER_FRAME,)
+
+
+def test_interleaved_turns_take_the_checkpoint_counts(chat, tone):
+    """6 text tokens, then the checkpoint's 9 audio frames rather than genai's default of 12."""
+    turns, audios = single_turn(None, tone)
+    answer = chat.answer("interleaved", turns, audios, max_new_tokens=6 + 12, random_seed=1)
+    assert len(answer.codes) == 9
 
 
 def test_multi_turn_resends_the_conversation(chat, tone, monkeypatch):
