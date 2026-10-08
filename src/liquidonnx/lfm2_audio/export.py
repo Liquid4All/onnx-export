@@ -5,9 +5,9 @@ ONNX export of LFM2.5-Audio for onnxruntime-genai, covering all three modes:
 - TTS (Text-to-Speech): Text -> Audio
 - Interleaved: Mixed text and audio I/O
 
-The decoder comes from the onnxruntime-genai model builder (fp32, CPU EP, inputs_embeds in,
+The fp32 and q8 decoders come from the onnxruntime-genai model builder (CPU EP, inputs_embeds in,
 logits and hidden states out; see liquidonnx.genai_builder). This repository builds the other
-graphs and derives every precision.
+graphs and derives the other precisions.
 
 Output Structure:
     {output-dir}/exports/{model-name}-ONNX/
@@ -54,7 +54,7 @@ from liquidonnx.export_cli import (
     output_dir,
     parse_precisions,
 )
-from liquidonnx.genai_builder import export_decoder
+from liquidonnx.genai_builder import export_decoder, export_precision
 from liquidonnx.lfm2_audio.builder.config import ConformerConfig
 from liquidonnx.lfm2_audio.builder.conformer_builder import ConformerEncoderBuilder
 from liquidonnx.lfm2_audio.builder.depthformer_builder import export_vocoder_depthformer
@@ -63,7 +63,6 @@ from liquidonnx.lfm2_audio.builder.detokenizer_builder import (
 )
 from liquidonnx.quantize import (
     convert_to_fp16,
-    derive_precision,
     get_model_size,
     quantize_model,
 )
@@ -337,9 +336,20 @@ def export_embed_tokens(
 # === 4. Precisions ===
 
 
-def derive_precision_files(onnx_dir: pathlib.Path, precision: str, block_size: int):
+def derive_precision_files(
+    model_path: str, output_dir: pathlib.Path, precision: str, block_size: int
+):
     """Write the files bundle(precision) loads."""
-    derive_precision(onnx_dir, precision, name="decoder", block_size=block_size)
+    onnx_dir = output_dir / "onnx"
+    export_precision(
+        model_path,
+        output_dir,
+        "lfm2_audio",
+        precision,
+        name="decoder",
+        extra_options=DECODER_OPTIONS,
+        block_size=block_size,
+    )
 
     for name in ("audio_encoder", "audio_detokenizer"):
         fp32_path = onnx_dir / f"{name}.onnx"
@@ -477,14 +487,13 @@ def main():
 
     precisions = parse_precisions(parser, args, PRECISIONS, PRECISIONS)
     export_dir = output_dir(args)
-    onnx_dir = export_dir / "onnx"
 
     log_step(f"Exporting {args.model} (fp32) to {export_dir}")
     export_full_model(args.model, export_dir)
 
     for precision in precisions:
-        log_step(f"Deriving {precision}")
-        derive_precision_files(onnx_dir, precision, args.block_size)
+        log_step(f"Exporting {precision}")
+        derive_precision_files(args.model, export_dir, precision, args.block_size)
 
     write_genai_config(export_dir, next((p for p in DEFAULT_ORDER if p in precisions), "fp32"))
 

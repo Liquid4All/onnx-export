@@ -22,7 +22,7 @@ ONNX export and inference tools for [LFM2](https://www.liquid.ai/liquid-foundati
 | **LFM2.5-8B-A1B**, **LFM2-8B-A1B** | fp32, fp16, q4, q4f16, q8 |
 | **LFM2.5-Audio** | fp32, fp16, q4, q8 |
 
-Every export is an [onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai) model folder, and the inference CLIs run on onnxruntime-genai. The decoders come from the onnxruntime-genai model builder; this repository builds the vision encoder, the audio graphs and the embedding models that splice image or audio features into the token embeddings, and derives every precision. The exports are not loadable by Transformers.js.
+Every export is an [onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai) model folder, and the inference CLIs run on onnxruntime-genai. The decoders come from the onnxruntime-genai model builder, which also quantizes the q8 and q4f32 decoders; this repository builds the vision encoder, the audio graphs and the embedding models that splice image or audio features into the token embeddings, and derives the other precisions. The exports are not loadable by Transformers.js.
 
 
 ## 2. Installation

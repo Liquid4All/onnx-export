@@ -2,8 +2,8 @@
 """
 Export LFM2 and LFM2-MoE models to ONNX for onnxruntime-genai.
 
-The decoder comes from the onnxruntime-genai model builder (fp32, CPU EP, see
-liquidonnx.genai_builder); every other precision is derived from it by liquidonnx.quantize.
+The onnxruntime-genai model builder (CPU EP, see liquidonnx.genai_builder) builds the fp32, q8
+and q4f32 decoders, one run each; liquidonnx.quantize derives fp16, q4 and q4f16 from fp32.
 
 Output Structure:
     {output-dir}/exports/{model-name}-ONNX/
@@ -38,8 +38,8 @@ Usage:
     # MoE checkpoints
     uv run lfm2-moe-export LiquidAI/LFM2.5-8B-A1B --precision q4 q8
 
-    # Derive precisions from an existing fp32 export
-    uv run lfm2-export LiquidAI/LFM2.5-350M --precision q8 --skip-export
+    # Add precisions to an existing export without rebuilding fp32
+    uv run lfm2-export LiquidAI/LFM2.5-350M --precision q4 --skip-export
 """
 
 import argparse
@@ -54,8 +54,7 @@ from liquidonnx.export_cli import (
     output_dir,
     parse_precisions,
 )
-from liquidonnx.genai_builder import export_decoder
-from liquidonnx.quantize import derive_precision
+from liquidonnx.genai_builder import export_decoder, export_precision
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +84,11 @@ def set_default_decoder(output_dir: pathlib.Path, precisions: list[str]):
     logger.info(f"genai_config.json decoder -> onnx/{model_file(default)}")
 
 
-def main(default_precisions: tuple[str, ...] = TEXT_PRECISIONS, description: str | None = None):
+def main(
+    default_precisions: tuple[str, ...] = TEXT_PRECISIONS,
+    description: str | None = None,
+    family: str = "lfm2",
+):
     parser = argparse.ArgumentParser(
         description=description or "Export LFM2 models to ONNX for onnxruntime-genai",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -120,9 +123,11 @@ def main(default_precisions: tuple[str, ...] = TEXT_PRECISIONS, description: str
         export_decoder(args.model, export_dir)
 
     for precision in precisions:
-        log_step(f"Deriving {precision}")
-        derive_precision(
-            onnx_dir,
+        log_step(f"Exporting {precision}")
+        export_precision(
+            args.model,
+            export_dir,
+            family,
             precision,
             block_size=args.block_size,
             q4_symmetric=not args.q4_asymmetric,

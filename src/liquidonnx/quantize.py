@@ -9,7 +9,9 @@ turn an fp32 onnxruntime-genai LFM2 decoder into the published precisions:
     moe_to_qmoe         com.microsoft MoE -> QMoE with int4/int8 block-quantized experts
     convert_to_fp16     fp16 weights, activations and caches; logits kept fp32
 
-derive_precision chains them into the recipe for each published precision.
+derive_precision chains them into the recipe for each published precision. The exports build the
+precisions in liquidonnx.genai_builder.DECODER_PRESETS with the genai builder instead, which
+writes the same decoders.
 """
 
 import logging
@@ -357,7 +359,7 @@ def convert_to_fp16(
     return output_path
 
 
-def _rename_quantized_weights(model: onnx.ModelProto):
+def rename_quantized_weights(model: onnx.ModelProto):
     """Rename quantized weight initializers to match community convention.
 
     Transforms:
@@ -429,7 +431,7 @@ def quantize_matmuls(
     quantizer.process()
 
     quantized = quantizer.model.model
-    _rename_quantized_weights(quantized)
+    rename_quantized_weights(quantized)
     return quantized
 
 

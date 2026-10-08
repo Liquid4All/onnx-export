@@ -17,6 +17,7 @@ import onnx
 import onnxruntime_genai as og
 import pytest
 import torch
+from helpers import assert_same_graph, derive_reference
 from PIL import Image
 from test_lfm2_audio.synthetic import HIDDEN, build_model_dir
 from tokenizers import Regex, Tokenizer, models, pre_tokenizers
@@ -78,9 +79,10 @@ def vl(tmp_path_factory):
     AutoProcessor.from_pretrained("LiquidAI/LFM2.5-VL-1.6B").save_pretrained(root / "checkpoint")
 
     output_dir = root / "export"
-    vl_export.export_vl_model(str(root / "checkpoint"), output_dir)
+    checkpoint = str(root / "checkpoint")
+    vl_export.export_vl_model(checkpoint, output_dir)
     for precision in vl_export.PRECISIONS:
-        vl_export.derive_precision_files(output_dir / "onnx", precision)
+        vl_export.derive_precision_files(checkpoint, output_dir, precision)
     vl_export.write_genai_config(output_dir, "q4")
     processor = AutoProcessor.from_pretrained(output_dir)
     return model, processor, output_dir
@@ -195,6 +197,13 @@ def test_vl_cached_decode_matches_prefill(vl, precision: str):
         np.testing.assert_allclose(result[0][0, -1], expected[0, n + i], atol=5e-3)
 
 
+def test_vl_q8_decoder_matches_quantize(vl, tmp_path):
+    """The builder's q8 decoder is the one liquidonnx.quantize derives from fp32."""
+    _, _, output_dir = vl
+    expected = derive_reference(output_dir / "onnx", tmp_path, "q8", "decoder")
+    assert_same_graph(output_dir / "onnx" / "decoder_q8.onnx", expected)
+
+
 def test_vl_genai_config(vl):
     _, _, output_dir = vl
     model = json.loads((output_dir / "genai_config.json").read_text())["model"]
@@ -299,9 +308,12 @@ def test_vl_fix_tokenizer_pattern(tmp_path):
 @pytest.fixture(scope="module")
 def audio(tmp_path_factory):
     """Synthetic export with every precision derived; genai_config.json at q4."""
-    output_dir = build_model_dir(tmp_path_factory.mktemp("audio"))
+    root = tmp_path_factory.mktemp("audio")
+    output_dir = build_model_dir(root)
     for precision in audio_export.PRECISIONS:
-        audio_export.derive_precision_files(output_dir / "onnx", precision, block_size=32)
+        audio_export.derive_precision_files(
+            str(root / "checkpoint"), output_dir, precision, block_size=32
+        )
     audio_export.write_genai_config(output_dir, "q4")
     return output_dir
 
@@ -328,6 +340,12 @@ def test_audio_genai_config(audio):
     ]
     for filename in files:
         assert (audio / filename).exists()
+
+
+def test_audio_q8_decoder_matches_quantize(audio, tmp_path):
+    """The builder's q8 decoder is the one liquidonnx.quantize derives from fp32."""
+    expected = derive_reference(audio / "onnx", tmp_path, "q8", "decoder", block_size=32)
+    assert_same_graph(audio / "onnx" / "decoder_q8.onnx", expected)
 
 
 def test_audio_genai_config_checks_token_ids(audio, tmp_path):

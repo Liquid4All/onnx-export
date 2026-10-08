@@ -30,10 +30,10 @@ from transformers import (
 from liquidonnx import compare
 from liquidonnx.compare import kld_base, wikitext
 from liquidonnx.embeddings import embed
-from liquidonnx.genai_builder import export_decoder
+from liquidonnx.genai_builder import export_decoder, export_precision
 from liquidonnx.lfm2_audio import export as audio_export
 from liquidonnx.lfm2_vl import export as vl_export
-from liquidonnx.quantize import derive_precision, get_total_model_size_mb
+from liquidonnx.quantize import get_total_model_size_mb
 from liquidonnx.session import decoder_inputs, initialize_cache, load_onnx_session
 
 N_CTX, N_CHUNK, BOS = 32, 4, 1
@@ -169,7 +169,7 @@ def text(tmp_path_factory):
     export = root / "LFM2.5-tiny-ONNX"
     export_decoder(str(root / "checkpoint"), export)
     for precision in ("q4", "q8"):
-        derive_precision(export / "onnx", precision)
+        export_precision(str(root / "checkpoint"), export, "lfm2", precision)
     return root / "checkpoint", model, export
 
 
@@ -416,7 +416,7 @@ def vl(tmp_path_factory):
     AutoProcessor.from_pretrained("LiquidAI/LFM2.5-VL-1.6B").save_pretrained(root / "checkpoint")
     export = root / "export"
     vl_export.export_vl_model(str(root / "checkpoint"), export)
-    vl_export.derive_precision_files(export / "onnx", "q4")
+    vl_export.derive_precision_files(str(root / "checkpoint"), export, "q4")
     vl_export.write_genai_config(export, "q4")
     return root / "checkpoint", model, export
 
@@ -441,7 +441,7 @@ def test_audio_against_a_reference(tmp_path, monkeypatch, capsys):
     """Audio exports score against --reference, through the embedding model's audio_features;
     computing a reference needs liquid-audio."""
     export = build_model_dir(tmp_path)
-    audio_export.derive_precision_files(export / "onnx", "q4", block_size=32)
+    audio_export.derive_precision_files(str(tmp_path / "checkpoint"), export, "q4", block_size=32)
     files = audio_export.bundle("fp32")
     decoder = load_onnx_session(export / "onnx" / files["decoder"])
     embedding = load_onnx_session(export / "onnx" / files["embedding"])
