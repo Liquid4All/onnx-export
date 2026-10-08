@@ -12,6 +12,7 @@ import collections
 import json
 import logging
 import pathlib
+import sys
 
 import numpy as np
 import onnx
@@ -36,7 +37,11 @@ from liquidonnx.genai_runtime import (
     generate,
     load_model,
 )
+from liquidonnx.lfm2 import benchmark
+from liquidonnx.lfm2 import infer as text_infer
 from liquidonnx.lfm2.export import ALL_PRECISIONS, genai_files, model_file, set_default_decoder
+from liquidonnx.lfm2_audio import infer as audio_infer
+from liquidonnx.lfm2_vl import infer as vl_infer
 from liquidonnx.session import (
     cached_outputs,
     decoder_inputs,
@@ -372,6 +377,39 @@ def test_load_model_turns_tf32_off_on_cuda(export, ep: str, tf32: bool, monkeypa
     monkeypatch.setattr(og, "Model", lambda config: None)
     load_model(export[2], ep=ep, tf32=tf32)
     assert options == ([("cuda", "use_tf32", "0")] if ep == "cuda" and not tf32 else [])
+
+
+class Loaded(Exception):
+    """Stops a CLI once it has asked for its model."""
+
+
+# CLI -> (module, arguments that get it to loading the model)
+INFERENCE_CLIS = {
+    "lfm2-infer": (text_infer, ["--model", "export", "--prompt", "Hi"]),
+    "lfm2-bench": (benchmark, ["--model", "export", "--precision", "q4"]),
+    "lfm2-vl-infer": (vl_infer, ["--model", "export"]),
+    "lfm2-audio-infer": (audio_infer, ["export", "--prompt", "Hi"]),
+}
+
+
+@pytest.mark.parametrize(
+    ("flags", "tf32"), [([], True), (["--no-tf32"], False)], ids=["default", "no-tf32"]
+)
+@pytest.mark.parametrize("cli", INFERENCE_CLIS)
+def test_inference_clis_turn_tf32_off_on_request(cli: str, flags: list, tf32: bool, monkeypatch):
+    """--no-tf32 reaches load_model; without it the CLIs keep the CUDA EP's TF32 default."""
+    module, arguments = INFERENCE_CLIS[cli]
+    loads = []
+
+    def load(model_dir, files=None, ep="cpu", tf32=True):
+        loads.append((ep, tf32))
+        raise Loaded
+
+    monkeypatch.setattr(module, "load_model", load)
+    monkeypatch.setattr(sys, "argv", [cli, *arguments, "--ep", "cuda", *flags])
+    with pytest.raises(Loaded):
+        module.main()
+    assert loads == [("cuda", tf32)]
 
 
 def fake_sessions(monkeypatch, loaded: list[str]) -> list:

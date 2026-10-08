@@ -43,6 +43,7 @@ def benchmark(
     max_tokens: int = 20,
     ep: str = "cpu",
     warmup: int = 2,
+    tf32: bool = True,
 ) -> BenchmarkResult:
     """Greedy continuation of prompt (no chat template), exactly max_tokens long, after warmup runs."""
     if precision:
@@ -52,7 +53,7 @@ def benchmark(
         decoder = config["model"]["decoder"]["filename"]
 
     start = time.perf_counter()
-    model = load_model(model_dir, precision and genai_files(precision), ep)
+    model = load_model(model_dir, precision and genai_files(precision), ep, tf32)
     load_time = time.perf_counter() - start
 
     from transformers import AutoTokenizer
@@ -115,7 +116,9 @@ def main():
 
     logging.basicConfig(level=logging.INFO)
 
-    log_result(benchmark(args.model, args.precision, args.prompt, args.max_tokens, args.ep))
+    log_result(
+        benchmark(args.model, args.precision, args.prompt, args.max_tokens, args.ep, tf32=args.tf32)
+    )
 
 
 if __name__ == "__main__":

@@ -135,6 +135,7 @@ class TokenPrinter:
 
 
 def add_runtime_arguments(parser, precisions: tuple[str, ...]):
+    """--precision, --ep and --no-tf32, parsed into args.precision, args.ep and args.tf32."""
     parser.add_argument(
         "--precision",
         choices=["fp32", *precisions],
@@ -145,4 +146,11 @@ def add_runtime_arguments(parser, precisions: tuple[str, ...]):
         choices=EXECUTION_PROVIDERS,
         default="cpu",
         help="Execution provider (cuda needs onnxruntime-genai-cuda; default: cpu)",
+    )
+    parser.add_argument(
+        "--no-tf32",
+        dest="tf32",
+        action="store_false",
+        help="On CUDA, run fp32 matmuls and convolutions in full fp32 instead of onnxruntime's "
+        "default TF32, to match an fp32 reference",
     )

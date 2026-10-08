@@ -181,7 +181,7 @@ The q4 and q8 decoders have an int8 LM head, and their bundles an int8 token tab
 
 ## 4. Inference
 
-The inference CLIs run the export folder on onnxruntime-genai, with interactive multi-turn chat and streaming output. They load the precision `genai_config.json` points at; `--precision` picks another one, and `--ep cuda` runs on CUDA (with the packages in [2](#2-installation)).
+The inference CLIs run the export folder on onnxruntime-genai, with interactive multi-turn chat and streaming output. They load the precision `genai_config.json` points at; `--precision` picks another one, and `--ep cuda` runs on CUDA (with the packages in [2](#2-installation)). The CUDA EP runs fp32 matmuls and convolutions in TF32 unless `--no-tf32` is given, so checks against an fp32 reference need the flag (`lfm2-compare --device cuda` always turns TF32 off).
 
 On CUDA, use fp16 or q4f16 for text and MoE (`lfm2-export --precision q4f16` adds it for text), and fp16 for VL and Audio. The other precisions keep fp32 activations, so their GroupQueryAttention nodes, and the experts of MoE q4, run on the CPU: on an H100 with a 1024-token prompt, LFM2.5-350M decodes at 975 tok/s with q4f16 and 124 tok/s with q4. The MoE decoders mark their QMoE experts `weights_prepacked=0`, without which the CUDA EP misreads them; older MoE exports print garbage on CUDA and need re-exporting.
 

@@ -114,8 +114,8 @@ def istft_same_padding(spectrum: np.ndarray, n_fft: int, hop_length: int) -> np.
 class Detokenizer:
     """audio_detokenizer.onnx plus the inverse STFT: audio codes -> waveform."""
 
-    def __init__(self, path: pathlib.Path, ep: str = "cpu"):
-        self.session = load_onnx_session(path, ep)
+    def __init__(self, path: pathlib.Path, ep: str = "cpu", tf32: bool = True):
+        self.session = load_onnx_session(path, ep, tf32)
 
     def __call__(self, codes: np.ndarray) -> np.ndarray:
         # genai drops end-of-audio frames; codebooks 1-7 can still sample 2048, past the table's 2047.
@@ -138,12 +138,18 @@ def write_wav(path: str, wave: np.ndarray):
 
 
 class AudioChat:
-    def __init__(self, model_dir: pathlib.Path, precision: str | None = None, ep: str = "cpu"):
-        self.model = load_model(model_dir, precision and genai_files(precision), ep)
+    def __init__(
+        self,
+        model_dir: pathlib.Path,
+        precision: str | None = None,
+        ep: str = "cpu",
+        tf32: bool = True,
+    ):
+        self.model = load_model(model_dir, precision and genai_files(precision), ep, tf32)
         self.tokenizer = og.Tokenizer(self.model)
         self.processor = self.model.create_multimodal_processor()
         files = bundle(precision or default_precision(model_dir))
-        self.detokenizer = Detokenizer(model_dir / "onnx" / files["detokenizer"], ep)
+        self.detokenizer = Detokenizer(model_dir / "onnx" / files["detokenizer"], ep, tf32)
 
     def answer(
         self,
@@ -317,7 +323,7 @@ def main():
     if args.audio_top_k is not None:
         sampling["audio_top_k"] = args.audio_top_k
 
-    chat = AudioChat(args.model_dir, args.precision, args.ep)
+    chat = AudioChat(args.model_dir, args.precision, args.ep, args.tf32)
 
     def generate_answer(turns: list[tuple[str, str]], audios: list[str]) -> Answer:
         return chat.answer(
