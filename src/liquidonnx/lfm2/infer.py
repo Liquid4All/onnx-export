@@ -18,6 +18,10 @@ import onnxruntime_genai as og
 from liquidonnx.genai_runtime import TokenPrinter, add_runtime_arguments, generate, load_model
 from liquidonnx.lfm2.export import ALL_PRECISIONS, genai_files
 
+# LFM2.5-2.6B and LFM2.5-8B-A1B think before they answer: greedy at q4, eight chat prompts took
+# 52 to 2,447 tokens. An answer ends at the end-of-turn token; the cap stops one that loops.
+MAX_NEW_TOKENS = 4096
+
 
 class TextChat:
     """A conversation with an LFM2 or LFM2-MoE export."""
@@ -37,7 +41,7 @@ class TextChat:
         self.hf_tokenizer = AutoTokenizer.from_pretrained(model_dir)
         self.messages: list[dict] = []
 
-    def send(self, text: str, max_new_tokens: int = 100, stream: bool = True) -> str:
+    def send(self, text: str, max_new_tokens: int = MAX_NEW_TOKENS, stream: bool = True) -> str:
         self.messages.append({"role": "user", "content": text})
         prompt = self.hf_tokenizer.apply_chat_template(
             self.messages, tokenize=False, add_generation_prompt=True
@@ -108,7 +112,12 @@ def main():
     parser.add_argument("--model", required=True, type=pathlib.Path, help="Export folder")
     add_runtime_arguments(parser, ALL_PRECISIONS)
     parser.add_argument("--prompt", default=None, help="Initial prompt (optional)")
-    parser.add_argument("--max-tokens", type=int, default=100, help="Max tokens to generate")
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=MAX_NEW_TOKENS,
+        help=f"Max tokens per answer (default: {MAX_NEW_TOKENS})",
+    )
     parser.add_argument("--no-stream", action="store_true", help="Disable streaming output")
     args = parser.parse_args()
 

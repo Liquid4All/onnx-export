@@ -8,6 +8,7 @@ Run with:
     uv run pytest tests/test_genai_export.py -v -k "moe and q4"
 """
 
+import argparse
 import collections
 import json
 import logging
@@ -511,6 +512,33 @@ def test_inference_clis_turn_tf32_off_on_request(cli: str, flags: list, tf32: bo
     with pytest.raises(Loaded):
         module.main()
     assert loads == [("cuda", tf32)]
+
+
+class Parsed(Exception):
+    """Stops a CLI once it has parsed its arguments."""
+
+
+@pytest.mark.parametrize(
+    ("cli", "max_tokens"),
+    [("lfm2-infer", 4096), ("lfm2-vl-infer", 4096), ("lfm2-bench", 20), ("lfm2-audio-infer", None)],
+)
+def test_inference_clis_max_tokens_defaults(cli: str, max_tokens: int | None, monkeypatch):
+    """lfm2-infer (and lfm2-moe-infer, the same CLI) and lfm2-vl-infer leave room for
+    LFM2.5-2.6B and LFM2.5-8B-A1B to think and then answer. lfm2-bench keeps its short run and
+    lfm2-audio-infer its per-mode defaults."""
+    module, arguments = INFERENCE_CLIS[cli]
+    parsed = []
+    parse_args = argparse.ArgumentParser.parse_args
+
+    def parse(parser, *args, **kwargs):
+        parsed.append(parse_args(parser, *args, **kwargs))
+        raise Parsed
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", parse)
+    monkeypatch.setattr(sys, "argv", [cli, *arguments])
+    with pytest.raises(Parsed):
+        module.main()
+    assert parsed[0].max_tokens == max_tokens
 
 
 def fake_sessions(monkeypatch, loaded: list[str]) -> list:
