@@ -9,6 +9,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 # Suppress noisy loggers
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx2").setLevel(logging.WARNING)  # huggingface-hub 2.x
 logging.getLogger("transformers").setLevel(logging.WARNING)
 
 

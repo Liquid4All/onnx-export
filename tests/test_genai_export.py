@@ -16,6 +16,7 @@ import os
 import pathlib
 import shutil
 import stat
+import subprocess
 import sys
 
 import numpy as np
@@ -421,6 +422,19 @@ def test_genai_version_floor():
             check_genai_version(version)
     for version in ("0.17.1", "0.18.0-dev"):
         check_genai_version(version)
+
+
+@pytest.mark.parametrize(("value", "expected"), [(None, "1"), ("0", "0")])
+def test_onnxruntime_telemetry_is_off_unless_set(value: str | None, expected: str):
+    """onnxruntime's telemetry thread can crash a process holding torch at exit."""
+    env = {k: v for k, v in os.environ.items() if k != "ORT_DISABLE_TELEMETRY"}
+    if value is not None:
+        env["ORT_DISABLE_TELEMETRY"] = value
+    code = "import os, liquidonnx; print(os.environ['ORT_DISABLE_TELEMETRY'])"
+    result = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True
+    )
+    assert result.stdout.strip() == expected
 
 
 @pytest.mark.parametrize(

@@ -71,7 +71,7 @@ BATCH = 4  # chunks per forward pass of the reference model, as make_ref.py
 THREADS = 13
 
 # KLD ± SE per device against H100 fp32 references: on the CPU EP of the locked onnxruntime
-# nightly, and on the H100's CUDA EP with TF32 off (onnxruntime-gpu 1.30.0). A row gates its own
+# nightly, and on the H100's CUDA EP with TF32 off (onnxruntime-gpu 1.31.0). A row gates its own
 # device only: q8 scores 1.5x to 3.7x higher on the CPU, so a CPU ceiling would let a CUDA q8 grow
 # 1.7x to 4x unnoticed. A precision fails above KLD + 2 SE. The text, MoE and VL q4 rows, and the
 # q4f16 rows converted from them, are the genai builder's k_quant build on the locked onnxruntime
@@ -86,7 +86,7 @@ BASELINES = {
         "LFM2.5-2.6B": {"q4": (0.1657, 0.0041), "q4f32": (0.2310, 0.0051)},
         "LFM2.5-8B-A1B": {"q4": (0.2103, 0.0060)},
         "LFM2.5-VL-450M": {"q4": (0.0643, 0.0014)},
-        "LFM2.5-Audio-1.5B": {"q4": (0.03200, 0.00057)},
+        "LFM2.5-Audio-1.5B": {"q4": (0.03209, 0.00056)},
     },
     "cuda": {
         "LFM2.5-350M": {
@@ -105,7 +105,7 @@ BASELINES = {
             "q4f16": (0.1638, 0.0040),
         },
         "LFM2.5-8B-A1B": {
-            "q8": (0.01698, 0.00082),
+            "q8": (0.01824, 0.00077),
             # not deterministic on CUDA (0.00513 to 0.00565 over 8 runs): the worst run
             "fp16": (0.00565, 0.000400),
             # with weights_prepacked=0 on the QMoE nodes: without it the CUDA EP misreads the experts

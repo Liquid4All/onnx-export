@@ -43,6 +43,8 @@ pip install --pre --no-deps --upgrade \
     --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ onnxruntime
 ```
 
+liquidonnx sets `ORT_DISABLE_TELEMETRY=1` unless it is already set. The onnxruntime 1.32 nightlies upload telemetry from a thread that can crash a process that has loaded torch when it exits (SIGSEGV), which fails an export that has already written its files; `ORT_DISABLE_TELEMETRY=0` keeps telemetry on.
+
 `--ep cuda` (Linux) needs the CUDA builds, `onnxruntime-gpu` and `onnxruntime-genai-cuda`, in place of `onnxruntime` and `onnxruntime-genai`. They are separate distributions, so `uv sync` and a plain `uv run` would put the CPU packages back: install the rest of the lock without them and run with `uv run --no-sync`. The PyPI CUDA wheels are built for CUDA 13 and need NVIDIA driver 580 or later. `uv venv --clear` replaces the checkout's `.venv`, CPU packages included; to keep both, run these commands in a second clone (a symlink to the first clone's `exports` shares the exports).
 
 ```bash
@@ -51,10 +53,10 @@ uv export --frozen --no-hashes --no-emit-project \
     | grep -vE '^onnxruntime(-genai)?==' > /tmp/requirements-cuda.txt
 uv pip install --no-deps -r /tmp/requirements-cuda.txt
 uv pip install --no-deps -e .
-uv pip install "onnxruntime-gpu[cuda,cudnn]==1.30.0" onnxruntime-genai-cuda==0.17.1
+uv pip install "onnxruntime-gpu[cuda,cudnn]==1.31.0" onnxruntime-genai-cuda==0.17.1
 ```
 
-In this environment the CPU execution provider comes from onnxruntime-gpu 1.30.0, which runs LFM2-MoE about 44 times slower than the nightly (see [4.3](#43-moe)).
+In this environment the CPU execution provider comes from onnxruntime-gpu 1.31.0, which runs LFM2-MoE as fast as the nightly (see [4.3](#43-moe)).
 
 This repository tracks onnxruntime-genai `main`: the model builder runs at a pinned commit of `main` (`liquidonnx.genai_builder.GENAI_COMMIT`), and CI tests the runtime built from that same commit. To run on that build, build the pinned commit and put its Python package first on the path:
 
