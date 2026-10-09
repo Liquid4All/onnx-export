@@ -76,20 +76,21 @@ def test_detokenizer_waveform(model_dir, tmp_path):
 
 
 def test_chat_passes_its_ep_to_the_detokenizer(model_dir, monkeypatch):
-    """--ep reaches the detokenizer as well as onnxruntime-genai (both still load on CPU here)."""
-    eps = []
+    """--ep and --no-tf32 reach the detokenizer as well as onnxruntime-genai (both still load on
+    CPU here)."""
+    loads = []
 
     def on_cpu(load):
         def recorded(*args):
-            eps.append(args[-1])
-            return load(*args[:-1])
+            loads.append(args[-2:])
+            return load(*args[:-2])
 
         return recorded
 
     monkeypatch.setattr(infer, "load_model", on_cpu(load_model))
     monkeypatch.setattr(infer, "load_onnx_session", on_cpu(load_onnx_session))
-    AudioChat(model_dir, ep="cuda")
-    assert eps == ["cuda", "cuda"]
+    AudioChat(model_dir, ep="cuda", tf32=False)
+    assert loads == [("cuda", False), ("cuda", False)]
 
 
 @pytest.mark.parametrize(

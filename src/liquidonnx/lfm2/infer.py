@@ -22,10 +22,16 @@ from liquidonnx.lfm2.export import ALL_PRECISIONS, genai_files
 class TextChat:
     """A conversation with an LFM2 or LFM2-MoE export."""
 
-    def __init__(self, model_dir: pathlib.Path, precision: str | None = None, ep: str = "cpu"):
+    def __init__(
+        self,
+        model_dir: pathlib.Path,
+        precision: str | None = None,
+        ep: str = "cpu",
+        tf32: bool = True,
+    ):
         from transformers import AutoTokenizer
 
-        self.model = load_model(model_dir, precision and genai_files(precision), ep)
+        self.model = load_model(model_dir, precision and genai_files(precision), ep, tf32)
         self.tokenizer = og.Tokenizer(self.model)
         # The chat template and prompt ids come from transformers, as for the reference model.
         self.hf_tokenizer = AutoTokenizer.from_pretrained(model_dir)
@@ -108,7 +114,7 @@ def main():
 
     logging.basicConfig(level=logging.INFO)
 
-    run_chat_loop(TextChat(args.model, args.precision, args.ep), args, "LFM2")
+    run_chat_loop(TextChat(args.model, args.precision, args.ep, args.tf32), args, "LFM2")
 
 
 if __name__ == "__main__":

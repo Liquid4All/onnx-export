@@ -93,8 +93,9 @@ class VLChat:
         precision: str | None = None,
         ep: str = "cpu",
         image_splitting: bool | None = None,
+        tf32: bool = True,
     ):
-        self.model = load_model(model_dir, precision and genai_files(precision), ep)
+        self.model = load_model(model_dir, precision and genai_files(precision), ep, tf32)
         self.tokenizer = og.Tokenizer(self.model)
         self.processor = CheckpointProcessor(model_dir, image_splitting)
         self.messages: list[dict] = []
@@ -171,7 +172,7 @@ def main():
 
     logging.basicConfig(level=logging.INFO)
 
-    chat = VLChat(args.model, args.precision, args.ep, args.image_splitting)
+    chat = VLChat(args.model, args.precision, args.ep, args.image_splitting, args.tf32)
     chat.attach(args.images)
     run_chat_loop(
         chat, args, "LFM2-VL", "'images <path> [<path> ...]' attaches images to the next message"
