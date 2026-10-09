@@ -15,9 +15,19 @@ import sys
 import numpy as np
 import pytest
 import torch
-from transformers import AutoTokenizer, Lfm2Config, Lfm2ForCausalLM
+from transformers import (
+    AutoProcessor,
+    AutoTokenizer,
+    Lfm2Config,
+    Lfm2ForCausalLM,
+    Lfm2MoeConfig,
+    Lfm2MoeForCausalLM,
+    Lfm2VlConfig,
+    Lfm2VlForConditionalGeneration,
+)
 
 from liquidonnx import compare
+from liquidonnx.compare import audio as compare_audio
 from liquidonnx.compare import text
 from liquidonnx.compare import vl as compare_vl
 from liquidonnx.genai_builder import export_decoder
@@ -130,15 +140,26 @@ def test_cpu_and_cuda_references_never_mix(checkpoint, runs):
     assert len(cache_files(checkpoint)) == 2
 
 
-def test_cpu_references_keep_their_names(tmp_path, monkeypatch, runs):
-    """CPU references cached before --device are still found, like the verified 350M one."""
+def test_reference_names(tmp_path, monkeypatch, runs):
+    """CPU references have no device tag, as before --device. Text, MoE and VL references cached
+    before their answers left out the checkpoint's generation_config get new names, so they are
+    computed once more: the 8B-A1B one below capped every precision's greedy answers at 0.80.
+    Audio references never came from generate() and keep theirs."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    snapshot = tmp_path / "snapshots" / "9e6c6ccf47cd318696e137d381a7ded8fe4df09f"
+    monkeypatch.setattr(compare_audio, "reference", lambda checkpoint, max_new, device: ITEMS)
+    snapshots = tmp_path / "snapshots"
     for device in EXECUTION_PROVIDERS:
+        snapshot = snapshots / "9e6c6ccf47cd318696e137d381a7ded8fe4df09f"
         compare.cached_reference("LiquidAI/LFM2.5-350M", snapshot, "text", 8, 48, device)
+    snapshot = snapshots / "5dd22602c2e9f6a097b1de4c4efe0658b605015c"
+    compare.cached_reference("LiquidAI/LFM2.5-8B-A1B", snapshot, "moe", 4, 32)
+    snapshot = snapshots / "c362a0625dfe45aa588dce5f0ada28a7e5707628"
+    compare.cached_reference("LiquidAI/LFM2.5-Audio-1.5B", snapshot, "audio", 8, 160)
     assert sorted(p.name for p in (tmp_path / "liquidonnx" / "compare").iterdir()) == [
-        "LFM2.5-350M-text-0b7c2174540b.npz",
-        "LFM2.5-350M-text-cuda-0b7c2174540b.npz",
+        "LFM2.5-350M-text-cuda-d52c30d242e2.npz",
+        "LFM2.5-350M-text-d52c30d242e2.npz",  # was 0b7c2174540b
+        "LFM2.5-8B-A1B-moe-c9e9ad3caa9a.npz",  # was d459dde3d5d2
+        "LFM2.5-Audio-1.5B-audio-52a040e7243a.npz",
     ]
 
 
@@ -248,25 +269,52 @@ def test_device_reaches_the_reference_and_the_scores(device, monkeypatch, tmp_pa
     assert header.startswith("### m (text) on ") and header.endswith(f" ({expected})")
 
 
-def test_cpu_run_of_a_tiny_export(tmp_path, monkeypatch):
-    """lfm2-compare text on CPU, end to end, on a tiny random LFM2 with the LFM2 vocabulary (the
-    prompts need it): the fp32 decoder and onnxruntime-genai reproduce the PyTorch reference."""
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    checkpoint, export = tmp_path / "checkpoint", tmp_path / "export"
+# LFM2.5-8B-A1B's generation_config.json, with a repetition penalty of 2 instead of 1.05: the tiny
+# models' logits are too flat for 1.05 to change their answers
+SAMPLING = {"do_sample": True, "temperature": 0.2, "top_k": 80, "repetition_penalty": 2.0}
+
+
+def tiny_checkpoint(path: pathlib.Path, kind: str = "dense", **generation) -> pathlib.Path:
+    """A tiny random LFM2 or LFM2-MoE with the LFM2 vocabulary (the prompts need it); generation
+    goes into its generation_config.json."""
     tokenizer = AutoTokenizer.from_pretrained("LiquidAI/LFM2-350M")
     torch.manual_seed(0)
-    config = Lfm2Config(
-        vocab_size=len(tokenizer),
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        layer_types=["conv", "full_attention"],
-        max_position_embeddings=256,
-    )
-    Lfm2ForCausalLM(config).eval().save_pretrained(checkpoint)
-    tokenizer.save_pretrained(checkpoint)
+    common = {
+        "vocab_size": len(tokenizer),
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 256,
+    }
+    if kind == "dense":
+        config = Lfm2Config(num_hidden_layers=2, layer_types=["conv", "full_attention"], **common)
+        model = Lfm2ForCausalLM(config)
+    else:
+        config = Lfm2MoeConfig(
+            num_hidden_layers=3,
+            layer_types=["conv", "full_attention", "conv"],
+            moe_intermediate_size=64,
+            num_experts=8,
+            num_experts_per_tok=2,
+            num_dense_layers=1,
+            **common,
+        )
+        model = Lfm2MoeForCausalLM(config)
+    model.generation_config.update(**generation)
+    model.eval().save_pretrained(path)
+    tokenizer.save_pretrained(path)
+    return path
+
+
+@pytest.mark.parametrize("generation", [{}, SAMPLING], ids=["greedy", "sampling"])
+def test_cpu_run_of_a_tiny_export(generation: dict, tmp_path, monkeypatch):
+    """lfm2-compare text on CPU, end to end, on a tiny random LFM2: the fp32 decoder and
+    onnxruntime-genai reproduce the PyTorch reference, also when the checkpoint's
+    generation_config would penalize repetitions."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    checkpoint = tiny_checkpoint(tmp_path / "checkpoint", **generation)
+    export = tmp_path / "export"
     export_decoder(str(checkpoint), export)
     output = tmp_path / "compare.json"
     argv = ["text", "--model", str(checkpoint), "--export", str(export), "--output", str(output)]
@@ -284,6 +332,90 @@ def test_cpu_run_of_a_tiny_export(tmp_path, monkeypatch):
     assert row["genai"] == {"greedy": row["decoder"]["greedy"], "prompt_ids_equal": "2/2"}
     [cache] = (tmp_path / "cache" / "liquidonnx" / "compare").iterdir()
     assert re.fullmatch(r"checkpoint-text-[0-9a-f]{12}\.npz", cache.name)
+
+
+def without_plain_greedy(module, monkeypatch):
+    """The module's reference as before plain_greedy: generate() with the checkpoint's own
+    generation_config."""
+    monkeypatch.setattr(module, "plain_greedy", lambda model: None)
+
+
+def leaves_the_argmax(refs: list[dict]) -> list[bool]:
+    return [ref["answer"] != ref["logits"].argmax(-1).tolist() for ref in refs]
+
+
+@pytest.mark.parametrize("kind", ["dense", "moe"])
+def test_references_where_generate_takes_the_argmax_are_unchanged(kind, tmp_path, monkeypatch):
+    """Without logit processors in the checkpoint's generation_config (LFM2.5-350M, the VL
+    models), the reference is the one generate() gave before, to the last bit."""
+    checkpoint = tiny_checkpoint(tmp_path, kind)
+    refs = text.reference(checkpoint, 2, 12, "cpu")
+    without_plain_greedy(text, monkeypatch)
+    before = text.reference(checkpoint, 2, 12, "cpu")
+
+    assert leaves_the_argmax(refs) == [False, False]
+    for ref, old in zip(refs, before, strict=True):
+        assert ref.keys() == old.keys()
+        assert ref["answer"] == old["answer"] and ref["text"] == old["text"]
+        np.testing.assert_array_equal(ref["prompt"], old["prompt"])
+        np.testing.assert_array_equal(ref["logits"], old["logits"])
+
+
+@pytest.mark.parametrize("kind", ["dense", "moe"])
+def test_reference_answers_are_the_argmax_of_their_logits(kind, tmp_path, monkeypatch, caplog):
+    """generate() with LFM2.5-8B-A1B-like settings penalizes repeated tokens even with
+    do_sample=False, and is warned about; the reference answers are the argmax."""
+    checkpoint = tiny_checkpoint(tmp_path, kind, **SAMPLING)
+    with caplog.at_level(logging.WARNING):
+        refs = text.reference(checkpoint, 2, 12, "cpu")
+    assert leaves_the_argmax(refs) == [False, False]
+    assert "argmax" not in caplog.text
+
+    without_plain_greedy(text, monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        before = text.reference(checkpoint, 2, 12, "cpu")
+    assert leaves_the_argmax(before) == [True, True]
+    assert "reference prompt 0: answer token 0 of 12 is not the argmax of its logits" in caplog.text
+
+
+def test_vl_reference_answers_are_the_argmax_of_their_logits(tmp_path, monkeypatch, caplog):
+    """The VL reference, with and without images, on a tiny random LFM2-VL."""
+    torch.manual_seed(0)
+    config = Lfm2VlConfig(
+        text_config={
+            "vocab_size": 65536,
+            "hidden_size": 64,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "layer_types": ["conv", "full_attention"],
+            "intermediate_size": 128,
+            "max_position_embeddings": 8192,
+        },
+        vision_config={
+            "hidden_size": 32,
+            "intermediate_size": 64,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "patch_size": 16,
+            "num_patches": 256,
+        },
+        projector_hidden_size=64,
+    )
+    model = Lfm2VlForConditionalGeneration(config).eval()
+    model.generation_config.update(**SAMPLING)
+    model.save_pretrained(tmp_path)
+    AutoProcessor.from_pretrained("LiquidAI/LFM2.5-VL-1.6B").save_pretrained(tmp_path)
+    with caplog.at_level(logging.WARNING):
+        refs = compare_vl.reference(tmp_path, 6, "cpu")
+    assert not any(leaves_the_argmax(refs))
+    assert "argmax" not in caplog.text
+
+    without_plain_greedy(compare_vl, monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        before = compare_vl.reference(tmp_path, 6, "cpu")
+    assert any(leaves_the_argmax(before))
+    assert "is not the argmax of its logits" in caplog.text
 
 
 def test_onnxruntime_sessions_come_before_genai(monkeypatch, tmp_path):
