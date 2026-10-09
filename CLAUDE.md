@@ -34,7 +34,17 @@ uv run ruff check --fix src tests  # Auto-fix
 
 # Testing
 
-Tests load large models - run specific tests rather than full suite:
+The export pipelines have tests on tiny random checkpoints (no download):
+
+```bash
+uv run pytest tests/test_genai_export.py tests/test_genai_export_multimodal.py tests/test_export_cli.py -v
+uv run pytest tests/test_lfm2_audio/test_modes_synthetic.py tests/test_lfm2_audio/test_reference_parity.py \
+    tests/test_lfm2_audio/test_graph_structure.py -v
+uv run pytest tests/test_compare.py tests/test_compare_wikitext.py -v
+```
+
+The other tests load large models and need the export in ./exports (README 5) - run specific tests
+rather than the full suite:
 
 ```bash
 uv run pytest tests/test_lfm2/test_decoder.py -v -k "350M and q4"

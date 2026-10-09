@@ -10,7 +10,7 @@ Output Structure:
     {output-dir}/exports/{model-name}-ONNX/
         ├── genai_config.json            # decoder, embedding and vision at the default precision
         ├── genai_processor_config.json  # onnxruntime-genai image preprocessing
-        ├── config.json, processor_config.json
+        ├── config.json, generation_config.json, processor_config.json
         ├── tokenizer.json, tokenizer_config.json, chat_template.jinja
         └── onnx/
             ├── decoder.onnx             # fp32; decoder_{fp16,q4,q8}.onnx as in lfm2-export
@@ -18,7 +18,8 @@ Output Structure:
             ├── vision_encoder_q8.onnx   # int8, used with q4 and q8
             ├── embeddings.onnx          # token table + image feature scatter (fp32 table)
             ├── embeddings_fp16.onnx     # fp16 table, used with fp16
-            └── embeddings_q8.onnx       # int8 table, used with q4 and q8
+            ├── embeddings_q8.onnx       # int8 table, used with q4 and q8
+            └── *.onnx_data              # weights, in --split-data chunks
 
 genai_config.json uses the first exported precision of q4, q8, fp16, fp32; bundle() lists the
 files each precision loads.

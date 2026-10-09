@@ -12,7 +12,7 @@ graphs and derives the other precisions.
 Output Structure:
     {output-dir}/exports/{model-name}-ONNX/
         ├── genai_config.json          # lfm2_audio pipeline at the default precision
-        ├── config.json, tokenizer.json, tokenizer_config.json
+        ├── config.json, tokenizer.json, tokenizer_config.json, chat_template.jinja
         └── onnx/
             ├── decoder.onnx               # LFM2 backbone (inputs_embeds -> logits, hidden_states)
             ├── embeddings.onnx            # token table + audio feature scatter (fp32 table)
@@ -23,7 +23,8 @@ Output Structure:
             ├── vocoder_depthformer.onnx   # decoder hidden state -> frame of 8 audio codes
             ├── audio_detokenizer.onnx     # audio codes -> STFT features (outside the runtime)
             ├── embed_tokens.bin/.json     # text embedding table for web runtimes
-            └── mel_config.json
+            ├── mel_config.json
+            └── *.onnx_data                # weights, in --split-data chunks
 
     fp16, q4 and q8 add {graph}_{precision}.onnx; bundle() lists what each precision loads. The q4
     and q8 depthformers keep their per-codebook tables fp32.

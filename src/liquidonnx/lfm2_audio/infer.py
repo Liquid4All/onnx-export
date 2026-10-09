@@ -14,15 +14,16 @@ Usage:
     uv run lfm2-audio-infer exports/LFM2.5-Audio-1.5B-ONNX --prompt "What is the capital of France?"
 
     # ASR: audio -> text
-    uv run lfm2-audio-infer exports/LFM2.5-Audio-1.5B-ONNX --mode asr --audio input.wav
+    uv run lfm2-audio-infer exports/LFM2.5-Audio-1.5B-ONNX --mode asr \\
+        --audio samples/audio/fool_me_once_mono.wav
 
     # TTS: text -> audio
     uv run lfm2-audio-infer exports/LFM2.5-Audio-1.5B-ONNX --mode tts --prompt "Hello world" \\
         --output output.wav
 
     # Interleaved: spoken or typed question -> text and speech
-    uv run lfm2-audio-infer exports/LFM2.5-Audio-1.5B-ONNX --mode interleaved --audio question.wav \\
-        --output answer.wav
+    uv run lfm2-audio-infer exports/LFM2.5-Audio-1.5B-ONNX --mode interleaved \\
+        --audio samples/audio/woodworks_question.wav --output answer.wav
 
     # Interactive multi-turn chat (text or interleaved)
     uv run lfm2-audio-infer exports/LFM2.5-Audio-1.5B-ONNX --mode interleaved --chat --output answer.wav

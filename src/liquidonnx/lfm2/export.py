@@ -8,17 +8,16 @@ q4f32 and q8 decoders, one run each; fp16 and q4f16 are the fp32 and q4 decoders
 Output Structure:
     {output-dir}/exports/{model-name}-ONNX/
         ├── genai_config.json        # decoder points at the default precision
-        ├── config.json
-        ├── tokenizer.json
-        ├── tokenizer_config.json
-        ├── chat_template.jinja
+        ├── config.json, generation_config.json
+        ├── tokenizer.json, tokenizer_config.json, chat_template.jinja
         └── onnx/
             ├── model.onnx           # fp32
             ├── model_fp16.onnx      # fp16 weights, activations and caches; fp32 logits
             ├── model_q4.onnx        # int4 (k_quant); int8 lm_head, tied table, sensitive layers
             ├── model_q4f16.onnx     # q4 with fp16 activations
             ├── model_q4f32.onnx     # int4 MatMuls; fp32 embedding and lm_head
-            └── model_q8.onnx        # int8, lm_head and tied embedding table included
+            ├── model_q8.onnx        # int8, lm_head and tied embedding table included
+            └── *.onnx_data          # weights in --split-data chunks: .onnx_data, .onnx_data_1, ...
 
     MoE experts become QMoE int4 (q4*) or int8 (q8); the routers stay fp32.
 
