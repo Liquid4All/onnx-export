@@ -11,7 +11,9 @@ Run with:
 import collections
 import json
 import logging
+import os
 import pathlib
+import stat
 import sys
 
 import numpy as np
@@ -40,6 +42,7 @@ from liquidonnx.genai_runtime import (
 from liquidonnx.lfm2 import benchmark
 from liquidonnx.lfm2 import infer as text_infer
 from liquidonnx.lfm2.export import ALL_PRECISIONS, genai_files, model_file, set_default_decoder
+from liquidonnx.lfm2.export import main as export_main
 from liquidonnx.lfm2_audio import infer as audio_infer
 from liquidonnx.lfm2_vl import infer as vl_infer
 from liquidonnx.session import (
@@ -272,6 +275,24 @@ def test_genai_config(export):
     assert config["model"]["decoder"]["session_options"]["session.set_denormal_as_zero"] == "1"
     for name in ("tokenizer.json", "tokenizer_config.json", "config.json"):
         assert (output_dir / name).exists()
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o077], ids=oct)
+def test_export_files_get_the_umask_mode(umask: int, tmp_path, monkeypatch):
+    """onnx.save_model creates external data 0600 and copy2 keeps the checkpoint's modes."""
+    make_checkpoint("dense", tmp_path / "checkpoint")
+    argv = ["lfm2-export", str(tmp_path / "checkpoint"), "--output-dir", str(tmp_path)]
+    monkeypatch.setattr(sys, "argv", argv)
+    previous = os.umask(umask)
+    try:
+        export_main()
+    finally:
+        os.umask(previous)
+
+    files = [f for f in (tmp_path / "exports").rglob("*") if f.is_file()]
+    assert "model.onnx_data" in {f.name for f in files}
+    modes = {f.name: oct(stat.S_IMODE(f.stat().st_mode)) for f in files}
+    assert modes == {f.name: oct(0o666 & ~umask) for f in files}
 
 
 @pytest.mark.parametrize("precision", ["fp32", "q4"])

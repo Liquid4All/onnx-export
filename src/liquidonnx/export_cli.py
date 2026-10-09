@@ -2,7 +2,9 @@
 
 import argparse
 import logging
+import os
 import pathlib
+import stat
 
 from liquidonnx.external_data import split_external_data
 from liquidonnx.quantize import DEFAULT_BLOCK_SIZE
@@ -76,8 +78,23 @@ def output_dir(args: argparse.Namespace) -> pathlib.Path:
     return args.output_dir / "exports" / name
 
 
+def apply_umask(output_dir: pathlib.Path):
+    """Give every file in output_dir the mode a new file gets (0o666 & ~umask).
+
+    onnx.save_model creates external data files 0600, so other users could not read the weights,
+    and shutil.copy2 keeps the modes of the checkpoint files it copies.
+    """
+    umask = os.umask(0)
+    os.umask(umask)
+    mode = 0o666 & ~umask
+    for path in output_dir.rglob("*"):
+        info = path.lstat()
+        if stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) != mode:
+            path.chmod(mode)
+
+
 def finish(args: argparse.Namespace, output_dir: pathlib.Path):
-    """Split large external data files, then log what the export folder holds."""
+    """Split large external data files and reset file modes, then log what the folder holds."""
     onnx_dir = output_dir / "onnx"
     if not args.no_split_data:
         chunk_size = int(args.split_data * 1024**3)
@@ -86,6 +103,7 @@ def finish(args: argparse.Namespace, output_dir: pathlib.Path):
             if data_file.exists() and data_file.stat().st_size > chunk_size:
                 logger.info(f"Splitting {onnx_file.name} ({args.split_data:.1f} GB chunks)")
                 split_external_data(onnx_file, chunk_size=chunk_size)
+    apply_umask(output_dir)
 
     logger.info("=" * 60)
     logger.info("Output summary")
