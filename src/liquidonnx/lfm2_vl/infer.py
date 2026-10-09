@@ -10,10 +10,13 @@ once instead.
 
 Usage:
     uv run lfm2-vl-infer --model exports/LFM2.5-VL-1.6B-ONNX
-    uv run lfm2-vl-infer --model exports/LFM2.5-VL-1.6B-ONNX --images photo.jpg
-    uv run lfm2-vl-infer --model exports/LFM2.5-VL-1.6B-ONNX --images a.jpg b.jpg --prompt "Compare"
+    uv run lfm2-vl-infer --model exports/LFM2.5-VL-1.6B-ONNX \\
+        --images tests/test_lfm2_vl/assets/cardinal.jpg
+    uv run lfm2-vl-infer --model exports/LFM2.5-VL-1.6B-ONNX --prompt "Compare" \\
+        --images tests/test_lfm2_vl/assets/cardinal.jpg tests/test_lfm2_vl/assets/bluejay.jpg
     uv run lfm2-vl-infer --model exports/LFM2.5-VL-1.6B-ONNX --precision fp16
-    uv run lfm2-vl-infer --model exports/LFM2.5-VL-1.6B-ONNX --images page.png --no-image-splitting
+    uv run lfm2-vl-infer --model exports/LFM2.5-VL-1.6B-ONNX --no-image-splitting \\
+        --images tests/test_lfm2_vl/assets/wide.jpg
 """
 
 import argparse
