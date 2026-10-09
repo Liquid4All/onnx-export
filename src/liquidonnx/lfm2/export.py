@@ -38,14 +38,19 @@ Usage:
     # MoE checkpoints
     uv run lfm2-moe-export LiquidAI/LFM2.5-8B-A1B --precision q4 q8
 
-    # Add precisions to an existing export without rebuilding fp32
-    uv run lfm2-export LiquidAI/LFM2.5-350M --precision q4 --skip-export
+    # Add precisions to an existing export without rebuilding fp32; q4f16 converts the export's
+    # model_q4.onnx when it is of the same checkpoint and --block-size (see reusable_q4)
+    uv run lfm2-export LiquidAI/LFM2.5-350M --precision fp16 q4f16 --skip-export
 """
 
 import argparse
 import json
 import logging
 import pathlib
+
+import numpy as np
+import onnx
+from onnx import numpy_helper
 
 from liquidonnx.export_cli import (
     add_export_arguments,
@@ -84,6 +89,41 @@ def set_default_decoder(output_dir: pathlib.Path, precisions: list[str]):
     logger.info(f"genai_config.json decoder -> onnx/{model_file(default)}")
 
 
+def reusable_q4(onnx_dir: pathlib.Path, block_size: int) -> bool:
+    """Whether q4f16 can convert the existing onnx/model_q4.onnx instead of building a fresh q4.
+
+    --skip-export trusts the folder's fp32 decoder, so the q4 is reused when it matches that one:
+    the tensors both keep unquantized (norms, conv kernels, rotary caches) are equal, which a q4
+    left over from another checkpoint fails, and its blocks are block_size. Like model.onnx, the
+    q4 is trusted to come from this exporter; its version is not checked.
+    """
+    q4_path, fp32_path = onnx_dir / model_file("q4"), onnx_dir / model_file("fp32")
+    if not q4_path.exists():
+        return False
+    q4, fp32 = (onnx.load(path, load_external_data=False).graph for path in (q4_path, fp32_path))
+    sizes = {a.i for node in q4.node for a in node.attribute if a.name == "block_size"}
+    fp32_tensors = {t.name: t for t in fp32.initializer}
+    shared = [(t, fp32_tensors[t.name]) for t in q4.initializer if t.name in fp32_tensors]
+
+    def value(tensor: onnx.TensorProto) -> np.ndarray:
+        return numpy_helper.to_array(tensor, str(onnx_dir))
+
+    try:
+        if sizes != {block_size}:
+            reason = f"has block sizes {sorted(sizes)}, not {block_size}"
+        elif not shared or not all(np.array_equal(value(a), value(b)) for a, b in shared):
+            reason = f"has unquantized tensors that differ from {fp32_path.name}"
+        else:
+            logger.info(f"Converting the existing {q4_path.name} to q4f16")
+            return True
+    except onnx.checker.ValidationError as error:
+        # onnx loads no external data file with several hard links (a `cp -al` copy); such a
+        # folder keeps the fresh q4 build it had before q4 reuse rather than failing.
+        reason = f"is not loadable: {error}"
+    logger.info(f"Building a fresh q4 for q4f16: {q4_path.name} {reason}")
+    return False
+
+
 def main(
     default_precisions: tuple[str, ...] = TEXT_PRECISIONS,
     description: str | None = None,
@@ -98,7 +138,8 @@ def main(
     parser.add_argument(
         "--skip-export",
         action="store_true",
-        help="Reuse the existing fp32 onnx/model.onnx instead of rebuilding it",
+        help="Reuse the existing fp32 onnx/model.onnx instead of rebuilding it; q4f16 also "
+        "converts an existing onnx/model_q4.onnx of the same checkpoint and --block-size",
     )
     args = parser.parse_args()
 
@@ -117,6 +158,11 @@ def main(
         export_dir.mkdir(parents=True, exist_ok=True)
         export_decoder(args.model, export_dir)
 
+    # A q4 from an earlier run is stale once fp32 is rebuilt, so q4f16 converts only a q4 built in
+    # this run; --skip-export trusts the folder, so it also converts a q4 that matches it.
+    reuse_q4 = "q4" in precisions or (
+        args.skip_export and "q4f16" in precisions and reusable_q4(onnx_dir, args.block_size)
+    )
     for precision in precisions:
         log_step(f"Exporting {precision}")
         export_precision(
@@ -125,7 +171,7 @@ def main(
             family,
             precision,
             block_size=args.block_size,
-            reuse_q4="q4" in precisions,
+            reuse_q4=reuse_q4,
         )
 
     # Rebuilding fp32 makes precisions from earlier runs stale; --skip-export keeps them valid.

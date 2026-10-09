@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import pathlib
+import shutil
 import stat
 import sys
 
@@ -23,6 +24,7 @@ import onnxruntime_genai as og
 import pytest
 import torch
 from helpers import Q8_FP32_HEAD, attributes, matmul_bits
+from onnx import numpy_helper
 from transformers import (
     AutoTokenizer,
     Lfm2Config,
@@ -31,6 +33,7 @@ from transformers import (
     Lfm2MoeForCausalLM,
 )
 
+from liquidonnx import genai_builder
 from liquidonnx.compare.metrics import greedy
 from liquidonnx.genai_builder import EMBED_GATHER, Q8, export_decoder, export_precision
 from liquidonnx.genai_runtime import (
@@ -41,10 +44,17 @@ from liquidonnx.genai_runtime import (
 )
 from liquidonnx.lfm2 import benchmark
 from liquidonnx.lfm2 import infer as text_infer
-from liquidonnx.lfm2.export import ALL_PRECISIONS, genai_files, model_file, set_default_decoder
+from liquidonnx.lfm2.export import (
+    ALL_PRECISIONS,
+    genai_files,
+    model_file,
+    reusable_q4,
+    set_default_decoder,
+)
 from liquidonnx.lfm2.export import main as export_main
 from liquidonnx.lfm2_audio import infer as audio_infer
 from liquidonnx.lfm2_vl import infer as vl_infer
+from liquidonnx.quantize import save_model
 from liquidonnx.session import (
     cached_outputs,
     decoder_inputs,
@@ -319,6 +329,76 @@ def test_q4f16_ignores_a_stale_q4(export, tmp_path):
 
     expected = prefill_logits(output_dir / "onnx" / "model_q4f16.onnx")
     np.testing.assert_array_equal(prefill_logits(tmp_path / "onnx" / "model_q4f16.onnx"), expected)
+
+
+def add_q4f16(
+    export, tmp_path, monkeypatch, args: list[str], other_checkpoint: bool = False
+) -> tuple[pathlib.Path, list[str]]:
+    """Run `lfm2-export --precision q4f16 <args>` on a copy of the export without its q4f16.
+
+    Returns the copy and the precisions the genai builder built. other_checkpoint doubles the
+    q4's final norm, as a q4 of another checkpoint differs from model.onnx.
+    """
+    kind, _, output_dir = export
+    folder = tmp_path / "exports" / "export"
+    shutil.copytree(output_dir, folder, ignore=shutil.ignore_patterns("model_q4f16.onnx*"))
+    if other_checkpoint:
+        q4 = onnx.load(folder / "onnx" / "model_q4.onnx")
+        norm = next(t for t in q4.graph.initializer if "final_norm" in t.name)
+        norm.CopyFrom(numpy_helper.from_array(numpy_helper.to_array(norm) * 2, norm.name))
+        save_model(q4, folder / "onnx" / "model_q4.onnx")
+
+    built = []
+    build_decoder = genai_builder.build_decoder
+
+    def spy(model, build_dir, precision, *rest):
+        built.append(precision)
+        return build_decoder(model, build_dir, precision, *rest)
+
+    monkeypatch.setattr(genai_builder, "build_decoder", spy)
+    checkpoint = str(output_dir.parent / "checkpoint")
+    argv = ["lfm2-export", checkpoint, "--output-dir", str(tmp_path), "--output-name", "export"]
+    monkeypatch.setattr(sys, "argv", [*argv, "--precision", "q4f16", *args])
+    export_main(family=FAMILIES[kind])
+    return folder, built
+
+
+@pytest.mark.parametrize(
+    ("args", "other_checkpoint", "builds"),
+    [
+        (["--skip-export"], False, []),
+        (["--skip-export"], True, ["int4"]),
+        ([], False, ["fp32", "int4"]),
+    ],
+    ids=["skip-export", "q4-of-another-checkpoint", "fp32-rebuilt"],
+)
+def test_q4f16_add_on_converts_a_matching_q4(
+    export, args: list[str], other_checkpoint: bool, builds: list[str], tmp_path, monkeypatch
+):
+    """--skip-export converts the folder's q4 when it matches model.onnx and builds a fresh one
+    otherwise, as every export that rebuilds fp32 does; the q4f16 is the one of a fresh export."""
+    _, _, output_dir = export
+    folder, built = add_q4f16(export, tmp_path, monkeypatch, args, other_checkpoint)
+
+    assert built == builds
+    for name in ("model_q4f16.onnx", "model_q4f16.onnx_data"):
+        assert (folder / "onnx" / name).read_bytes() == (output_dir / "onnx" / name).read_bytes()
+
+
+def test_reusable_q4_needs_the_block_size(export):
+    """A q4 in blocks of 32 is rebuilt for --block-size 64 (the tiny models cannot build that)."""
+    _, _, output_dir = export
+    assert reusable_q4(output_dir / "onnx", 32)
+    assert not reusable_q4(output_dir / "onnx", 64)
+
+
+def test_reusable_q4_skips_hard_linked_data(export, tmp_path):
+    """onnx loads no external data file with several hard links, so such a q4 is rebuilt."""
+    _, _, output_dir = export
+    onnx_dir = tmp_path / "onnx"
+    shutil.copytree(output_dir / "onnx", onnx_dir)
+    os.link(onnx_dir / "model_q4.onnx_data", tmp_path / "model_q4.onnx_data")
+    assert not reusable_q4(onnx_dir, 32)
 
 
 @pytest.mark.parametrize("precision", ["fp32", "q4", "q4f16", "q8"])
