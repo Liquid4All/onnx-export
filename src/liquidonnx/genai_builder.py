@@ -328,7 +328,8 @@ def export_precision(
 
     A precision in DECODER_PRESETS[family] is its own builder run, with the family's builder
     options in extra_options as for fp32. fp16 converts onnx/{name}.onnx; q4f16 converts
-    onnx/{name}_q4.onnx when reuse_q4 says the caller has just built it, and a fresh q4 otherwise.
+    onnx/{name}_q4.onnx when reuse_q4 says it is current (the caller has just built it or checked
+    it, as lfm2-export --skip-export does), and a fresh q4 otherwise.
     """
     onnx_dir = output_dir / "onnx"
     output_path = onnx_dir / f"{name}_{precision}.onnx"
