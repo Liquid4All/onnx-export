@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import functools
 import json
 import logging
 import pathlib
@@ -28,7 +29,7 @@ import numpy as np
 import onnxruntime_genai as og
 
 from liquidonnx.genai_runtime import TokenPrinter, add_runtime_arguments, generate, load_model
-from liquidonnx.lfm2.infer import MAX_NEW_TOKENS, run_chat_loop
+from liquidonnx.lfm2.infer import MAX_NEW_TOKENS, run_chat_loop, template_messages
 from liquidonnx.lfm2_vl.export import PRECISIONS, genai_files
 
 # Hugging Face processor output -> its entry in genai_config.json model.vision.inputs
@@ -63,11 +64,10 @@ class CheckpointProcessor:
         inputs = config["model"]["vision"]["inputs"]
         self.names = {key: inputs[entry] for key, entry in VISION_INPUTS.items()}
 
-    def __call__(self, prompt: str, images: list[str]) -> og.NamedTensors:
-        """prompt holds one <image> per image, which the processor expands into its placeholders."""
-        from PIL import Image
-
-        pil = [Image.open(path).convert("RGB") for path in images]
+    def __call__(self, prompt: str, images: list) -> og.NamedTensors:
+        """prompt holds one <image> per image, which the processor expands into its placeholders;
+        an image is a path, an http(s) or data URL, or a PIL image."""
+        pil = [open_image(image) for image in images]
         features = self.hf(
             text=prompt,
             images=pil or None,
@@ -87,8 +87,50 @@ class CheckpointProcessor:
         return inputs
 
 
+def open_image(image):
+    """An RGB PIL image of a path, an http(s) or data URL, or a PIL image."""
+    from PIL import Image
+
+    if isinstance(image, Image.Image):
+        return image.convert("RGB")
+    if str(image).startswith(("http://", "https://", "data:")):
+        from transformers.image_utils import load_image
+
+        return load_image(str(image))
+    return Image.open(image).convert("RGB")
+
+
+def message_images(messages: list[dict]) -> list:
+    """The images of messages, in the order of their <image> placeholders, for open_image.
+
+    An image is {"type": "image"} with a "path", "url" or "image", as transformers takes them, or
+    OpenAI's {"type": "image_url", "image_url": {"url": ...}}.
+    """
+    images = []
+    for i, message in enumerate(messages):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for j, item in enumerate(content):
+            if item.get("type") == "image_url":
+                url = item.get("image_url")
+                image = url.get("url") if isinstance(url, dict) else url
+            elif item.get("type") == "image":
+                image = next((item[key] for key in ("path", "url", "image") if key in item), None)
+            else:
+                continue
+            if image is None:
+                raise ValueError(f"messages[{i}]['content'][{j}] has no path, url or image")
+            images.append(image)
+    return images
+
+
 class VLChat:
-    """A conversation with an LFM2-VL export; images join the next message sent."""
+    """A conversation with an LFM2-VL export; images join the next message sent.
+
+    answer() keeps no state, so one VLChat can serve independent requests; send() keeps the
+    conversation of lfm2-vl-infer.
+    """
 
     def __init__(
         self,
@@ -104,6 +146,13 @@ class VLChat:
         self.messages: list[dict] = []
         self.pending: list[str] = []
 
+    @functools.cached_property
+    def raw_tokenizer(self) -> og.Tokenizer:
+        """self.tokenizer, but decode keeps special tokens; made on first use."""
+        tokenizer = og.Tokenizer(self.model)
+        tokenizer.update_options(skip_special_tokens="false")
+        return tokenizer
+
     def attach(self, paths: list[str]):
         """Images for the next message; missing files are left out."""
         self.pending = []
@@ -114,15 +163,34 @@ class VLChat:
             else:
                 print(f"Image not found: {path}")
 
-    def images(self) -> list[str]:
-        """The conversation's images, in the order of their <image> placeholders."""
-        return [
-            item["path"]
-            for message in self.messages
-            if isinstance(message["content"], list)
-            for item in message["content"]
-            if item["type"] == "image"
-        ]
+    def answer(
+        self,
+        messages: list[dict],
+        max_new_tokens: int = MAX_NEW_TOKENS,
+        tools: list[dict] | None = None,
+        keep_special_tokens: bool = False,
+        stream: bool = False,
+    ) -> str:
+        """The assistant's answer to messages, as TextChat.answer() does; a message's content can
+        be a list of {"type": "text", "text": ...} items and images (see message_images).
+
+        LFM2-VL and LFM2.5-VL mark <|tool_call_start|> and <|tool_call_end|> special, so a
+        tool-call parser needs keep_special_tokens.
+        """
+        # A copy: the processor rewrites image_url items in place
+        messages = template_messages(messages, join_text=False)
+        images = message_images(messages)
+        prompt = self.processor.hf.apply_chat_template(
+            messages, tools=tools, tokenize=False, add_generation_prompt=True
+        )
+        inputs = self.processor(prompt, images)
+        prompt_length = inputs["input_ids"].as_numpy().shape[-1]
+        tokenizer = self.raw_tokenizer if keep_special_tokens else self.tokenizer
+        printer = TokenPrinter(tokenizer) if stream else None
+        generator = generate(self.model, inputs, max_new_tokens, printer)
+        if stream:
+            print()
+        return tokenizer.decode(generator.get_sequence(0)[prompt_length:])
 
     def send(self, text: str, max_new_tokens: int = MAX_NEW_TOKENS, stream: bool = True) -> str:
         content = text
@@ -131,17 +199,7 @@ class VLChat:
             content.append({"type": "text", "text": text})
             self.pending = []
         self.messages.append({"role": "user", "content": content})
-        prompt = self.processor.hf.apply_chat_template(
-            self.messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = self.processor(prompt, self.images())
-        prompt_length = inputs["input_ids"].as_numpy().shape[-1]
-
-        printer = TokenPrinter(self.tokenizer) if stream else None
-        generator = generate(self.model, inputs, max_new_tokens, printer)
-        if stream:
-            print()
-        response = self.tokenizer.decode(generator.get_sequence(0)[prompt_length:])
+        response = self.answer(self.messages, max_new_tokens, stream=stream)
         self.messages.append({"role": "assistant", "content": response})
         return response
 

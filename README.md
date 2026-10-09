@@ -306,6 +306,39 @@ uv run lfm2-audio-infer ./exports/LFM2.5-Audio-1.5B-ONNX --mode interleaved --ch
 #   quit                 - Exit
 ```
 
+### 4.5 Python API
+
+`TextChat` (text and MoE, `liquidonnx.lfm2.infer`) and `VLChat` (`liquidonnx.lfm2_vl.infer`) are the models of `lfm2-infer` and `lfm2-vl-infer`. Their `answer()` keeps no conversation, so a server can load one and answer each request's OpenAI-style messages:
+
+```python
+import pathlib
+
+from liquidonnx.lfm2.infer import TextChat
+from liquidonnx.lfm2_vl.infer import VLChat
+
+chat = TextChat(pathlib.Path("exports/LFM2.5-350M-ONNX"), precision="q4")
+weather = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+    },
+}
+chat.answer(
+    [{"role": "user", "content": "What is the weather in Paris right now?"}],
+    max_new_tokens=256,
+    tools=[weather],
+    keep_special_tokens=True,
+)
+# '<|tool_call_start|>[get_weather(city="Paris")]<|tool_call_end|>'
+
+vl = VLChat(pathlib.Path("exports/LFM2.5-VL-450M-ONNX"))
+image = {"type": "image", "path": "tests/test_lfm2_vl/assets/cardinal.jpg"}
+vl.answer([{"role": "user", "content": [image, {"type": "text", "text": "What bird is this?"}]}])
+```
+
+`answer()` takes the messages of an OpenAI chat request and leaves them as they were: it parses tool-call arguments sent as JSON strings, which every LFM2 chat template needs as a mapping, and gives content of `null` or a list of text parts the shape the templates take. `VLChat` takes OpenAI's `{"type": "image_url", "image_url": {"url": ...}}` parts (http(s) or data URLs) and transformers' `{"type": "image"}` items with a `path`, `url` or PIL `image`. `tools` go to the chat template. As onnxruntime-genai decodes, the answer leaves out the tokens `tokenizer.json` marks special unless `keep_special_tokens=True`, which a tool-call parser needs for LFM2-350M, LFM2-700M, LFM2-1.2B and the VL models: their `<|tool_call_start|>` and `<|tool_call_end|>` are special. The LFM2.5 text and MoE models keep those, `<think>` and `</think>` either way. The end-of-turn token is never part of the answer, and `stream=True` prints the answer it returns. Both classes run on the CPU unless `ep="cuda"`. `liquidonnx.lfm2` and `liquidonnx.lfm2_vl` do not re-export them, so that the export CLIs do not load onnxruntime-genai.
+
 ## 5. Testing
 
 The tests need the `dev` dependency group, which `uv sync` installs by default ([2](#2-installation)). The export pipelines run on tiny random checkpoints, without downloads:

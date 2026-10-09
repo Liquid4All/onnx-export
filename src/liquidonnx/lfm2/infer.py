@@ -9,6 +9,9 @@ Usage:
 """
 
 import argparse
+import copy
+import functools
+import json
 import logging
 import pathlib
 
@@ -23,8 +26,37 @@ from liquidonnx.lfm2.export import ALL_PRECISIONS, genai_files
 MAX_NEW_TOKENS = 4096
 
 
+def template_messages(messages: list[dict], join_text: bool) -> list[dict]:
+    """A copy of OpenAI chat messages in the shape the LFM2 chat templates take.
+
+    Every template needs tool-call arguments as a mapping, where OpenAI sends a JSON string;
+    arguments that are not JSON raise ValueError. Content that is null or missing becomes "", as
+    vLLM sends it: the LFM2.5-VL templates fail on null, and LFM2.5-VL-450M's leaves an assistant
+    turn of tool calls without content unended. join_text makes a list of text parts one string,
+    one part per line as vLLM joins them, for templates that would render the list as JSON
+    (LFM2's); the LFM2.5 templates take the list.
+    """
+    messages = copy.deepcopy(messages)
+    for message in messages:
+        for call in message.get("tool_calls") or []:
+            function = call.get("function", call)
+            if isinstance(function.get("arguments"), str):
+                function["arguments"] = json.loads(function["arguments"] or "{}")
+        content = message.get("content")
+        if content is None:
+            message["content"] = ""
+        elif join_text and isinstance(content, list):
+            if all(part.get("type") == "text" for part in content):
+                message["content"] = "\n".join(part["text"] for part in content)
+    return messages
+
+
 class TextChat:
-    """A conversation with an LFM2 or LFM2-MoE export."""
+    """A conversation with an LFM2 or LFM2-MoE export.
+
+    answer() keeps no state, so one TextChat can serve independent requests; send() keeps the
+    conversation of lfm2-infer.
+    """
 
     def __init__(
         self,
@@ -39,19 +71,52 @@ class TextChat:
         self.tokenizer = og.Tokenizer(self.model)
         # The chat template and prompt ids come from transformers, as for the reference model.
         self.hf_tokenizer = AutoTokenizer.from_pretrained(model_dir)
+        parts = [{"role": "user", "content": [{"type": "text", "text": ""}]}]
+        self.join_text = '"type"' in self.hf_tokenizer.apply_chat_template(parts, tokenize=False)
         self.messages: list[dict] = []
 
-    def send(self, text: str, max_new_tokens: int = MAX_NEW_TOKENS, stream: bool = True) -> str:
-        self.messages.append({"role": "user", "content": text})
+    @functools.cached_property
+    def raw_tokenizer(self) -> og.Tokenizer:
+        """self.tokenizer, but decode keeps special tokens; made on first use (0.4 s for LFM2.5)."""
+        tokenizer = og.Tokenizer(self.model)
+        tokenizer.update_options(skip_special_tokens="false")
+        return tokenizer
+
+    def answer(
+        self,
+        messages: list[dict],
+        max_new_tokens: int = MAX_NEW_TOKENS,
+        tools: list[dict] | None = None,
+        keep_special_tokens: bool = False,
+        stream: bool = False,
+    ) -> str:
+        """The assistant's answer to messages, OpenAI chat messages, which it leaves as they are.
+
+        Tool calls can come with their arguments as a JSON string and content as a list of text
+        parts (see template_messages). tools, OpenAI function schemas, go to the chat template.
+        The answer leaves out the tokens tokenizer.json marks special, as onnxruntime-genai
+        decodes, unless keep_special_tokens. A tool-call parser needs them where
+        <|tool_call_start|> and <|tool_call_end|> are special (LFM2-350M, -700M and -1.2B); the
+        LFM2.5 checkpoints keep those, <think> and </think> either way. The end-of-turn token that
+        ends the answer is never part of it. stream prints the answer as it comes.
+        """
         prompt = self.hf_tokenizer.apply_chat_template(
-            self.messages, tokenize=False, add_generation_prompt=True
+            template_messages(messages, join_text=self.join_text),
+            tools=tools,
+            tokenize=False,
+            add_generation_prompt=True,
         )
         ids = np.array(self.hf_tokenizer.encode(prompt, add_special_tokens=False))
-        printer = TokenPrinter(self.tokenizer) if stream else None
+        tokenizer = self.raw_tokenizer if keep_special_tokens else self.tokenizer
+        printer = TokenPrinter(tokenizer) if stream else None
         generator = generate(self.model, ids, max_new_tokens, printer)
         if stream:
             print()
-        response = self.tokenizer.decode(generator.get_sequence(0)[len(ids) :])
+        return tokenizer.decode(generator.get_sequence(0)[len(ids) :])
+
+    def send(self, text: str, max_new_tokens: int = MAX_NEW_TOKENS, stream: bool = True) -> str:
+        self.messages.append({"role": "user", "content": text})
+        response = self.answer(self.messages, max_new_tokens, stream=stream)
         self.messages.append({"role": "assistant", "content": response})
         return response
 

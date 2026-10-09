@@ -9,8 +9,11 @@ Run with:
     uv run pytest tests/test_genai_export_multimodal.py -v -k "vl and q4"
 """
 
+import base64
+import copy
 import json
 import pathlib
+import re
 import shutil
 import sys
 
@@ -20,7 +23,16 @@ import onnx
 import onnxruntime_genai as og
 import pytest
 import torch
-from helpers import Q8_FP32_HEAD, attributes, matmul_bits
+from helpers import (
+    Q8_FP32_HEAD,
+    TOOL_CALL,
+    TOOL_CALL_ANSWERS,
+    WEATHER_TOOL,
+    answering,
+    attributes,
+    matmul_bits,
+    tool_turns,
+)
 from huggingface_hub.utils import filter_repo_objects
 from PIL import Image
 from test_lfm2_audio.synthetic import (
@@ -566,7 +578,102 @@ def test_vl_chat_keeps_images(vl, monkeypatch, image_splitting, sent_per_turn):
     chat.send("And now?", 4, stream=False)
 
     assert sent == [sent_per_turn] * 2
-    assert chat.images() == [str(IMAGE)]
+    assert vl_infer.message_images(chat.messages) == [str(IMAGE)]
+
+
+def image_message(text: str) -> dict:
+    content = [{"type": "image", "path": str(IMAGE)}, {"type": "text", "text": text}]
+    return {"role": "user", "content": content}
+
+
+def tool_conversation() -> list[dict]:
+    """A question about an image and two calls of WEATHER_TOOL, the first assistant turn without
+    content, the second with OpenAI's null."""
+    question = image_message("What is the weather here?")
+    return [question, *tool_turns(), *tool_turns(content=None)]
+
+
+def test_vl_chat_answer_keeps_no_state(vl, monkeypatch, capsys):
+    """VLChat.answer() sends the images of the messages it is given, and tools to the chat
+    template; it keeps no conversation and prints nothing. Each tool result follows an assistant
+    turn the template ended, with or without content."""
+    chat = vl_infer.VLChat(vl[2], image_splitting=False)
+    sent = []
+
+    def record(model, inputs, *args):
+        prompt = chat.processor.hf.tokenizer.decode(inputs["input_ids"].as_numpy()[0])
+        images = inputs["pixel_values"].as_numpy().shape[0]
+        results = prompt.count("<|im_end|>\n<|im_start|>tool\nsunny<|im_end|>")
+        sent.append(
+            (images, inputs["num_image_tokens"].as_numpy()[0], "List of tools" in prompt, results)
+        )
+        return generate(model, inputs, *args)
+
+    monkeypatch.setattr(vl_infer, "generate", record)
+    messages = tool_conversation()
+    answer = chat.answer(messages, 4, tools=[WEATHER_TOOL])
+    assert chat.answer(messages, 4, tools=[WEATHER_TOOL]) == answer
+    chat.answer(messages, 4)
+
+    assert sent == [(1, 234, True, 2), (1, 234, True, 2), (1, 234, False, 2)]
+    assert messages == tool_conversation()
+    assert (chat.messages, chat.pending) == ([], [])
+    assert capsys.readouterr().out == ""
+
+
+def image_items() -> dict[str, dict]:
+    """IMAGE as each kind of image item VLChat.answer() takes, by the key that holds it."""
+    data_url = f"data:image/jpeg;base64,{base64.b64encode(IMAGE.read_bytes()).decode()}"
+    return {
+        "path": {"type": "image", "path": str(IMAGE)},
+        "image_url": {"type": "image_url", "image_url": {"url": data_url}},
+        "url": {"type": "image", "url": data_url},
+        "image": {"type": "image", "image": Image.open(IMAGE)},
+    }
+
+
+@pytest.mark.parametrize("key", ["image_url", "url", "image"])
+def test_vl_chat_answer_takes_openai_and_transformers_images(vl, monkeypatch, key):
+    """An OpenAI image_url part with a data URL, and transformers' url and PIL image items, reach
+    genai as the path item does. The caller's messages stay as they were, though the processor's
+    chat template rewrites image_url items in place."""
+    chat = vl_infer.VLChat(vl[2], image_splitting=False)
+    sent = []
+
+    def record(model, inputs, *args):
+        sent.append({name: inputs[name].as_numpy().copy() for name in inputs.keys()})
+        return generate(model, inputs, *args)
+
+    monkeypatch.setattr(vl_infer, "generate", record)
+    for item in (image_items()["path"], image_items()[key]):
+        content = [item, {"type": "text", "text": "What bird is this?"}]
+        messages = [{"role": "user", "content": content}]
+        before = copy.deepcopy(messages)
+        chat.answer(messages, 1)
+        assert messages == before
+
+    path, other = sent
+    assert sorted(other) == sorted(path)
+    for name, value in path.items():
+        np.testing.assert_array_equal(other[name], value, err_msg=name)
+
+
+def test_vl_message_images_names_an_image_it_cannot_find():
+    messages = [image_message("Hi"), {"role": "user", "content": [{"type": "image"}]}]
+    with pytest.raises(ValueError, match=re.escape("messages[1]['content'][0]")):
+        vl_infer.message_images(messages)
+
+
+@pytest.mark.parametrize(("keep", "expected"), TOOL_CALL_ANSWERS, ids=["default", "keep"])
+def test_vl_chat_answer_keeps_special_tokens_on_request(vl, keep, expected, monkeypatch, capsys):
+    """With or without the special tokens, stream prints the answer that answer() returns."""
+    chat = vl_infer.VLChat(vl[2], image_splitting=False)
+    ids = chat.processor.hf.tokenizer.encode(TOOL_CALL, add_special_tokens=False)
+    monkeypatch.setattr(vl_infer, "generate", answering(ids, chat.tokenizer.eos_token_ids[0]))
+    messages = [image_message("What is the weather here?")]
+    assert chat.answer(messages, len(ids), keep_special_tokens=keep) == expected
+    assert chat.answer(messages, len(ids), keep_special_tokens=keep, stream=True) == expected
+    assert capsys.readouterr().out == f"{expected}\n"
 
 
 @pytest.mark.parametrize(
