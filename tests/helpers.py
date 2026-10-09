@@ -3,6 +3,7 @@
 import collections
 import logging
 import pathlib
+import types
 
 import numpy as np
 from PIL import Image
@@ -15,6 +16,55 @@ logger = logging.getLogger(__name__)
 Q8_FP32_HEAD = DecoderPreset(
     "int8", {"is_symmetric": "false", "nodes_to_exclude": "/lm_head/MatMul"}, True
 )
+
+# An OpenAI function schema, and a call of it in LFM2's format
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "The current weather in a city",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+}
+TOOL_CALL = '<|tool_call_start|>[get_weather(city="Paris")]<|tool_call_end|>'
+# (keep_special_tokens, answer of TOOL_CALL) for the tiny exports' tokenizers (LFM2-350M and
+# LFM2.5-VL-1.6B), which mark <|tool_call_start|> and <|tool_call_end|> special
+TOOL_CALL_ANSWERS = [(False, '[get_weather(city="Paris")]'), (True, TOOL_CALL)]
+
+
+def tool_turns(**assistant) -> list[dict]:
+    """A call of WEATHER_TOOL and its result as OpenAI sends them, the arguments a JSON string;
+    assistant adds to the assistant turn, which has no content."""
+    function = {"name": "get_weather", "arguments": '{"city": "Paris"}'}
+    call = {"id": "call_0", "type": "function", "function": function}
+    return [
+        {"role": "assistant", "tool_calls": [call], **assistant},
+        {"role": "tool", "tool_call_id": "call_0", "content": "sunny"},
+    ]
+
+
+def answering(ids: list[int], eos: int):
+    """A stand-in for liquidonnx.genai_runtime.generate whose answer is ids; as genai's, its steps
+    end with eos, which the sequence leaves out."""
+
+    def run(model, inputs, max_new_tokens, on_step=None):
+        prompt = inputs if isinstance(inputs, np.ndarray) else inputs["input_ids"].as_numpy()[0]
+        steps = [*ids, eos]
+        for index, token in enumerate(steps if on_step else []):
+            on_step(
+                types.SimpleNamespace(
+                    get_next_tokens=lambda token=token: np.array([token], dtype=np.int32),
+                    is_done=lambda index=index: index == len(steps) - 1,
+                )
+            )
+        sequence = np.concatenate([prompt, ids]).astype(np.int32)
+        return types.SimpleNamespace(get_sequence=lambda index: sequence)
+
+    return run
 
 
 def attributes(node) -> dict:

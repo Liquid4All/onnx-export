@@ -10,6 +10,7 @@ Run with:
 
 import argparse
 import collections
+import copy
 import json
 import logging
 import os
@@ -25,7 +26,16 @@ import onnxruntime as ort
 import onnxruntime_genai as og
 import pytest
 import torch
-from helpers import Q8_FP32_HEAD, attributes, matmul_bits
+from helpers import (
+    Q8_FP32_HEAD,
+    TOOL_CALL,
+    TOOL_CALL_ANSWERS,
+    WEATHER_TOOL,
+    answering,
+    attributes,
+    matmul_bits,
+    tool_turns,
+)
 from onnx import numpy_helper
 from transformers import (
     AutoTokenizer,
@@ -413,6 +423,100 @@ def test_genai_runtime_matches_onnxruntime(export, precision: str):
 
     session = decoder(output_dir, precision)
     assert genai_tokens == greedy(session, TOKENS[0], len(genai_tokens), eos=set())
+
+
+def test_text_chat_answer_keeps_no_state(export, capsys):
+    """TextChat.answer() leaves the conversation and its messages alone and prints nothing;
+    send() is answer() of the conversation."""
+    chat = text_infer.TextChat(export[2])
+    messages = [{"role": "user", "content": "Hi"}]
+    answer = chat.answer(messages, 4)
+    assert chat.answer(messages, 4) == answer
+    assert messages == [{"role": "user", "content": "Hi"}]
+    assert chat.messages == []
+    assert capsys.readouterr().out == ""
+
+    assert chat.send("Hi", 4, stream=False) == answer
+    assert chat.messages == [*messages, {"role": "assistant", "content": answer}]
+
+
+def test_text_chat_answer_passes_tools_to_the_chat_template(export, monkeypatch):
+    chat = text_infer.TextChat(export[2])
+    prompts = []
+
+    def record(model, ids, *args):
+        prompts.append(chat.hf_tokenizer.decode(ids))
+        return generate(model, ids, *args)
+
+    monkeypatch.setattr(text_infer, "generate", record)
+    messages = [{"role": "user", "content": "What is the weather in Paris?"}]
+    chat.answer(messages, 1, tools=[WEATHER_TOOL])
+    chat.answer(messages, 1)
+    assert ["get_weather" in prompt for prompt in prompts] == [True, False]
+
+
+def test_text_chat_answer_takes_openai_messages(export, monkeypatch):
+    """An OpenAI tool round trip reaches the chat template as LFM2's templates take it: the call's
+    arguments a mapping, not a JSON string, and a list of text parts its text, which LFM2-350M's
+    template would render as JSON. The caller's messages stay as they were."""
+    chat = text_infer.TextChat(export[2])
+    prompts = []
+
+    def record(model, ids, *args):
+        prompts.append(chat.hf_tokenizer.decode(ids))
+        return generate(model, ids, *args)
+
+    monkeypatch.setattr(text_infer, "generate", record)
+    parts = [
+        {"type": "text", "text": "What is the weather "},
+        {"type": "text", "text": "in Paris?"},
+    ]
+    messages = [{"role": "user", "content": parts}, *tool_turns(content=None)]
+    sent = copy.deepcopy(messages)
+    chat.answer(messages, 1, tools=[WEATHER_TOOL])
+
+    assert messages == sent
+    (prompt,) = prompts
+    # the tiny export has LFM2-350M's template, which would render the parts as JSON
+    assert "<|im_start|>user\nWhat is the weather \nin Paris?<|im_end|>" in prompt
+    assert "<|tool_call_start|>[get_weather(city='Paris')]<|tool_call_end|><|im_end|>" in prompt
+    assert "<|tool_response_start|>sunny<|tool_response_end|>" in prompt
+
+
+@pytest.mark.parametrize(("keep", "expected"), TOOL_CALL_ANSWERS, ids=["default", "keep"])
+def test_text_chat_answer_keeps_special_tokens_on_request(
+    export, keep, expected, monkeypatch, capsys
+):
+    """With or without the special tokens, stream prints the answer that answer() returns;
+    genai's TokenizerStream would print spaces around the tool-call markers."""
+    chat = text_infer.TextChat(export[2])
+    ids = chat.hf_tokenizer.encode(TOOL_CALL, add_special_tokens=False)
+    monkeypatch.setattr(text_infer, "generate", answering(ids, chat.tokenizer.eos_token_ids[0]))
+    messages = [{"role": "user", "content": "What is the weather in Paris?"}]
+    assert chat.answer(messages, len(ids), keep_special_tokens=keep) == expected
+    assert chat.answer(messages, len(ids), keep_special_tokens=keep, stream=True) == expected
+    assert capsys.readouterr().out == f"{expected}\n"
+
+
+@pytest.mark.parametrize("keep", [False, True], ids=["default", "keep"])
+def test_text_chat_answer_streams_its_answer(export, keep, capsys):
+    """stream prints answer() as genai generates it: the tiny model's vocabulary is nearly all
+    special tokens, which genai's TokenizerStream pads with spaces."""
+    chat = text_infer.TextChat(export[2])
+    messages = [{"role": "user", "content": "Hi"}]
+    answer = chat.answer(messages, 32, keep_special_tokens=keep, stream=True)
+    assert capsys.readouterr().out == f"{answer}\n"
+
+
+def test_text_chat_answer_streams_whole_characters(export, monkeypatch, capsys):
+    """stream prints a character whose bytes take several tokens once they have all come."""
+    chat = text_infer.TextChat(export[2])
+    text = "\ua66e\U00013000 ok"
+    ids = chat.hf_tokenizer.encode(text, add_special_tokens=False)
+    assert len(ids) == 8  # a token per byte of the two characters, then " ok"
+    monkeypatch.setattr(text_infer, "generate", answering(ids, chat.tokenizer.eos_token_ids[0]))
+    assert chat.answer([{"role": "user", "content": "Hi"}], len(ids), stream=True) == text
+    assert capsys.readouterr().out == f"{text}\n"
 
 
 def test_genai_version_floor():

@@ -122,16 +122,33 @@ def generate(
 
 
 class TokenPrinter:
-    """generate() step that streams each new token to stdout, leaving out the ids in skip."""
+    """generate() step that streams the answer to stdout, leaving out the ids in skip and the
+    end-of-turn tokens, which genai leaves out of the sequence.
+
+    Each step prints what its token adds to tokenizer.decode() of the answer so far (0.4 ms at
+    4,096 tokens), so the printed text is the decoded answer, where genai's TokenizerStream pads
+    special tokens with spaces for LFM2-350M, -700M and -1.2B and the VL models. A trailing
+    U+FFFD, a character whose bytes have not all come, waits for the next token.
+    """
 
     def __init__(self, tokenizer: og.Tokenizer, skip: tuple[int, ...] = ()):
-        self.stream = tokenizer.create_stream()
-        self.skip = set(skip)
+        self.tokenizer = tokenizer
+        self.skip = {*skip, *map(int, tokenizer.eos_token_ids)}
+        self.tokens: list[int] = []
+        self.printed = ""
 
     def __call__(self, generator: og.Generator):
         token = int(generator.get_next_tokens()[0])
+        done = generator.is_done()
         if token not in self.skip:
-            print(self.stream.decode(token), end="", flush=True)
+            self.tokens.append(token)
+        elif not done:
+            return
+        text = self.tokenizer.decode(np.array(self.tokens, dtype=np.int32))
+        if not done:
+            text = text.rstrip("\ufffd")
+        print(text[len(self.printed) :], end="", flush=True)
+        self.printed = text
 
 
 def add_runtime_arguments(parser, precisions: tuple[str, ...]):
