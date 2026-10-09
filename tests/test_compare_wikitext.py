@@ -12,6 +12,8 @@ Run with:
 
 import json
 import pathlib
+import re
+import shutil
 import sys
 
 import numpy as np
@@ -174,8 +176,9 @@ def text(tmp_path_factory):
 
 
 def test_scores_and_the_gate(text, tmp_path, monkeypatch):
-    """fp32 scores ~0 against the PyTorch reference and q8 and q4 more; a precision above
-    --max-kld fails the command, which still writes its results."""
+    """fp32 scores ~0 against the PyTorch reference and q8 and q4 more, with no ceiling for an
+    unknown model; a precision above --max-kld fails the command, which still writes its
+    results."""
     _, model, export = text
     reference = tmp_path / "ref.kld"
     write_reference(reference, torch_logits(model), random_tokens(model.config.vocab_size), "tiny")
@@ -189,6 +192,7 @@ def test_scores_and_the_gate(text, tmp_path, monkeypatch):
     assert rows["fp32"]["kld_mean"] < rows["q8"]["kld_mean"] < rows["q4"]["kld_mean"]
     assert all(row["tokens"] == SCORED for row in rows.values())
     assert all(row["ceiling"] is None and row["pass"] is None for row in rows.values())
+    assert output.with_suffix(".md").read_text().count("| no ceiling |") == 3
     assert {k: results["reference"][k] for k in ("model", "bos", "n_ctx", "chunks")} == {
         "model": "tiny",
         "bos": BOS,
@@ -202,7 +206,7 @@ def test_scores_and_the_gate(text, tmp_path, monkeypatch):
 
     limit = (rows["q8"]["kld_mean"] + rows["q4"]["kld_mean"]) / 2
     with pytest.raises(SystemExit) as exit_info:
-        run(monkeypatch, *argv, "--max-kld", limit, "--chunks", 2)
+        run(monkeypatch, *argv, "--max-kld", limit, "--chunks", 2, "--precision", "q4", "q8")
     assert exit_info.value.code == 1
     results = json.loads(output.read_text())
     assert results["reference"]["chunks"] == 2
@@ -229,7 +233,8 @@ def test_reference_without_a_sidecar(text, tmp_path, monkeypatch, starts_with_bo
 
 
 def test_known_models_have_ceilings(text, tmp_path, monkeypatch):
-    """The reference names the model, whose baselines give each precision KLD + 2 SE."""
+    """The reference names the model, whose CPU baselines give q4 KLD + 2 SE; q8, gated on CUDA
+    only, scores on the CPU without a ceiling."""
     _, model, export = text
     reference = tmp_path / "ref.kld"
     tokens = random_tokens(model.config.vocab_size)
@@ -238,14 +243,58 @@ def test_known_models_have_ceilings(text, tmp_path, monkeypatch):
     argv = ["--export", export, "--reference", reference, "--output", output]
 
     rows = run(monkeypatch, *argv)["rows"]
-    assert list(rows) == ["q4", "q8"]
-    for precision, row in rows.items():
-        kld, se = wikitext.BASELINES["LFM2.5-350M"][precision]
-        assert row["ceiling"] == kld + 2 * se
-        assert row["pass"] is True
-    assert wikitext.ceiling(["LFM2.5-tiny", "LFM2.5-2.6B"], "q8", None) == 0.002636 + 2 * 0.000118
-    assert wikitext.ceiling(["LFM2.5-tiny"], "q4", None) is None
-    assert wikitext.ceiling(["LFM2.5-350M"], "q4", 0.5) == 0.5
+    assert list(rows) == ["q4"]
+    kld, se = wikitext.BASELINES["cpu"]["LFM2.5-350M"]["q4"]
+    assert rows["q4"]["ceiling"] == kld + 2 * se
+    assert rows["q4"]["pass"] is True
+    rows = run(monkeypatch, *argv, "--precision", "q8")["rows"]
+    assert rows["q8"]["ceiling"] is None and rows["q8"]["pass"] is None
+
+
+def test_ceilings_follow_the_device():
+    """A row gates its own device; each device scores the precisions it has rows for."""
+    cpu, cuda = wikitext.BASELINES["cpu"]["LFM2.5-2.6B"], wikitext.BASELINES["cuda"]["LFM2.5-2.6B"]
+    names = ["LFM2.5-tiny", "LFM2.5-2.6B"]
+    assert wikitext.ceiling(names, "cpu", "q4", None) == cpu["q4"][0] + 2 * cpu["q4"][1]
+    assert wikitext.ceiling(names, "cuda", "q8", None) == cuda["q8"][0] + 2 * cuda["q8"][1]
+    assert wikitext.ceiling(names, "cuda", "q4", None) is None
+    assert wikitext.ceiling(names, "cpu", "q8", None) is None
+    assert wikitext.ceiling(["LFM2.5-tiny"], "cpu", "q4", None) is None
+    assert wikitext.ceiling(["LFM2.5-350M"], "cuda", "q4", 0.5) == 0.5
+    for device, models in wikitext.BASELINES.items():
+        gated = {precision for rows in models.values() for precision in rows}
+        assert gated == set(wikitext.DEVICE_PRECISIONS[device])
+
+
+def test_cuda_takes_the_cuda_ceilings(text, tmp_path, monkeypatch):
+    """--device cuda scores q8 by default against its CUDA ceiling; q4, which has a CPU ceiling
+    only, is reported as "no ceiling", not as a pass, and does not fail the command. The
+    sessions asked for on CUDA run on the CPU here."""
+    _, model, export = text
+    reference = tmp_path / "ref.kld"
+    tokens = random_tokens(model.config.vocab_size)
+    write_reference(reference, torch_logits(model), tokens, "LiquidAI/LFM2.5-350M")
+    requested = []
+    load = wikitext.load_onnx_session
+
+    def cpu_session(path, ep, tf32, threads):
+        requested.append((path.name, ep, tf32))
+        return load(path, "cpu", tf32, threads)
+
+    monkeypatch.setattr(wikitext, "load_onnx_session", cpu_session)
+    output = tmp_path / "wikitext.json"
+    argv = ["--export", export, "--reference", reference, "--output", output, "--device", "cuda"]
+
+    assert list(run(monkeypatch, *argv, "--chunks", 2)["rows"]) == ["q8"]
+    rows = run(monkeypatch, *argv, "--precision", "q8", "q4")["rows"]
+    assert requested == [("model_q8.onnx", "cuda", False)] * 2 + [("model_q4.onnx", "cuda", False)]
+    kld, se = wikitext.BASELINES["cuda"]["LFM2.5-350M"]["q8"]
+    assert rows["q8"]["ceiling"] == kld + 2 * se
+    assert rows["q8"]["pass"] is True
+    assert rows["q4"]["ceiling"] is None and rows["q4"]["pass"] is None
+    report = output.with_suffix(".md").read_text()
+    assert re.search(r"^\| q8 \|.* \| pass \|$", report, re.M)
+    assert re.search(r"^\| q4 \|.* \| — \|.* \| no ceiling \|$", report, re.M)
 
 
 def test_reference_from_the_checkpoint(text, tmp_path, monkeypatch):
@@ -396,15 +445,21 @@ def test_arguments_are_checked(text, tmp_path, monkeypatch, capsys):
     _, _, export = text
     output = tmp_path / "wikitext.json"
     output.write_bytes(b"")
-    for argv, message in [
-        (["--model", "m"], "--model needs --tokens or --text"),
-        (["--reference", output, "--tokens", output], "--tokens and --text go with --model"),
-        (["--reference", tmp_path / "missing.kld"], "does not exist"),
-        (["--reference", output, "--precision", "q4f16"], "has no q4f16"),
-        (["--reference", output, "--device", "cuda"], "has none of fp16, q4f16"),
+    fp32_only = tmp_path / "fp32-only"
+    (fp32_only / "onnx").mkdir(parents=True)
+    shutil.copy(export / "genai_config.json", fp32_only)
+    (fp32_only / "onnx" / "model.onnx").touch()
+    given = ["--reference", output]
+    for folder, argv, message in [
+        (export, ["--model", "m"], "--model needs --tokens or --text"),
+        (export, [*given, "--tokens", output], "--tokens and --text go with --model"),
+        (export, ["--reference", tmp_path / "missing.kld"], "does not exist"),
+        (export, [*given, "--precision", "q4f16"], "has no q4f16"),
+        (fp32_only, given, "has none of q4, q4f32 (cpu)"),
+        (fp32_only, [*given, "--device", "cuda"], "has none of q8, fp16, q4f16 (cuda)"),
     ]:
         with pytest.raises(SystemExit) as exit_info:
-            run(monkeypatch, "--export", export, "--output", output, *argv)
+            run(monkeypatch, "--export", folder, "--output", output, *argv)
         assert exit_info.value.code == 2
         assert message in capsys.readouterr().err
 
