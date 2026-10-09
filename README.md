@@ -31,12 +31,11 @@ Every export is an [onnxruntime-genai](https://github.com/microsoft/onnxruntime-
 git clone https://github.com/Liquid4All/onnx-export.git
 cd onnx-export
 uv sync
-
-# For development (testing, benchmarking, lfm2-compare audio)
-uv sync --extra dev
 ```
 
 `uv sync` installs onnxruntime-genai 0.17.1 from `uv.lock` (`pyproject.toml` requires 0.17.1 or later), which runs all four families (`lfm2`, `lfm2_moe`, `lfm2_vl`, `lfm2_audio`).
+
+`uv sync` also installs the `dev` dependency group: pytest, ruff, and liquid-audio for `lfm2-compare audio`. The exports and the inference CLIs run without it, so `uv sync --no-dev` is enough to use them. pip 25.1 or later installs the group with `pip install --group dev`.
 
 `uv.lock` also pins an onnxruntime nightly from the ORT-Nightly feed (`[tool.uv]` in `pyproject.toml`), because it runs LFM2-MoE on CPU about 44 times faster than onnxruntime 1.30.0 (see [4.3](#43-moe)). `pip install` ignores `uv.lock` and installs the latest onnxruntime release (1.30.0; `pyproject.toml` requires 1.30.0 or later). To switch a pip environment to the nightly:
 
@@ -278,12 +277,9 @@ uv run lfm2-audio-infer ./exports/LFM2.5-Audio-1.5B-ONNX --mode interleaved --ch
 
 ## 5. Testing
 
-Tests verify ONNX exports against the PyTorch reference models.
+Tests verify ONNX exports against the PyTorch reference models. They need the `dev` dependency group, which `uv sync` installs by default ([2](#2-installation)).
 
 ```bash
-# Install dev dependencies
-uv sync --extra dev
-
 # Export pipelines on tiny random checkpoints (no model download)
 uv run pytest tests/test_genai_export.py -v
 uv run pytest tests/test_genai_export_multimodal.py -v
