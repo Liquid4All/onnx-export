@@ -1,7 +1,17 @@
 version: 2
+
+# Dependabot's proxy only lets requests through to the public registries and the ones listed
+# here; uv.lock takes onnxruntime from the ORT-Nightly feed ([tool.uv] in pyproject.toml).
+registries:
+  ort-nightly:
+    type: python-index
+    url: https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
+
 updates:
   - package-ecosystem: uv
     directory: /
+    registries:
+      - ort-nightly
     schedule:
       interval: monthly
     cooldown:

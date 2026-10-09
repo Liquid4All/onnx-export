@@ -34,7 +34,7 @@ uv sync
 
 `uv sync` installs onnxruntime-genai 0.17.1 from `uv.lock` (`pyproject.toml` requires 0.17.1 or later), which runs all four families (`lfm2`, `lfm2_moe`, `lfm2_vl`, `lfm2_audio`).
 
-`uv sync` also installs the `dev` dependency group: pytest, ruff, and liquid-audio for `lfm2-compare audio`. The exports and the inference CLIs run without it, so `uv sync --no-dev` is enough to use them. pip 25.1 or later installs the group with `pip install --group dev`.
+`uv sync` also installs the `dev` dependency group: pytest, ruff, and liquid-audio for `lfm2-compare audio`. The exports and the inference CLIs run without it, so `uv sync --no-dev` is enough to use them; run them with `uv run --no-dev` (or set `UV_NO_DEV=1`) there, because a plain `uv run` syncs the environment first and installs the group again. pip 25.1 or later installs the group with `pip install --group dev`.
 
 `uv.lock` also pins an onnxruntime nightly from the ORT-Nightly feed (`[tool.uv]` in `pyproject.toml`), because it runs LFM2-MoE on CPU about 44 times faster than onnxruntime 1.30.0 (see [4.3](#43-moe)). `pip install` ignores `uv.lock` and installs the latest onnxruntime release (1.30.0; `pyproject.toml` requires 1.30.0 or later). To switch a pip environment to the nightly:
 
@@ -197,6 +197,8 @@ The q4 and q8 decoders have an int8 LM head, and their bundles an int8 token tab
 
 - `matmul_nbits_quantizer [ERROR] - Gather only supports 4 bits quantization.` (q8 and Audio exports): an 8-bit builder pass leaves a Gather as it is; the export is complete.
 - `onnx_ir.serde [WARNING] ... cannot be found in any scope. The model is invalid but we will still create a new input` (three lines in text and MoE q4 exports): logged while the builder quantizes; the saved `model_q4.onnx` is complete.
+- `neural_compressor [WARNING] - Model size > 2GB. Please use model path instead of onnx model object to quantize` (q4 builds of text, MoE and VL decoders over 2 GB in fp32, from LFM2-700M up; a q4f16 export without an existing q4 runs one too): the builder passes the model to k_quant in memory rather than as a path; the saved decoder is complete.
+- numpy `RuntimeWarning` lines from `onnxruntime/quantization/neural_compressor/weight_only.py`, such as `overflow encountered in divide` or `invalid value encountered in divide` (q4 builds of 2.6B and 8B-A1B): k_quant's arithmetic over- or underflows on blocks of 32 tiny weights. In 8B-A1B (largest values around 1e-36) its search's candidate scales come out NaN and are dropped, so those blocks keep their min-max scale. In 2.6B, 746,432 blocks hold only subnormal values (at most 3.2e-39); their min-max scale comes out 0, so they dequantize to zero. Both q4 exports pass the wikitext gate of [5.1](#51-comparing-an-export-with-its-reference-model).
 - On macOS, `objc[...]: Class MATStreamingSessionDelegate is implemented in both ...` (two lines in every process that loads onnxruntime and onnxruntime-genai, with the onnxruntime nightly): no effect on the results.
 
 ## 4. Inference

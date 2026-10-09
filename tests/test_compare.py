@@ -8,8 +8,10 @@ Run with:
 import inspect
 import json
 import logging
+import os
 import pathlib
 import re
+import stat
 import sys
 
 import numpy as np
@@ -129,6 +131,18 @@ def test_failed_write_keeps_the_previous_reference(tmp_path, monkeypatch):
         compare.save_reference(path, ITEMS[:1])
     assert path.read_bytes() == raw
     assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o077], ids=oct)
+def test_reference_gets_the_umask_mode(umask: int, tmp_path):
+    """mkstemp creates the file 0600, so other users could not read a shared cache."""
+    path = tmp_path / "reference.npz"
+    previous = os.umask(umask)
+    try:
+        compare.save_reference(path, ITEMS)
+    finally:
+        os.umask(previous)
+    assert oct(stat.S_IMODE(path.stat().st_mode)) == oct(0o666 & ~umask)
 
 
 def test_cpu_and_cuda_references_never_mix(checkpoint, runs):

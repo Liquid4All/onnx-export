@@ -140,7 +140,8 @@ def cached_reference(
 @contextlib.contextmanager
 def atomic_write(path: pathlib.Path):
     """A binary file renamed over path once the block completes, so no reader sees a partial
-    file; on an error path stays as it was."""
+    file; on an error path stays as it was. It gets the mode a new file gets (0o666 & ~umask),
+    not mkstemp's 0600, so other users can read a shared cache."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     tmp = pathlib.Path(name)
@@ -148,6 +149,9 @@ def atomic_write(path: pathlib.Path):
         with os.fdopen(fd, "wb") as f:
             yield f
             f.flush()
+            umask = os.umask(0)
+            os.umask(umask)
+            os.fchmod(f.fileno(), 0o666 & ~umask)
             os.fsync(f.fileno())
         os.replace(tmp, path)
     finally:

@@ -2,3 +2,10 @@ __pycache__
 LFM2*
 exports/
 .DS_Store
+# lfm2-compare results, and the wikitext-2 download of README 5.1
+compare-*.json
+compare-*.md
+wikitext-*.json
+wikitext-*.md
+wikitext-2-raw-v1.zip
+wikitext-2-raw/
