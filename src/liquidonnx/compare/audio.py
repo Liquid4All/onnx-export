@@ -1,4 +1,4 @@
-"""LFM2.5-Audio exports against liquid-audio (needs the dev extra).
+"""LFM2.5-Audio exports against liquid-audio (needs the dev dependency group).
 
 Both sides take the audio codes greedily (audio_top_k=1), so that they can be compared at all.
 """
