@@ -16,8 +16,8 @@ used if the stream starts with it. --model computes one instead: the Hugging Fac
 from --tokens, any base file of the model (e.g. `llama-perplexity --kl-divergence-base` of a GGUF),
 or from --text, wiki.test.raw tokenized as llama-perplexity does: BOS, then the text's tokens. The
 Hugging Face tokenizers give exactly llama.cpp 4e7481175's stream for LFM2.5-350M, 1.2B-Instruct,
-2.6B, 8B-A1B and VL-450M; for other models --tokens is the safe choice. Audio references need
-liquid-audio, so audio exports take --reference only.
+2.6B, 8B-A1B (and 24B-A2B, which has its tokenizer.json) and VL-450M; for other models --tokens is
+the safe choice. Audio references need liquid-audio, so audio exports take --reference only.
 
 A precision fails, and the command exits with 1, when its KLD is above --max-kld or, without it,
 above its ceiling in BASELINES for --device: the CPU ceilings cover q4 and q4f32, the CUDA ones q8,
@@ -78,13 +78,16 @@ THREADS = 13
 # nightly, which lacks onnxruntime#32814: with it, q4 scores 0.467 / 0.106 / 0.146 / 0.187 on
 # 350M / 1.2B / 2.6B / 8B. The other rows do not depend on #32814. The 8B-A1B q4 and q8 rows hold
 # at THREADS (13) intra-op threads only (the CUDA EP leaves q8's int8 QMoE nodes to the CPU EP):
-# at 12 threads q4 scores +0.17%, at 4 CUDA q8 -0.3%.
+# at 12 threads q4 scores +0.17%, at 4 CUDA q8 -0.3%. LFM2.5-24B-A2B's fp32 model (96 GB) does not
+# fit on the H100: its reference ran on an MI325X (ROCm, TF32 off), whose logits are within 1e-4 of
+# a CPU run's, and its fp32 decoder scores 0 against it.
 BASELINES = {
     "cpu": {
         "LFM2.5-350M": {"q4": (0.4896, 0.0120), "q4f32": (0.7908, 0.0182)},
         "LFM2.5-1.2B-Instruct": {"q4": (0.1537, 0.0131), "q4f32": (0.1584, 0.0107)},
         "LFM2.5-2.6B": {"q4": (0.1657, 0.0041), "q4f32": (0.2310, 0.0051)},
         "LFM2.5-8B-A1B": {"q4": (0.2103, 0.0060)},
+        "LFM2.5-24B-A2B": {"q4": (0.2129, 0.0086)},
         "LFM2.5-VL-450M": {"q4": (0.0643, 0.0014)},
         "LFM2.5-Audio-1.5B": {"q4": (0.03209, 0.00056)},
     },
@@ -110,6 +113,12 @@ BASELINES = {
             "fp16": (0.00565, 0.000400),
             # with weights_prepacked=0 on the QMoE nodes: without it the CUDA EP misreads the experts
             "q4f16": (0.2022, 0.0053),
+        },
+        "LFM2.5-24B-A2B": {
+            "q8": (0.03219, 0.0021),
+            # not deterministic on CUDA (0.01459 to 0.01558 over 5 runs): the worst run
+            "fp16": (0.01558, 0.0020),
+            "q4f16": (0.2146, 0.0086),
         },
         "LFM2.5-VL-450M": {"q8": (0.0003829, 0.0000093), "fp16": (1.315e-5, 2.6e-7)},
         "LFM2.5-Audio-1.5B": {"q8": (0.0001238, 0.0000018), "fp16": (5.444e-6, 1.12e-7)},

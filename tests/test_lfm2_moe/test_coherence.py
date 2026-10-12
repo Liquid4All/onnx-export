@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 MODELS = [
     "LiquidAI/LFM2-8B-A1B",
     "LiquidAI/LFM2.5-8B-A1B",
+    "LiquidAI/LFM2.5-24B-A2B",
 ]
 PRECISIONS = ["fp32", "q4", "q8"]
 MAX_NEW_TOKENS = 20
