@@ -16,6 +16,7 @@ from transformers import AutoConfig
 MODELS = [
     "LiquidAI/LFM2-8B-A1B",
     "LiquidAI/LFM2.5-8B-A1B",
+    "LiquidAI/LFM2.5-24B-A2B",
 ]
 
 MESSAGES = [

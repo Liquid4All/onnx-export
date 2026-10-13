@@ -19,7 +19,7 @@ ONNX export and inference tools for [LFM2](https://www.liquid.ai/liquid-foundati
 |--------|---------------|
 | **LFM2.5**, **LFM2** | fp32, fp16, q4, q4f16, q4f32, q8 |
 | **LFM2.5-VL**, **LFM2-VL** | fp32, fp16, q4, q8 |
-| **LFM2.5-8B-A1B**, **LFM2-8B-A1B** | fp32, fp16, q4, q4f16, q8 |
+| **LFM2.5-24B-A2B**, **LFM2.5-8B-A1B**, **LFM2-8B-A1B** | fp32, fp16, q4, q4f16, q8 |
 | **LFM2.5-Audio** | fp32, fp16, q4, q8 |
 
 Every export is an [onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai) model folder, and the inference CLIs run on onnxruntime-genai. The onnxruntime-genai model builder builds and quantizes the decoders; this repository builds the vision encoder, the audio graphs and the embedding models that splice image or audio features into the token embeddings, quantizes those, and converts the fp16 and q4f16 decoders. The exports are not loadable by Transformers.js.
@@ -161,9 +161,23 @@ uv run lfm2-moe-export LiquidAI/LFM2.5-8B-A1B --precision
 
 # Earlier LFM2 MoE checkpoint
 uv run lfm2-moe-export LiquidAI/LFM2-8B-A1B --precision
+
+# LFM2.5-24B-A2B: 40 layers, 64 experts, 4 active per token
+uv run lfm2-moe-export LiquidAI/LFM2.5-24B-A2B --precision
 ```
 
 Same layout as the text models. The experts become `QMoE` int4 (q4, q4f16) or int8 (q8); the routers stay fp32. The LFM2.5-8B-A1B `--precision` export peaks at about 50 GiB of RAM.
+
+The LFM2.5-24B-A2B `--precision` export took 52 minutes on a 26-core x86-64 host, with a peak of 138 GiB of RAM, and writes 187 GiB: fp32 89.4 GiB, fp16 44.7, q8 25.2, q4 14.2 and q4f16 12.8. 20 of the 52 minutes are the fp16 conversion of the fp32 decoder, which runs on one core. Its fp32 PyTorch model (96 GB) does not fit on an 80 GB GPU; `lfm2-compare` references for it need a larger GPU, such as an MI325X with the ROCm build of PyTorch (`--device cuda`), or the CPU. Scores on wikitext-2 ([5.1](#51-comparing-an-export-with-its-reference-model)), against an fp32 reference computed on an MI325X:
+
+| precision | device | KLD ± SE | same top | LFM2.5-8B-A1B |
+|---|---|---|---|---|
+| q4 | CPU | 0.2129 ± 0.0086 | 79.4% | 0.2103 |
+| q4f16 | CUDA | 0.2146 ± 0.0086 | 79.3% | 0.2022 |
+| q8 | CUDA | 0.0322 ± 0.0021 | 92.1% | 0.0182 |
+| fp16 | CUDA | 0.0146 to 0.0156 ± 0.0020 | 95.1 to 95.4% | 0.0057 |
+
+The fp32 decoder scores 0 (−4e-7, 100% same top on 8 chunks). q4 scores as LFM2.5-8B-A1B's does, q8 and fp16 2 to 3 times as high. That is the checkpoint, not the export: rounding the PyTorch weights to int8 as q8 does moves the next token of "The sky is" by KL 0.57, against 0.016 for LFM2.5-8B-A1B.
 
 ### 3.4 LFM2.5-Audio
 
@@ -207,7 +221,7 @@ The q4 and q8 decoders have an int8 LM head, and their bundles an int8 token tab
 
 The inference CLIs run the export folder on onnxruntime-genai, with interactive multi-turn chat and streaming output. They load the precision `genai_config.json` points at; `--precision` picks another one, and `--ep cuda` runs on CUDA (with the packages in [2](#2-installation)). The CUDA EP runs fp32 matmuls and convolutions in TF32 unless `--no-tf32` is given, so checks against an fp32 reference need the flag (`lfm2-compare --device cuda` always turns TF32 off).
 
-Text is decoded greedily. An answer ends at the end-of-turn token or after `--max-tokens` tokens: 4096 by default, room for the `<think>` block that LFM2.5-2.6B and LFM2.5-8B-A1B write before they answer (`lfm2-audio-infer` has a default per mode, see [4.4](#44-audio-asr-tts-interleaved)).
+Text is decoded greedily. An answer ends at the end-of-turn token or after `--max-tokens` tokens: 4096 by default, room for the `<think>` block that LFM2.5-2.6B, LFM2.5-8B-A1B and LFM2.5-24B-A2B write before they answer (`lfm2-audio-infer` has a default per mode, see [4.4](#44-audio-asr-tts-interleaved)).
 
 On CUDA, use fp16 or q4f16 for text and MoE (bare `--precision` leaves q4f16 out for the text models, so name it as in [3.1](#31-lfm2-text-models)), and fp16 for VL and Audio. The other precisions keep fp32 activations, so their GroupQueryAttention nodes, and the experts of MoE q4, run on the CPU: on an H100 with a 1024-token prompt, LFM2.5-350M decodes at 975 tok/s with q4f16 and 124 tok/s with q4. The MoE decoders mark their QMoE experts `weights_prepacked=0`, without which the CUDA EP misreads them; older MoE exports print garbage on CUDA and need re-exporting.
 
@@ -394,6 +408,8 @@ uv run lfm2-compare wikitext --export ./exports/LFM2.5-350M-ONNX --model LiquidA
 ## 6. Pre-exported Models
 
 The LFM2 and LFM2.5 ONNX repositories on Hugging Face, under [LiquidAI](https://huggingface.co/LiquidAI) and [onnx-community](https://huggingface.co/onnx-community), come from other export pipelines, such as Transformers.js tooling and versions of this repository from before it built onnxruntime-genai models. None of them has a `genai_config.json`, so the inference CLIs and onnxruntime-genai cannot load them; export the checkpoint as in [3](#3-export) instead.
+
+The exception is [LiquidAI/LFM2.5-24B-A2B-ONNX](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B-ONNX): `lfm2-moe-export --precision` from this repository made it ([3.3](#33-lfm2-moe-mixture-of-experts)), so the inference CLIs load its folder as downloaded.
 
 ## 7. Acknowledgements
 

@@ -25,9 +25,17 @@ logger = logging.getLogger(__name__)
 MODELS = [
     "LiquidAI/LFM2-8B-A1B",
     "LiquidAI/LFM2.5-8B-A1B",
+    "LiquidAI/LFM2.5-24B-A2B",
 ]
 
 PROMPTS = ["Hello, how are", "The sky is", "1 + 1 ="]
+
+# Without BOS, LFM2.5-24B-A2B's next token after "The sky is" is near-uniform (top token 3%), and
+# int4 reorders it: KL 4.2, 1 of the top 5 kept. The same weights in PyTorch, rounded as q8 does,
+# move that prompt with BOS by KL 0.57 (8B-A1B: 0.016), so this is the checkpoint, not the export.
+KNOWN_FAILURES = {
+    ("LiquidAI/LFM2.5-24B-A2B", "q4", "The sky is"): "near-uniform reference distribution",
+}
 
 QUANT_CONFIGS = [
     pytest.param(None, ["arrays", "top_k"], id="fp32"),
@@ -42,6 +50,7 @@ QUANT_CONFIGS = [
 @pytest.mark.parametrize("precision,checks", QUANT_CONFIGS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_decoder(
+    request: pytest.FixtureRequest,
     exports_dir: pathlib.Path,
     pytorch_model,
     precision: str | None,
@@ -50,6 +59,8 @@ def test_decoder(
 ):
     """Test single-step decoder logits against PyTorch."""
     model_id, model, tokenizer = pytorch_model
+    if reason := KNOWN_FAILURES.get((model_id, precision, prompt)):
+        request.applymarker(pytest.mark.xfail(reason=reason))
     model_name = get_model_name(model_id)
     logger.info(f"Testing {model_name}/{precision or 'fp32'}: '{prompt}'")
 
