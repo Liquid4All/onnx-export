@@ -19,6 +19,11 @@ each query attends to the oldest key it may see (tests/test_lfm3_audio/test_gqa_
 tiny graphs' MatMuls reduce over 64 to 192 values, which hides the cost of accumulating in fp16 at
 the real models' widths: the matmul probes measure it.
 
+The prefills over 31 positions and the vision encoders' 8x12 grid come again in 28 positions
+(prefill28) and 4x6 patches (grid4x6), in the precisions without fp16 activations: lfm3.spec.js
+runs those on Chromium's SwiftShader adapter too, where it skips fp16 and a full attention over 32
+or more positions.
+
 Each case's feeds go into {family}/cases/ as one little-endian blob, described in manifest.json,
 whose "nodes" lists each graph's nodes that read float tensors (float_nodes) for checks.js.
 The browser compares the fp32 graphs, the q8 vision encoder and q4f32 with the wasm EP; the
@@ -77,12 +82,13 @@ PAST = 3 * WINDOW
 ACCUMULATION_K = (2048, 7680)
 SUFFIXES = ("fp16", "q4", "q4f16", "q4f32", "q8", "q8f16")
 FP16_ACTIVATIONS = ("fp16", "q4f16", "q8f16")
-# graph -> its cases; the decode step only where the graph has caches
+# graph -> its cases; the decode step only where the graph has caches, prefill28 where the family
+# has a 28-position row
 CASES = {
     "model": ["prefill", "decode"],
-    "decoder": ["prefill", "decode"],
+    "decoder": ["prefill", "prefill28", "decode"],
     "gqa_window": ["prefill", "decode"],
-    "vision_encoder": ["grid8x12"],
+    "vision_encoder": ["grid8x12", "grid4x6"],
     "audio_encoder": ["frames200"],
     "depth_decoder": ["batch2"],
     "codec_decoder": ["frames7"],
@@ -113,12 +119,22 @@ PREFILL = {
     "lfm3_omni": [BOS, *image(4), *text(3, 1), *[AUDIO] * 5, *text(3, 2), *image(4, VIDEO)]
     + [*text(2, 3), *[AUDIO] * 3, *text(2, 4), AUDIO_START, *[AUDIO_OUT] * 3, *text(2, 5)],
 }
+# The rows above over 31 positions, shortened to 28 with each of their spans
+PREFILL28 = {
+    "lfm3_vl": [BOS, *image(4), *text(2, 1), *image(6), *text(2, 2), *image(4, VIDEO), *text(3, 3)],
+    "lfm3_omni": [BOS, *image(4), *text(1, 1), *[AUDIO] * 3, *text(1, 2), *image(4, VIDEO)]
+    + [*text(1, 3), *[AUDIO] * 3, *text(1, 4), AUDIO_START, *[AUDIO_OUT] * 3, *text(1, 5)],
+}
 # d1's state rows; QUESTIONS follow them (packed_row of tests/test_d1/test_tiny_export.py). 21
-# state tokens and 36 in all: S % 4 == 0 with the state's end inside a group of 4, where an
-# int32 Equal / Not / And set mask comes out wrong on WebGPU (README 4.6)
+# state tokens and 36 in all (D1_STATE28: 13 and 28): S % 4 == 0 with the state's end inside a
+# group of 4, where an int32 Equal / Not / And set mask comes out wrong on WebGPU (README 4.6)
 D1_STATE = {
     "d1": [BOS, *text(4, 1), *image(4), *text(2, 2), *image(4), *text(2, 3)],
     "d1_omni": [BOS, *text(5, 1), *image(4), *text(2, 2), *[AUDIO] * 5, *text(2, 3)],
+}
+D1_STATE28 = {
+    "d1": [BOS, *text(1, 1), *image(3), *text(1, 2), *image(2), *text(1, 3)],
+    "d1_omni": [BOS, *text(1, 1), *image(3), *text(1, 2), *[AUDIO] * 4, *text(1, 3)],
 }
 QUESTIONS = (4, 6, 5)
 
@@ -236,11 +252,11 @@ def decoder_feeds(graph: onnx.GraphProto, family: str, case: str, rng: np.random
     names = {i.name for i in graph.input}
     past, question, slots = 0, None, None
     if family.startswith("d1"):
-        ids, question, slots = d1_row(D1_STATE[family])
+        ids, question, slots = d1_row((D1_STATE28 if case == "prefill28" else D1_STATE)[family])
     elif case == "decode":
         past, ids = PAST, [AUDIO_OUT] if "audio_out_codes" in names else [5000]
     else:
-        ids = PREFILL[family]
+        ids = (PREFILL28 if case == "prefill28" else PREFILL)[family]
     rows = {"image_features": IMAGE, "video_features": VIDEO, "audio_features": AUDIO}
     feeds = {}
     for inp in graph.input:
@@ -276,6 +292,9 @@ def side_feeds(case: str, rng: np.random.Generator) -> dict[str, np.ndarray]:
     if case == "grid8x12":
         # [h/m, w/m, m, m, patch_dim]: 24 image tokens
         return {"pixel_values": rng.uniform(-1, 1, (4, 6, 2, 2, 1536))}
+    if case == "grid4x6":
+        # 6 image tokens
+        return {"pixel_values": rng.uniform(-1, 1, (2, 3, 2, 2, 1536))}
     if case == "frames200":
         # 25 encoder tokens, three windows
         return {"input_features": rng.standard_normal((1, 128, 200))}
@@ -393,7 +412,13 @@ def write_cases(out_dir: pathlib.Path, family: str, nodes: dict) -> list[dict]:
         nodes[str(path.relative_to(out_dir))] = float_nodes(model)
         ops = {node.op_type for node in graph.node}
         cached = any(i.name.startswith("past") for i in graph.input)
-        for case in CASES.get(graph_name, ["run"])[: None if cached else 1]:
+        short = family in PREFILL28 | D1_STATE28
+        for case in CASES.get(graph_name, ["run"]):
+            if (case == "decode" and not cached) or (case == "prefill28" and not short):
+                continue
+            # sized for SwiftShader, which has no shader-f16
+            if case in ("prefill28", "grid4x6") and precision in FP16_ACTIVATIONS:
+                continue
             # one seed per case: every precision of a graph gets the same values
             rng = np.random.default_rng(zlib.crc32(f"{family}/{graph_name}/{case}".encode()))
             if graph_name == "gqa_window":

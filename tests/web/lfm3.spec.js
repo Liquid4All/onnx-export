@@ -30,6 +30,10 @@ const FP16_ACTIVATIONS = new Set(['fp16', 'q4f16', 'q8f16']);
 const Q = { atol: 1e-3, rtol: 5e-2 };
 const F16 = { atol: 1e-2, rtol: 5e-2 };
 const TOLERANCE = { fp32: { atol: 1e-5, rtol: 1e-4 }, q4: Q, q4f32: Q, q8: Q, fp16: F16, q4f16: F16, q8f16: F16 };
+// Adapters but Apple's run the q4, q4f32 and q8 decoders' MatMulNBits (accuracy_level 4) on int8
+// activations (DP4A), where their references keep float ones: up to 0.06 of the scale apart on
+// SwiftShader (d1's q8 hidden states on the Linux CI)
+const DP4A_DECODER = { atol: 1e-3, rtol: 1e-1 };
 // The matmul probes (outputs up to ~4.3) within a few fp16 ulps of the CPU EP, which accumulates
 // in float32: accumulating in fp16 instead grows the error with the reduction length.
 const ACCUMULATION = { atol: 1e-2, rtol: 0 };
@@ -77,7 +81,12 @@ test.afterAll(async () => {
   ctx?.server.close();
 });
 
-if (!cases.length) test.skip(`no ${manifestFile}: run uv run python tests/web/export_lfm3.py`, () => {});
+if (!cases.length) {
+  const missing = `no ${manifestFile}: run uv run python tests/web/export_lfm3.py`;
+  // CI sets LIQUIDONNX_REQUIRE_LFM3=1: there a missing export fails instead of skipping
+  if (process.env.LIQUIDONNX_REQUIRE_LFM3) test(missing, () => { throw new Error(missing); });
+  else test.skip(missing, () => {});
+}
 
 for (const c of cases) {
   test(c.id, async ({ harnessPage: page }) => {
@@ -85,12 +94,16 @@ for (const c of cases) {
     test.skip(FP16_ACTIVATIONS.has(c.precision) && !adapter.shaderF16, NO_F16);
     test.skip(c.full_attention_queries >= 32 && adapter.architecture === 'swiftshader', SUBGROUP_FLASH);
     test.skip(c.graph.startsWith('matmul') && c.precision.startsWith('q4') && adapter.vendor !== 'apple', DP4A);
+    const dp4aDecoder = ['model', 'decoder'].includes(c.graph)
+      && ['q4', 'q4f32', 'q8'].includes(c.precision) && adapter.vendor !== 'apple';
+    const tolerance = c.graph.startsWith('matmul') ? ACCUMULATION
+      : dp4aDecoder ? DP4A_DECODER : TOLERANCE[c.precision];
     const url = (file) => `${ctx.baseUrl}/model/${file}`;
     await checkWebGpuCase(page, ctx.baseUrl, {
       modelUrl: url(c.model),
       externalData: c.external_data,
       feeds: { url: url(c.feeds.file), tensors: c.feeds.tensors },
       expected: c.expected && { url: url(c.expected.file), tensors: c.expected.tensors },
-    }, c.graph.startsWith('matmul') ? ACCUMULATION : TOLERANCE[c.precision], floatNodes[c.model]);
+    }, tolerance, floatNodes[c.model]);
   });
 }

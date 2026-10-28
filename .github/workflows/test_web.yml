@@ -1,7 +1,8 @@
 name: Test WebGPU
 
-# Runs the synthetic LFM2.5-Audio graphs on onnxruntime-web's WebGPU EP in headless
-# Chromium (SwiftShader) and checks outputs against the wasm EP. See tests/web/README.md.
+# Runs the synthetic LFM2.5-Audio graphs and the tiny LFM3-family exports on onnxruntime-web's
+# WebGPU EP in headless Chromium (SwiftShader) and checks outputs against the wasm EP or native
+# onnxruntime's CPU EP. See tests/web/README.md.
 
 on:
   push:
@@ -10,6 +11,19 @@ on:
       - 'src/liquidonnx/**'
       - 'tests/web/**'
       - 'tests/test_lfm2_audio/synthetic.py'
+      # export_lfm3.py's tiny checkpoints and probe, with the reference code and assets they load
+      - 'tests/__init__.py'
+      - 'tests/test_d1/__init__.py'
+      - 'tests/test_d1/test_config.py'
+      - 'tests/test_lfm3_audio/__init__.py'
+      - 'tests/test_lfm3_audio/assets/*/processor_config.json'
+      - 'tests/test_lfm3_audio/reference/**'
+      - 'tests/test_lfm3_audio/remote.py'
+      - 'tests/test_lfm3_audio/test_gqa_window.py'
+      - 'tests/test_lfm3_audio/tiny.py'
+      - 'tests/test_lfm3_vl/__init__.py'
+      - 'tests/test_lfm3_vl/reference/**'
+      - 'tests/test_lfm3_vl/tiny.py'
       - 'pyproject.toml'
       - 'uv.lock'
       - '.github/workflows/test_web.yml'
@@ -39,6 +53,7 @@ jobs:
       - run: uv python install 3.12
       - run: uv sync
       - run: uv run python tests/web/export_synthetic.py
+      - run: uv run python tests/web/export_lfm3.py
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -51,6 +66,8 @@ jobs:
         working-directory: tests/web
       - run: npm test
         working-directory: tests/web
+        env:
+          LIQUIDONNX_REQUIRE_LFM3: "1"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
