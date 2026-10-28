@@ -104,14 +104,15 @@ jobs:
         with:
           path: genai-python
           # Bump the build<N> suffix whenever the build command below changes.
-          key: onnxruntime-genai-${{ runner.os }}-${{ steps.genai.outputs.commit }}-ort${{ env.ORT }}-build1
+          key: onnxruntime-genai-${{ runner.os }}-${{ steps.genai.outputs.commit }}-ort${{ env.ORT }}-build2
 
       # The build leaves an importable Python package in build/Linux/Release/wheel (packaging
       # the wheel itself needs pip). It compiles against the headers of the onnxruntime
       # release in ORT: the nightly in uv.lock has no GitHub release archive, and the build
       # loads the venv's onnxruntime at run time. build.py --parallel means an unbounded
       # make -j, which runs the runner out of memory; CMAKE_BUILD_PARALLEL_LEVEL caps it at
-      # the core count.
+      # the core count. Without PYTHON_EXECUTABLE, pybind11 builds the module for the first
+      # python3 on PATH (3.14 on ubuntu-26.04), which the venv's 3.12 cannot import.
       - name: Build onnxruntime-genai
         if: steps.genai-cache.outputs.cache-hit != 'true'
         env:
@@ -125,7 +126,8 @@ jobs:
           uv pip install pip
           cd genai-src
           CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) "$GITHUB_WORKSPACE/.venv/bin/python" build.py --config Release \
-            --skip_tests --skip_examples --no_telemetry --cmake_extra_defines ENABLE_TESTS=OFF \
+            --skip_tests --skip_examples --no_telemetry \
+            --cmake_extra_defines ENABLE_TESTS=OFF PYTHON_EXECUTABLE="$GITHUB_WORKSPACE/.venv/bin/python" \
             --ort_home "$GITHUB_WORKSPACE/onnxruntime-linux-x64-$ORT"
           mv build/Linux/Release/wheel "$GITHUB_WORKSPACE/genai-python"
 
