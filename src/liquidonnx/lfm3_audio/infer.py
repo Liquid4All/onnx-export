@@ -47,6 +47,8 @@ SYSTEM_PROMPTS = {
     "tts": "Perform TTS in {language} using a {voice} voice.",
     "s2s": "Respond with interleaved text and audio.",
 }
+# The model cards' TTS prompts name English by locale: American English or British English
+DEFAULT_LANGUAGES = {"asr": "English", "tts": "American English"}
 
 
 def speech_sampling(args: argparse.Namespace) -> AudioSampling:
@@ -78,7 +80,8 @@ def conversation(args, clips: int) -> tuple[list[dict], bool]:
     )
     messages = []
     if args.mode in SYSTEM_PROMPTS:
-        system = SYSTEM_PROMPTS[args.mode].format(language=args.language, voice=args.voice)
+        language = args.language or DEFAULT_LANGUAGES.get(args.mode)
+        system = SYSTEM_PROMPTS[args.mode].format(language=language, voice=args.voice)
         if args.mode == "asr" and args.language == "any":
             system = "Perform ASR."
         messages.append({"role": "system", "content": system})
@@ -91,9 +94,10 @@ def conversation(args, clips: int) -> tuple[list[dict], bool]:
 
 def main():
     """Arguments: --model, --precision (session.BUNDLES), --mode (MODES), --audio (16 kHz WAVs),
-    --prompt, --output, --language (default English), --voice (female|male), --max-tokens,
-    --audio-temperature, --audio-top-k, --audio-repetition-penalty, --audio-repetition-window,
-    --greedy, --seed, --suppress-mixed, --suppress-audio-out, --no-stream, --cpu, --no-tf32."""
+    --prompt, --output, --language (default English for asr, American English for tts),
+    --voice (female|male), --max-tokens, --audio-temperature, --audio-top-k,
+    --audio-repetition-penalty, --audio-repetition-window, --greedy, --seed, --suppress-mixed,
+    --suppress-audio-out, --no-stream, --cpu, --no-tf32."""
     parser = argparse.ArgumentParser(description="ONNX inference for LFM3-Audio")
     parser.add_argument("--model", required=True, help="Export folder")
     parser.add_argument(
@@ -105,7 +109,10 @@ def main():
     parser.add_argument("--audio", nargs="*", default=[], help="WAV clips of the user turn")
     parser.add_argument("--prompt", help="Text of the user turn (the text to speak for tts)")
     parser.add_argument("--output", help="24 kHz WAV of the generated speech")
-    parser.add_argument("--language", default="English", help='"any": "Perform ASR."')
+    parser.add_argument(
+        "--language",
+        help='default: English for asr, American English for tts; "any": "Perform ASR."',
+    )
     parser.add_argument("--voice", choices=("female", "male"), default="female")
     parser.add_argument("--max-tokens", type=int, default=1024, help="Slots: tokens and frames")
     parser.add_argument("--audio-temperature", type=float)

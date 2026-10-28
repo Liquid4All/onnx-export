@@ -24,8 +24,8 @@ name: Test Export
 # (liquidonnx.genai_builder.GENAI_COMMIT), cached per commit and header version,
 # and runs every family on that build, on the onnxruntime nightly uv.lock installs.
 #
-# Large checkpoints may exceed the runner's disk/RAM — keep to a small model
-# (the defaults export in a few minutes). CPU inference on a hosted runner is
+# Large checkpoints may exceed the runner's disk/RAM — keep to a small model,
+# such as the default. CPU inference on a hosted runner is
 # slow for large checkpoints, so the inline inference is time-bounded by
 # `INFER_TIMEOUT`. To export a gated/private model, add an `HF_TOKEN`
 # repository secret.
@@ -59,6 +59,9 @@ on:
       - '.github/workflows/test_export.yml'
   pull_request:
     paths: *export-paths
+
+permissions:
+  contents: read
 
 # Manual dispatches each get a unique group (the run id), so parameter sweeps —
 # e.g. one run per model/precision — execute in parallel instead of cancelling

@@ -68,7 +68,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/liquidonnx"]
 
-# The nightly's CPU QMoE kernels decode LFM2-MoE about 44x faster than 1.30.0.
+# The nightly's CPU QMoE kernels decode LFM2-MoE much faster than 1.30.0.
 [tool.uv]
 override-dependencies = ["onnxruntime>=1.31.0.dev0"]
 

@@ -55,9 +55,8 @@ def check_moe_onnxruntime_version(model_type: str, version: str):
     """Warn that LFM2-MoE decodes slowly on CPU with an onnxruntime older than MOE_ORT_MIN_VERSION."""
     if model_type == "lfm2_moe" and Version(version) < MOE_ORT_MIN_VERSION:
         logger.warning(
-            f"LFM2-MoE decodes at about 1 tok/s on CPU with onnxruntime {version}, against about "
-            "59 tok/s with the onnxruntime 1.31 nightly. The README (2. Installation) shows which "
-            "installs get the nightly."
+            f"LFM2-MoE decodes much more slowly on CPU with onnxruntime {version} than with 1.31 "
+            "or later. The README (2. Installation) shows which installs get the nightly."
         )
 
 
@@ -125,10 +124,10 @@ class TokenPrinter:
     """generate() step that streams the answer to stdout, leaving out the ids in skip and the
     end-of-turn tokens, which genai leaves out of the sequence.
 
-    Each step prints what its token adds to tokenizer.decode() of the answer so far (0.4 ms at
-    4,096 tokens), so the printed text is the decoded answer, where genai's TokenizerStream pads
-    special tokens with spaces for LFM2-350M, -700M and -1.2B and the VL models. A trailing
-    U+FFFD, a character whose bytes have not all come, waits for the next token.
+    Each step prints what its token adds to tokenizer.decode() of the answer so far, so the
+    printed text is the decoded answer, where genai's TokenizerStream pads special tokens with
+    spaces for LFM2-350M, -700M and -1.2B and the VL models. A trailing U+FFFD, a character whose
+    bytes have not all come, waits for the next token.
     """
 
     def __init__(self, tokenizer: og.Tokenizer, skip: tuple[int, ...] = ()):

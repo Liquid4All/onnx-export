@@ -24,7 +24,9 @@ ONNX export and inference tools for [LFM2 and LFM3](https://www.liquid.ai/liquid
 | **LFM3** | fp32, fp16, q4, q4f16, q4f32, q8, q8f16 |
 | **LFM3-VL** | fp32, fp16, q4, q4f16, q8, q8f16 |
 | **LFM3-Audio**, **LFM3-Omni** | fp32, fp16, q4, q4f16, q8, q8f16 |
-| **d1** | fp32, fp16, q4, q4f16, q8, q8f16 |
+| **d1-2B**, **d1-Omni-2B** | fp32, fp16, q4, q4f16, q8, q8f16 |
+
+The LFM2-based d1 models (d1-3B, d1-3B-w8a8, d1-omni-600M) are not supported. [onnx-community/d1-3B-ONNX](https://huggingface.co/onnx-community/d1-3B-ONNX) and [onnx-community/d1-omni-600M-ONNX](https://huggingface.co/onnx-community/d1-omni-600M-ONNX) are Transformers.js exports of d1-3B and d1-omni-600M from another pipeline.
 
 The LFM2 and LFM2.5 exports are [onnxruntime-genai](https://github.com/microsoft/onnxruntime-genai) model folders, and their inference CLIs run on onnxruntime-genai. The onnxruntime-genai model builder builds and quantizes their decoders; this repository builds the vision encoder, the audio graphs and the embedding models that splice image or audio features into the token embeddings, quantizes those, and converts the fp16 and q4f16 decoders. onnxruntime-genai has no LFM3 model type, so this repository builds every graph of the LFM3 families itself and writes plain ONNX folders, which their CLIs run on onnxruntime ([3.1b](#31b-lfm3-text-models)). The exports are not loadable by Transformers.js.
 
@@ -40,7 +42,7 @@ uv sync
 
 `uv sync` also installs the `dev` dependency group: pytest, ruff, and liquid-audio for `lfm2-compare audio`. The exports and the inference CLIs run without it, so `uv sync --no-dev` is enough to use them; run them with `uv run --no-dev` (or set `UV_NO_DEV=1`) there, because a plain `uv run` syncs the environment first and installs the group again. pip 25.1 or later installs the group with `pip install --group dev`.
 
-`uv.lock` also pins an onnxruntime nightly from the ORT-Nightly feed (`[tool.uv]` in `pyproject.toml`), because it runs LFM2-MoE on CPU about 44 times faster than onnxruntime 1.30.0 (see [4.3](#43-moe)). `pip install` ignores `uv.lock` and installs the latest onnxruntime release (1.30.0; `pyproject.toml` requires 1.30.0 or later). To switch a pip environment to the nightly:
+`uv.lock` also pins an onnxruntime nightly from the ORT-Nightly feed (`[tool.uv]` in `pyproject.toml`), because its CPU QMoE kernels decode LFM2-MoE much faster than onnxruntime 1.30.0 (see [4.3](#43-moe)). `pip install` ignores `uv.lock` and installs the latest onnxruntime release (1.30.0; `pyproject.toml` requires 1.30.0 or later). To switch a pip environment to the nightly:
 
 ```bash
 pip install --pre --no-deps --upgrade \
@@ -156,6 +158,8 @@ exports/LFM3-1.7B-ONNX/
 
 onnxruntime-genai has no LFM3 model type, so `lfm3-export` builds the graph itself (`liquidonnx.lfm3.builder`) and writes a plain ONNX folder without `genai_config.json`; `lfm3-infer` and `lfm3-bench` run it on onnxruntime. It reads `config.json` and the safetensors directly, without running the checkpoint's Python code, in LFM3-1.7B's format (`rope_parameters` per layer type, `use_sandwich_norm`, `sliding_attention` layers) or an older one (`swa_rope_parameters`, `use_peri_ln`, `sliding_window_attention`). `lfm3.session.REVISIONS` pins the revisions the exporter and tests were validated on, `40ebe0a` for `LiquidAI/LFM3-1.7B` and `545fc8f` for `LiquidAI/LFM3-1.7B-Base`; other models follow `main`, and a local checkpoint folder is exported as it is. The exported `generation_config.json` leaves out the checkpoint's sampling defaults: the CLIs decode greedily.
 
+FP8, NVFP4, GGUF and MLX repositories are not export inputs of any LFM3 family: export the bf16 checkpoint. Each LFM3 exporter reads `config.json` before it downloads weights, and stops on a quantized checkpoint (one with a `quantization_config`) or on another family's checkpoint, naming the exporter that takes it.
+
 The quantized decoders (of every LFM3 family) are derived from the fp32 graph, so `--skip-export` adds any of them to an export folder without reading the checkpoint's weights:
 
 - q4 is the q4 recipe of the LFM2 decoders ([3.1](#31-lfm2-text-models)): k_quant int4 MatMuls, with the LM head and the layers most sensitive to int4 in int8. The int8 layers follow the onnxruntime-genai builder's `mixed_layers` rule: in the 24 layers of these checkpoints, the q, k and v projections of 5 attention layers and the MLP down projection of 12 layers.
@@ -183,7 +187,7 @@ The chat template opens `<think>` unless `enable_thinking=False` (`--no-think`);
 `tests/test_lfm3` runs the checkpoint's own remote code as its float32 PyTorch reference (TF32 off on CUDA), which builds only on some transformers releases: LFM3-1.7B's on 5.8-5.14 and 5.18+ (5.15-5.17 rename its `conv` layers, which the tests undo), the older format's on 5.0-5.1. A test whose reference can't be built is skipped with the release it needs. `--lfm3-model` (default `LiquidAI/LFM3-1.7B`) sets the checkpoint of the real-model tests, whose export they take from `--exports-dir`:
 
 ```bash
-uv run pytest tests/test_lfm3/test_config.py tests/test_lfm3/test_rope.py -v  # no download
+uv run pytest tests/test_lfm3/test_config.py tests/test_lfm3/test_rope.py tests/test_check_checkpoint.py -v  # no download
 uv run pytest tests/test_lfm3/test_decoder.py tests/test_lfm3/test_decode.py -v -k q4
 uv run --no-sync pytest tests/test_lfm3 -v --device cuda  # in the CUDA environment of 2
 uv run --no-sync pytest tests/test_lfm3 -v --device cuda --lfm3-model LiquidAI/LFM3-1.7B-Base
@@ -249,7 +253,7 @@ Known limits of LFM3-VL-2B: on the haiku, q8 and q8f16 are over their 5e-4 bound
 uv run lfm3-audio-export LiquidAI/LFM3-Audio-2B --precision
 
 uv run lfm3-audio-infer --model exports/LFM3-Audio-2B-ONNX --mode asr --audio samples/audio/woodworks_question.wav
-uv run lfm3-audio-infer --model exports/LFM3-Audio-2B-ONNX --mode tts --language "American English" \
+uv run lfm3-audio-infer --model exports/LFM3-Audio-2B-ONNX --mode tts \
     --prompt "The quick brown fox jumps over the lazy dog." --output tts.wav
 uv run lfm3-audio-infer --model exports/LFM3-Audio-2B-ONNX --mode s2s \
     --audio samples/audio/woodworks_question.wav --output answer.wav
@@ -281,14 +285,15 @@ exports/LFM3-Audio-2B-ONNX/
 
 The decoders are derived from `decoder.onnx` as the LFM3 ones are ([3.1b](#31b-lfm3-text-models)), so `--skip-export` works; the speech-frame codebook table stays float. The CPU bundles (q8, q4) keep the encoder and codec in fp32, and the CUDA ones (fp16, q8f16, q4f16) take their fp16 graphs, since CUDA has no float32 GroupQueryAttention kernel. Every bundle runs the fp32 depth decoder: it has no GroupQueryAttention, so it runs on CUDA too, and it is the only depth graph that keeps the reference's greedy codes (fp16 and q8 flip a few percent of the argmaxes, all at near-ties). The export logs k_quant's messages of [3.5](#35-harmless-log-messages).
 
-`lfm3-audio-infer` has four modes, with the checkpoint's prompts: `asr` (system "Perform ASR in English."), `tts` (system "Perform TTS in English using a female voice.", the assistant turn opened with `<|audio_start|>`), `s2s` (system "Respond with interleaved text and audio.", the assistant turn opened with `<|mixed_start|>`, then 6 text tokens and 12 speech frames in turn until the text ends) and `chat` (a text answer). `--language` and `--voice` change the prompts. Text is greedy. Speech frames are sampled with the checkpoint's settings, which `lfm3-audio-infer` takes from the export's `generation_config.json` (the checkpoint's, copied verbatim) as the reference's `generate` takes them from the checkpoint's: each of `audio_temperature`, `audio_top_k`, `audio_repetition_penalty` and `audio_repetition_window` comes from its flag (`--audio-temperature`, `--audio-top-k`, `--audio-repetition-penalty`, `--audio-repetition-window`), else from the file, else from the reference's defaults (none, which is greedy, and a 64-frame window). LFM3-Audio-2B's file samples at temperature 1.0, top-k 128 and repetition penalty 1.1 over 4096 frames, LFM3-Omni-2B's at temperature 0.4 and repetition penalty 1.2 over 64 frames. LFM3-Audio-2B's TTS prompt says "American English": pass `--language "American English"` for TTS. `--greedy` takes the likeliest codes (temperature 0: a top-k without a temperature samples at temperature 1), and `--seed` makes the orders and draws reproducible. On CUDA the fp32 decoder, speech encoder and codec run in TF32 unless `--no-tf32` is given, as in the other inference CLIs ([4](#4-inference)); the depth decoder always runs in fp32. `--suppress-mixed` and `--suppress-audio-out` forbid `<|mixed_start|>` and `<|audio_start|>` in the answer, as `chat` does. Input WAVs are read at 16 kHz; other rates are resampled with scipy, not the reference's soxr, which changes the top mel bands. Not covered: streaming (live ASR, streaming codec decode), the codec encoder (speech prompts given as codes) and batches.
+`lfm3-audio-infer` has four modes, with the checkpoint's prompts: `asr` (system "Perform ASR in English."), `tts` (system "Perform TTS in American English using a female voice.", the assistant turn opened with `<|audio_start|>`), `s2s` (system "Respond with interleaved text and audio.", the assistant turn opened with `<|mixed_start|>`, then 6 text tokens and 12 speech frames in turn until the text ends) and `chat` (a text answer). `--language` and `--voice` change the prompts. For English, the model cards' TTS prompts take a locale: American English or British English. Text is greedy. Speech frames are sampled with the checkpoint's settings, which `lfm3-audio-infer` takes from the export's `generation_config.json` (the checkpoint's, copied verbatim) as the reference's `generate` takes them from the checkpoint's: each of `audio_temperature`, `audio_top_k`, `audio_repetition_penalty` and `audio_repetition_window` comes from its flag (`--audio-temperature`, `--audio-top-k`, `--audio-repetition-penalty`, `--audio-repetition-window`), else from the file, else from the reference's defaults (none, which is greedy, and a 64-frame window). LFM3-Audio-2B's file samples at temperature 1.0, top-k 128 and repetition penalty 1.1 over 4096 frames, LFM3-Omni-2B's at temperature 0.4 and repetition penalty 1.2 over 64 frames. `--greedy` takes the likeliest codes (temperature 0: a top-k without a temperature samples at temperature 1), and `--seed` makes the orders and draws reproducible. On CUDA the fp32 decoder, speech encoder and codec run in TF32 unless `--no-tf32` is given, as in the other inference CLIs ([4](#4-inference)); the depth decoder always runs in fp32. `--suppress-mixed` and `--suppress-audio-out` forbid `<|mixed_start|>` and `<|audio_start|>` in the answer, as `chat` does. Input WAVs are read at 16 kHz; other rates are resampled with scipy, not the reference's soxr, which changes the top mel bands. Not covered: streaming (live ASR, streaming codec decode), the codec encoder (speech prompts given as codes) and batches.
 
 The reference of `tests/test_lfm3_audio` is the checkpoint's own remote code (float32, sdpa, TF32 off); the tests without a download run a tiny random checkpoint against LFM3-Audio-2B's remote code, vendored in `tests/test_lfm3_audio/reference/`. `--lfm3-audio-model` (default `LiquidAI/LFM3-Audio-2B`) sets the checkpoint of the real-model tests; `LiquidAI/LFM3-Omni-2B` runs them on LFM3-Omni's audio parts ([3.1e](#31e-lfm3-omni)):
 
 ```bash
 uv run pytest tests/test_lfm3_audio/test_config.py tests/test_lfm3_audio/test_weights.py \
     tests/test_lfm3_audio/test_tiny_reference.py tests/test_lfm3_audio/test_tiny_decoder.py \
-    tests/test_lfm3_audio/test_tiny_codec.py tests/test_lfm3_audio/test_gqa_window.py -v  # no download
+    tests/test_lfm3_audio/test_tiny_codec.py tests/test_lfm3_audio/test_gqa_window.py \
+    tests/test_lfm3_audio/test_infer.py -v  # no download
 uv run pytest tests/test_lfm3_audio/test_runtime.py tests/test_lfm3_audio/test_audio_encoder.py \
     tests/test_lfm3_audio/test_depth.py -v -k "(tiny or sample or sampling or orders) and not onnx"  # no download
 uv run --no-sync pytest tests/test_lfm3_audio -v --device cuda \
@@ -429,9 +434,9 @@ uv run lfm2-moe-export LiquidAI/LFM2-8B-A1B --precision
 uv run lfm2-moe-export LiquidAI/LFM2.5-24B-A2B --precision
 ```
 
-Same layout as the text models. The experts become `QMoE` int4 (q4, q4f16) or int8 (q8); the routers stay fp32. The LFM2.5-8B-A1B `--precision` export peaks at about 50 GiB of RAM.
+Same layout as the text models. The experts become `QMoE` int4 (q4, q4f16) or int8 (q8); the routers stay fp32. The LFM2.5-8B-A1B `--precision` export needs much more RAM than the dense models' exports.
 
-The LFM2.5-24B-A2B `--precision` export took 52 minutes on a 26-core x86-64 host, with a peak of 138 GiB of RAM, and writes 187 GiB: fp32 89.4 GiB, fp16 44.7, q8 25.2, q4 14.2 and q4f16 12.8. 20 of the 52 minutes are the fp16 conversion of the fp32 decoder, which runs on one core. Its fp32 PyTorch model (96 GB) does not fit on an 80 GB GPU; `lfm2-compare` references for it need a larger GPU, such as an MI325X with the ROCm build of PyTorch (`--device cuda`), or the CPU. Scores on wikitext-2 ([5.1](#51-comparing-an-export-with-its-reference-model)), against an fp32 reference computed on an MI325X:
+The LFM2.5-24B-A2B `--precision` export needs more RAM still, and writes 187 GiB: fp32 89.4 GiB, fp16 44.7, q8 25.2, q4 14.2 and q4f16 12.8. Much of its time goes to the fp16 conversion of the fp32 decoder, which runs on one core. Its fp32 PyTorch model (96 GB) does not fit on an 80 GB GPU, so its `lfm2-compare` references need a GPU with more memory (the ROCm build of PyTorch takes `--device cuda`) or the CPU. Scores on wikitext-2 ([5.1](#51-comparing-an-export-with-its-reference-model)), against an fp32 reference:
 
 | precision | device | KLD ± SE | same top | LFM2.5-8B-A1B |
 |---|---|---|---|---|
@@ -489,7 +494,7 @@ The inference CLIs run the export folder on onnxruntime-genai, with interactive 
 
 Text is decoded greedily. An answer ends at the end-of-turn token or after `--max-tokens` tokens: 4096 by default, room for the `<think>` block that LFM2.5-2.6B, LFM2.5-8B-A1B and LFM2.5-24B-A2B write before they answer (`lfm2-audio-infer` has a default per mode, see [4.4](#44-audio-asr-tts-interleaved)).
 
-On CUDA, use fp16 or q4f16 for text and MoE (bare `--precision` leaves q4f16 out for the text models, so name it as in [3.1](#31-lfm2-text-models)), and fp16 for VL and Audio. The other precisions keep fp32 activations, so their GroupQueryAttention nodes, and the experts of MoE q4, run on the CPU: on an H100 with a 1024-token prompt, LFM2.5-350M decodes at 975 tok/s with q4f16 and 124 tok/s with q4. The MoE decoders mark their QMoE experts `weights_prepacked=0`, without which the CUDA EP misreads them; older MoE exports print garbage on CUDA and need re-exporting.
+On CUDA, use fp16 or q4f16 for text and MoE (bare `--precision` leaves q4f16 out for the text models, so name it as in [3.1](#31-lfm2-text-models)), and fp16 for VL and Audio. The other precisions keep fp32 activations, so their GroupQueryAttention nodes, and the experts of MoE q4, run on the CPU. The MoE decoders mark their QMoE experts `weights_prepacked=0`, without which the CUDA EP misreads them; older MoE exports print garbage on CUDA and need re-exporting.
 
 ### 4.1 Text Generation
 
@@ -540,14 +545,7 @@ uv run lfm2-moe-infer --model ./exports/LFM2.5-8B-A1B-ONNX
 uv run lfm2-moe-infer --model ./exports/LFM2.5-8B-A1B-ONNX --prompt "Hello"
 ```
 
-On CPU, MoE speed depends on the onnxruntime version. LFM2.5-8B-A1B q4 with onnxruntime-genai 0.17.1 (`lfm2-bench --ep cpu --max-tokens 128`, 201-token prompt, 13-core (26-thread) x86-64 host, median of 3 runs):
-
-| onnxruntime | Load | Prefill | Decode |
-|---|---|---|---|
-| 1.30.0 (PyPI) | 115 s | 70 tok/s | 1.3 tok/s |
-| 1.31.0.dev20261007001 (`uv.lock`) | 3.9 s | 248 tok/s | 59 tok/s |
-
-The inference CLIs log a warning when they load LFM2-MoE on CPU with onnxruntime older than 1.31; [2](#2-installation) shows how to switch a pip environment to the nightly.
+On CPU, MoE speed depends on the onnxruntime version; `lfm2-bench --ep cpu` measures it on your machine. The inference CLIs log a warning when they load LFM2-MoE on CPU with onnxruntime older than 1.31; [2](#2-installation) shows how to switch a pip environment to the nightly.
 
 ### 4.4 Audio (ASR, TTS, Interleaved)
 
@@ -625,12 +623,12 @@ This repository has no browser runtime; these are the graphs and settings a WebG
 
 - Load the native WebGPU EP, `import * as ort from 'onnxruntime-web/webgpu'` (`ort.webgpu.min.js`). The default `onnxruntime-web` import's WebGPU EP (JSEP) can't create a session for any q4 or q4f16 decoder or the q8 vision encoder (its MatMulNBits takes 2 and 4 bits only, and every decoder has an int8 LM head), and it ignores GroupQueryAttention's `local_window_size` without an error.
 - Pass `executionProviders: [{ name: 'webgpu', enableMatmulFp32Accumulation: true }]`. 1.30.0 ignores the option; later builds sum q4f16's and q8f16's `MatMulNBits` in float32 with it (below).
-- Run the q4 bundle, or the q4f16 decoder with the q4 bundle's side graphs:
+- Run the q4f16 decoder with the q4 bundle's side graphs. The q4 decoder, with the same side graphs, suits shorter contexts (**Long prefill** below):
 
-| Bundle | Files | On WebGPU |
+| Decoder | Side graphs | On WebGPU |
 |---|---|---|
-| q4 | `decoder_q4.onnx` (text: `model_q4.onnx`), `vision_encoder_q8.onnx`, `audio_encoder.onnx`, `depth_decoder.onnx`, `codec_decoder.onnx` | The decoders match the CPU EP with `MatMulNBits` at `accuracy_level` 0: WebGPU computes float activations on Apple GPUs, where the CPU EP at the exported level 4 quantizes them to int8 |
-| q4f16 | `decoder_q4f16.onnx` with the side graphs above | As far from the fp32 decoder as the CPU EP's q4f16 |
+| `decoder_q4f16.onnx` (text: `model_q4f16.onnx`) | The q4 bundle's: `vision_encoder_q8.onnx`, `audio_encoder.onnx`, `depth_decoder.onnx`, `codec_decoder.onnx` | As far from the fp32 decoder as the CPU EP's q4f16 |
+| `decoder_q4.onnx` (text: `model_q4.onnx`) | The same | The decoders match the CPU EP with `MatMulNBits` at `accuracy_level` 0: WebGPU computes float activations on Apple GPUs, where the CPU EP at the exported level 4 quantizes them to int8 |
 
 Every graph of the tiny exports, in every precision, loads, runs, and leaves only int64, int32 and bool plumbing on the CPU EP: the int64 graph inputs' casts, shapes and positions, the placeholder rows the features go to, and d1's set mask below (WebGPU has no int64 kernels unless `enableInt64`, which 1.30.0 can't set from JS, and no NonZero kernel). Sliding layers slide: GroupQueryAttention's `local_window_size` gives WebGPU the CPU EP's outputs, on a prefill past the window and on cached decodes past it.
 
@@ -639,7 +637,7 @@ d1's set mask stays on the CPU EP. The decoder compares the int64 `question_ids`
 Limits of onnxruntime-web 1.30.0:
 
 - **fp16 sums.** WebGPU's MatMul, Gemm and MatMulNBits keep the partial sums of fp16 inputs in fp16, where the CPU EP stays within an fp16 ulp. The fp16 side graphs and the fp16 decoder move much further from fp32 than on the CPU EP, hence the side graphs of the q4 bundle above. Wrapping the fp16 graphs' MatMuls in float32 casts would fix WebGPU but move the CPU EP's own outputs, so the fp16 files stay as they are. `enableMatmulFp32Accumulation` in later builds brings MatMulNBits within an fp16 ulp; nothing changes MatMul's.
-- **Long prefill.** Past the 256-token window, the sliding layers' GroupQueryAttention materializes `[B, 16, S, T]` probabilities for S new tokens over T positions (float32 in q4, float16 in q4f16), and at 4 GiB a SafeInt check fails (`Integer overflow`): a single run fails at 8192 tokens in q4 and 11586 in q4f16, 4096-token chunks stop at 16384 positions in q4 and 32768 in q4f16, and 1024-token chunks at 65536 and 131072. Single runs of 5400 and 7200 tokens in q4, and of 8192 and 10800 in q4f16, return non-finite logits in all six released models. Prefill the q4f16 decoders in chunks of at most 1024 tokens, which reach the 128,000-token context of LFM3-VL-2B, LFM3-Audio-2B and LFM3-Omni-2B, and LFM3-1.7B's in chunks of at most 256, which reach its 262,144 (with 512, the chunk that ends there fails). d1 runs one forward per packed row: keep each row at most 4096 tokens with `decoder_q4` and under 8192 with `decoder_q4f16`.
+- **Long prefill.** Past the 256-token window, the sliding layers' GroupQueryAttention materializes `[B, 16, S, T]` probabilities for S new tokens over T positions (float32 in q4, float16 in q4f16), and at 4 GiB a SafeInt check fails (`Integer overflow`): a single run fails at 8192 tokens in q4 and 11586 in q4f16, 4096-token chunks stop at 16384 positions in q4 and 32768 in q4f16, and 1024-token chunks at 65536 and 131072. Single runs of 5400 and 7200 tokens in q4, and of 8192 and 10800 in q4f16, return non-finite logits in all six released models. Prefill the q4f16 decoders in chunks of at most 1024 tokens, which reach the 128,000-token context of LFM3-VL-2B, LFM3-Audio-2B and LFM3-Omni-2B, and LFM3-1.7B's in chunks of at most 256, which reach its 262,144 (with 512, the chunk that ends there fails). Use the q4 decoders only for shorter contexts: 1024-token chunks stop them at 65536 positions, and 4096-token chunks at 16384. d1 runs one forward per packed row: keep each row at most 4096 tokens with `decoder_q4` and under 8192 with `decoder_q4f16`.
 - **Other adapters.** Chromium's SwiftShader adapter (the Linux CI's) has no `shader-f16`, and its 4-wide subgroups break 1.30.0's subgroup FlashAttention, which every adapter but Apple's and NVIDIA's takes for an attention over 32 or more positions without a window or within one, such as a decoder's full layers or its sliding layers up to 256 tokens; other GPUs with that path were not checked. Adapters other than Apple's run `MatMulNBits` at `accuracy_level` 4 on int8 activations (DP4A), as the CPU EP does.
 - **Graph capture** needs every node on the GPU and shared KV buffers, which the int64 plumbing and the caches' past/present inputs rule out.
 
@@ -710,7 +708,7 @@ uv run lfm2-compare audio --model LiquidAI/LFM2.5-Audio-1.5B --export ./exports/
 
 `--device cuda` runs the reference, the ONNX sessions and onnxruntime-genai on the GPU with TF32 off, so fp32 stays fp32 (needs the CUDA packages in [2](#2-installation)). References are cached per device. `lfm2-compare vl --no-image-splitting` resizes each image once in the reference and in onnxruntime-genai instead of tiling it.
 
-`lfm2-compare wikitext` is the quality gate for quantized precisions. It scores them on wikitext-2 with the protocol of [olive-recipes #638](https://github.com/microsoft/olive-recipes/pull/638): 64 chunks of 512 tokens, the second half of each scored, KLD ± SE over the chunks and same-top %. The reference is an fp32 one in llama.cpp's KL-divergence base format, given with `--reference` or computed from `--model`. The command exits with 1 when a precision is above `--max-kld` or, for the LFM2.5 models it knows, above today's KLD + 2 SE on `--device`. The ceilings are per execution provider, because the CPU and CUDA kernels score differently: the CPU ones cover q4 and q4f32, and the CUDA ones (TF32 off) q8, fp16 and q4f16, all measured on one H100 host. Each device scores those precisions by default; a precision without a ceiling on its device is reported as "no ceiling", not as a pass. The ONNX sessions run 13 intra-op threads on any machine, the count the ceilings were measured at, because onnxruntime's CPU MoE kernel gives different scores at different thread counts; `--threads` overrides it. `--help` explains the token streams.
+`lfm2-compare wikitext` is the quality gate for quantized precisions. It scores them on wikitext-2 with the protocol of [olive-recipes #638](https://github.com/microsoft/olive-recipes/pull/638): 64 chunks of 512 tokens, the second half of each scored, KLD ± SE over the chunks and same-top %. The reference is an fp32 one in llama.cpp's KL-divergence base format, given with `--reference` or computed from `--model`. The command exits with 1 when a precision is above `--max-kld` or, for the LFM2.5 models it knows, above today's KLD + 2 SE on `--device`. The ceilings are per execution provider, because the CPU and CUDA kernels score differently: the CPU ones cover q4 and q4f32, and the CUDA ones (TF32 off) q8, fp16 and q4f16. Each device scores those precisions by default; a precision without a ceiling on its device is reported as "no ceiling", not as a pass. The ONNX sessions run 13 intra-op threads on any machine, the count the ceilings were measured at, because onnxruntime's CPU MoE kernel gives different scores at different thread counts; `--threads` overrides it. `--help` explains the token streams.
 
 ```bash
 # Against a reference file, on the CPU and on CUDA (in the environment of 2)

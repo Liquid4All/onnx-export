@@ -93,7 +93,7 @@ MODALITY_SWITCH_TOKEN_IDS = (
 NUM_CODEBOOKS = 8
 CODEBOOK_SIZE = 2049
 # olive-recipes #639's depthformer and audio embedding quantization: symmetric, as Q4_0 and Q8_0.
-# At 8 bits the depthformer needs int8 activations: with fp32 ones a frame takes 3-4x as long.
+# At 8 bits the depthformer needs int8 activations: fp32 ones make each frame several times slower.
 AUDIO_OUTPUT_QUANT = {
     "q4": {"bits": 4, "symmetric": True, "accuracy_level": 0},
     "q8": {"bits": 8, "symmetric": True, "accuracy_level": 4},

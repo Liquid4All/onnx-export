@@ -13,6 +13,7 @@ import re
 import shutil
 import stat
 import sys
+import types
 
 import numpy as np
 import onnx
@@ -590,6 +591,44 @@ def test_text_export_cli_rebuilds_the_requested_precisions(tiny_export, tmp_path
     assert_one_int8_table(onnx_dir / "model_q8f16.onnx")
     for name in ("model_q4.onnx", "model_q4f16.onnx"):
         assert_q4_recipe(onnx_dir / name, onnx_dir / "model.onnx")
+
+
+def test_text_answer_cut_at_max_tokens_warns(tiny_export, monkeypatch, caplog):
+    """lfm3-infer's greedy loop (ONNXTextModel.generate) with its KV cache sized to the prompt and
+    max_new_tokens: one warning when the answer stops at the cap, none when it ends at the
+    end-of-turn token. The tiny VL decoder stands in for model.onnx, fed zero-row features."""
+    from liquidonnx.lfm3 import session as text_session
+
+    class TextDecoder(CachedDecoder):
+        def step(self, ids, **inputs):
+            features = {"image_features": NO_FEATURES, "video_features": NO_FEATURES}
+            return super().step(ids, **features, **inputs)
+
+    # decode returns the ids, so generate returns the answer's tokens
+    tokenizer = types.SimpleNamespace(
+        eos_token_id=None,
+        apply_chat_template=lambda messages, **kwargs: "",
+        encode=lambda prompt, **kwargs: [BOS, 5000, 6000],
+        decode=lambda ids, **kwargs: ids,
+    )
+    monkeypatch.setattr(text_session, "CachedDecoder", TextDecoder)
+    monkeypatch.setattr(text_session, "load_tokenizer", lambda path: tokenizer)
+    model = text_session.ONNXTextModel(tiny_export / "onnx" / "decoder.onnx", force_cpu=True)
+    model.load()
+    assert model.share_kv
+
+    def warnings() -> list[str]:
+        return [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+
+    tokens = model.generate([], max_new_tokens=6, stream=False)
+    assert len(tokens) == 6
+    assert warnings() == ["The answer was cut at --max-tokens (6 tokens)"]
+
+    caplog.clear()
+    tokenizer.eos_token_id = tokens[3]
+    answer = model.generate([], max_new_tokens=6, stream=False)
+    assert answer == tokens[: tokens.index(tokens[3]) + 1]
+    assert warnings() == []
 
 
 @pytest.mark.parametrize("vision_file", ["vision_encoder_fp16.onnx", "vision_encoder_q8.onnx"])

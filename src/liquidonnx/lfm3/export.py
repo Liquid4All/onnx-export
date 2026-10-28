@@ -1,46 +1,36 @@
 #!/usr/bin/env python3
 """
-Export LFM3 models to ONNX with optional quantization and FP16 conversion.
+Export LFM3 text models to ONNX for onnxruntime. onnxruntime-genai has no LFM3 model type, so the
+folder is a plain ONNX folder without genai_config.json; lfm3-infer runs it.
 
-Output Structure (Transformers.js compatible):
-    {output-dir}/
-    └── {model-name}-ONNX/
-        ├── config.json
-        ├── tokenizer.json
-        └── onnx/
-            ├── model.onnx              # FP32
-            ├── model.onnx_data
-            ├── model_fp16.onnx         # --precision fp16
-            ├── model_fp16.onnx_data
-            ├── model_q4.onnx           # --precision q4 (k_quant INT4; INT8 lm_head, which is
-            ├── model_q4.onnx_data      #   also the embedding table, and INT8 sensitive layers)
-            ├── model_q4f16.onnx        # --precision q4f16 (q4 with FP16 activations, for CUDA)
-            ├── model_q4f16.onnx_data
-            ├── model_q4f32.onnx        # --precision q4f32 (INT4 MatMuls; FP32 embedding, lm_head)
-            ├── model_q4f32.onnx_data
-            ├── model_q8.onnx           # --precision q8 (INT8 lm_head, also the embedding table)
-            ├── model_q8.onnx_data
-            ├── model_q8f16.onnx        # --precision q8f16 (q8 with FP16 activations, for CUDA)
-            └── model_q8f16.onnx_data
+    {output-dir}/exports/{model-name}-ONNX/
+    ├── config.json, generation_config.json, tokenizer.json, tokenizer_config.json,
+    │   chat_template.jinja, configuration_lfm3.py, export_info.json
+    └── onnx/
+        ├── model.onnx                       fp32
+        ├── model_fp16.onnx                  --precision fp16
+        ├── model_q4.onnx                    --precision q4
+        ├── model_q4f16.onnx                 --precision q4f16: q4 with fp16 activations, for CUDA
+        ├── model_q4f32.onnx                 --precision q4f32
+        ├── model_q8.onnx                    --precision q8
+        ├── model_q8f16.onnx                 --precision q8f16: q8 with fp16 activations, for CUDA
+        └── *.onnx_data, *.onnx_data_1, ...  the weights, in --split-data chunks
+
+q4, q4f16, q8 and q8f16 have an int8 LM head, whose weights are also their token table. The rest
+of q8 and q8f16 is int8; q4 and q4f16 are k_quant int4 with the layers most sensitive to int4 in
+int8, the recipe of the LFM2 q4 decoders (liquidonnx.lfm3.quantize). q4f32 has int4 MatMuls,
+symmetric unless --q4-asymmetric, next to an fp32 token table and LM head.
 
 Usage:
-    # Export from HuggingFace
-    uv run lfm3-export LiquidAI/LFM3-1.7B
+    # Every precision, from the Hub or from a local checkpoint folder
+    uv run lfm3-export LiquidAI/LFM3-1.7B --precision
+    uv run lfm3-export /path/to/local/model --precision
 
-    # Export from local path
-    uv run lfm3-export /path/to/local/model
+    # q4 and q4f16 into /data/exports/LFM3-1.7B-ONNX
+    uv run lfm3-export LiquidAI/LFM3-1.7B --output-dir /data --precision q4 q4f16
 
-    # Export with custom output directory
-    uv run lfm3-export <model_id> --output-dir ./exports
-
-    # Export with specific precisions
-    uv run lfm3-export <model_id> --precision fp16 q4
-
-    # Export with all precisions
-    uv run lfm3-export <model_id> --precision
-
-    # Add precisions to an existing export, or rebuild them (skip FP32 export)
-    uv run lfm3-export <model_id> --precision --skip-export
+    # Add q8 to the /data export without rebuilding fp32
+    uv run lfm3-export LiquidAI/LFM3-1.7B --output-dir /data --precision q8 --skip-export
 """
 
 import argparse
@@ -54,7 +44,7 @@ from collections.abc import Callable
 
 import onnx
 
-from liquidonnx.export_cli import apply_umask, write_export_info
+from liquidonnx.export_cli import apply_umask, check_checkpoint, write_export_info
 from liquidonnx.external_data import split_external_data
 from liquidonnx.genai_builder import resolve_checkpoint
 from liquidonnx.lfm3.builder import LFM3Builder, LFM3Config
@@ -412,7 +402,8 @@ def main():
         "--precision",
         nargs="*",
         metavar="PRECISION",
-        help="Output precisions: fp16, q4, q4f16, q4f32, q8, q8f16, or all (default if no args)",
+        help="Output precisions: fp16, q4, q4f16, q4f32, q8, q8f16 "
+        "(no value: fp16 q4 q4f16 q4f32 q8 q8f16)",
     )
     parser.add_argument(
         "--block-size",
@@ -487,6 +478,7 @@ def main():
         parser.error(f"--skip-export needs model.onnx in {onnx_dir}")
 
     if not args.skip_export:
+        check_checkpoint(parser, args.model, REVISIONS.get(args.model), "lfm3-export")
         logger.info("=" * 60)
         logger.info("Exporting model (FP32)")
         logger.info("=" * 60)
