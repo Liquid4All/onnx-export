@@ -1,0 +1,22 @@
+{
+  "backend": "tokenizers",
+  "bos_token": "<|startoftext|>",
+  "eos_token": "<|im_end|>",
+  "extra_special_tokens": [],
+  "image_token": "<|image|>",
+  "is_local": true,
+  "local_files_only": false,
+  "model_max_length": 1000000000000000019884624838656,
+  "model_specific_special_tokens": {
+    "image_token": "<|image|>",
+    "video_token": "<|video|>",
+    "vision_end_token": "<|vision_end|>",
+    "vision_start_token": "<|vision_start|>"
+  },
+  "pad_token": "<|pad|>",
+  "processor_class": "Lfm3OmniProcessor",
+  "tokenizer_class": "TokenizersBackend",
+  "video_token": "<|video|>",
+  "vision_end_token": "<|vision_end|>",
+  "vision_start_token": "<|vision_start|>"
+}

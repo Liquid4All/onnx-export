@@ -92,7 +92,7 @@ def conversation(args, clips: int) -> tuple[list[dict], bool]:
     return messages, args.mode in prefill
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     """Arguments: --model, --precision (session.BUNDLES), --mode (MODES), --audio (16 kHz WAVs),
     --prompt, --output, --language (default English for asr, American English for tts),
     --voice (female|male), --max-tokens, --audio-temperature, --audio-top-k,
@@ -126,6 +126,11 @@ def main():
     parser.add_argument("--no-stream", action="store_true", help="Print the text at the end")
     parser.add_argument("--cpu", action="store_true", help="Force CPU execution (skip CUDA)")
     parser.add_argument("--no-tf32", action="store_true", help="Keep CUDA fp32 math in fp32")
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     if args.mode == "tts" and not args.prompt:

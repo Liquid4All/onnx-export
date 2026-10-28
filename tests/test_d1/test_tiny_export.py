@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 
 from liquidonnx.d1.decoder import SET_BIAS
-from liquidonnx.d1.export import copy_checkpoint_files, derive, export_fp32, main
+from liquidonnx.d1.export import copy_checkpoint_files, main
 from liquidonnx.lfm3_vl.session import run_vision
 from liquidonnx.session import load_onnx_session
 
@@ -32,7 +32,7 @@ from ..test_lfm3_vl.test_tiny_export import (
     cosine,
     pixels,
 )
-from ..test_lfm3_vl.tiny import TINY_CONFIG, write_tiny_checkpoint
+from ..test_lfm3_vl.tiny import TINY_CONFIG
 from .test_config import d1_config
 
 IMAGE, BOS = TINY_CONFIG["image_token_id"], TINY_CONFIG["bos_token_id"]
@@ -41,14 +41,6 @@ H = TINY_CONFIG["hidden_size"]
 GRID = (1, 4, 6)
 DECODERS = ["decoder.onnx", "decoder_fp16.onnx", "decoder_q8.onnx", "decoder_q8f16.onnx"]
 DECODERS += ["decoder_q4.onnx", "decoder_q4f16.onnx"]
-
-
-@pytest.fixture(scope="module")
-def tiny_checkpoint(tmp_path_factory):
-    directory = write_tiny_checkpoint(tmp_path_factory.mktemp("d1_tiny"))
-    config = json.loads((directory / "config.json").read_text())
-    (directory / "config.json").write_text(json.dumps(d1_config(config), indent=2))
-    return directory
 
 
 @pytest.fixture(scope="module")
@@ -65,17 +57,6 @@ def tiny_omni_checkpoint(tmp_path_factory):
 @pytest.fixture(scope="module")
 def tiny_reference(tiny_checkpoint):
     return load_reference(tiny_checkpoint)
-
-
-@pytest.fixture(scope="module")
-def tiny_export(tiny_checkpoint, tmp_path_factory):
-    output_dir = tmp_path_factory.mktemp("d1_tiny_export")
-    onnx_dir = output_dir / "onnx"
-    onnx_dir.mkdir()
-    export_fp32(tiny_checkpoint, onnx_dir)
-    copy_checkpoint_files(tiny_checkpoint, output_dir)
-    derive(onnx_dir, ["fp16", "q4", "q8", "q4f16", "q8f16"], block_size=32)
-    return output_dir
 
 
 @pytest.fixture(scope="module")

@@ -2,6 +2,7 @@
 
 import gc
 import logging
+import sys
 
 import pytest
 import torch
@@ -11,6 +12,8 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
 
 from liquidonnx.genai_builder import resolve_checkpoint
 from liquidonnx.lfm3.session import CHECKPOINT_PATTERNS, REVISIONS, load_tokenizer
+
+from .tiny import write_tiny_checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -71,3 +74,29 @@ def pytorch_model(request, device):
     logger.info(f"Cleaning up {model_id} model...")
     del model
     gc.collect()
+
+
+# === Tiny checkpoint ===
+
+
+@pytest.fixture(scope="session")
+def tiny_checkpoint(tmp_path_factory):
+    return write_tiny_checkpoint(tmp_path_factory.mktemp("lfm3_tiny"))
+
+
+@pytest.fixture(scope="session")
+def tiny_reference(tiny_checkpoint):
+    return load_reference(str(tiny_checkpoint))
+
+
+@pytest.fixture(scope="session")
+def tiny_export(tiny_checkpoint, tmp_path_factory):
+    """Export folder of lfm3-export's main() on the tiny checkpoint, with every precision."""
+    from liquidonnx.lfm3 import export
+
+    output_dir = tmp_path_factory.mktemp("lfm3_tiny_export")
+    argv = ["lfm3-export", str(tiny_checkpoint), "--output-dir", str(output_dir), "--precision"]
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(sys, "argv", argv)
+        export.main()
+    return output_dir / "exports" / f"{tiny_checkpoint.name}-ONNX"

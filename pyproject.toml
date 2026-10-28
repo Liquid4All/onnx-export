@@ -95,6 +95,8 @@ extend-exclude = [
     "tests/test_lfm3_vl/reference/*lfm3*.py",
     # LiquidAI/LFM3-Audio-2B's (tests/test_lfm3_audio/remote.py)
     "tests/test_lfm3_audio/reference/*.py",
+    # LiquidAI/d1-2B's (tests/test_d1/test_tiny_session.py)
+    "tests/test_d1/reference/*.py",
 ]
 
 [tool.ruff.lint]

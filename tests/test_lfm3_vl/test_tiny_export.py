@@ -6,6 +6,7 @@ Run with:
     uv run pytest tests/test_lfm3_vl/test_tiny_export.py -v
 """
 
+import builtins
 import json
 import os
 import pathlib
@@ -27,13 +28,20 @@ from liquidonnx.lfm3.quantize import (
     quantize_decoder_q4,
     untie_lm_head,
 )
-from liquidonnx.lfm3.session import PREFERRED, CachedDecoder, kv_feeds_attention, update_cache
-from liquidonnx.lfm3_vl.export import derive
+from liquidonnx.lfm3.session import (
+    PREFERRED,
+    CachedDecoder,
+    kv_feeds_attention,
+    load_tokenizer,
+    update_cache,
+)
+from liquidonnx.lfm3_vl.export import VISION_QUANT, derive
 from liquidonnx.lfm3_vl.session import BUNDLES, ONNXVLModel, run_vision
 from liquidonnx.lfm3_vl.weights import load_tensors
 from liquidonnx.quantize import quantize_matmuls
 from liquidonnx.session import initialize_cache, load_onnx_session
 
+from .conftest import ASSETS
 from .tiny import TINY_CONFIG, write_flat_checkpoint
 
 IMAGE, VIDEO = TINY_CONFIG["image_token_id"], TINY_CONFIG["video_token_id"]
@@ -258,6 +266,68 @@ def test_default_precision_follows_the_execution_provider(tiny_export, tmp_path,
         ONNXVLModel(tmp_path).load_sessions(ep=ep)
 
 
+@pytest.mark.parametrize("stdin", [False, True], ids=["prompt", "stdin"])
+def test_infer_cli_answers_about_an_image(tiny_export, monkeypatch, capsys, stdin):
+    """lfm3-vl-infer --cpu without --precision loads the first exported bundle the CPU prefers (q4:
+    the q4 decoder and int8 vision), resizes the image to at most --max-image-tokens tokens,
+    prompts with an empty think block (--no-think) and prints the greedy answer of --max-tokens
+    tokens. With --prompt that is the only turn; without, it answers each line of input with the
+    conversation so far, the images only in the first turn."""
+    from liquidonnx.lfm3_vl import infer
+    from liquidonnx.lfm3_vl import session as vl_session
+
+    loaded, generations = [], []
+    load_session, generate_ids = vl_session.load_session, ONNXVLModel.generate_ids
+    lines = ["What bird is this?", "Again"] if stdin else ["Again"]
+
+    def record_load(path, **kwargs):
+        loaded.append(path.name)
+        return load_session(path, **kwargs)
+
+    def record_generation(model, ids, features, *args):
+        tokens = generate_ids(model, ids, features, *args)
+        generations.append((ids, features, tokens))
+        return tokens
+
+    def next_line(prompt=""):
+        if not lines:
+            raise EOFError
+        return lines.pop(0)
+
+    monkeypatch.setattr(vl_session, "load_session", record_load)
+    monkeypatch.setattr(ONNXVLModel, "generate_ids", record_generation)
+    monkeypatch.setattr(builtins, "input", next_line)
+    argv = ["lfm3-vl-infer", "--model", str(tiny_export), "--images", str(ASSETS / "cardinal.jpg")]
+    argv += ["--cpu", "--no-think", "--max-tokens", "3", "--max-image-tokens", "16"]
+    if not stdin:
+        argv += ["--prompt", "What bird is this?"]
+    monkeypatch.setattr(sys, "argv", argv)
+    infer.main()
+
+    assert loaded == ["vision_encoder_q8.onnx", "decoder_q4.onnx"]
+    (ids, features, tokens), *later = generations
+    image_tokens = ids.count(IMAGE)
+    assert 0 < image_tokens <= 16 and features.shape == (image_tokens, HIDDEN)
+    tokenizer = load_tokenizer(tiny_export)
+    first = (
+        "<|startoftext|><|im_start|>user\n<|vision_start|>"
+        + "<|image|>" * image_tokens
+        + "<|vision_end|>What bird is this?<|im_end|>\n<|im_start|>assistant\n<think></think>"
+    )
+    assert tokenizer.decode(ids) == first
+    assert len(tokens) == 3
+    answer = tokenizer.decode(tokens, skip_special_tokens=True)
+    assert answer.strip() and f"Assistant: {answer}" in capsys.readouterr().out
+    if stdin:
+        [(second, _, _)] = later
+        assert tokenizer.decode(second) == (
+            f"{first}{answer}<|im_end|>\n<|im_start|>user\nAgain<|im_end|>\n"
+            "<|im_start|>assistant\n<think></think>"
+        )
+    else:
+        assert later == []
+
+
 @pytest.mark.parametrize(
     "decoder_file", ["decoder.onnx", "decoder_fp16.onnx", "decoder_q8f16.onnx"]
 )
@@ -322,18 +392,23 @@ def attributes(node: onnx.NodeProto) -> dict:
 
 
 def assert_one_int8_table(path: pathlib.Path) -> onnx.GraphProto:
-    """Every MatMul is quantized, the LM head to int8, and the head's weights are the token table."""
+    """Every MatMul is quantized with zero points, in blocks of 32 at accuracy_level 4, the LM head
+    to int8, and the head's weights are the token table."""
     graph = onnx.load(str(path), load_external_data=False).graph
     producers = {output: node for node in graph.node for output in node.output}
 
     assert [n.name for n in graph.node if n.op_type == "MatMul"] == []
+    for node in [n for n in graph.node if n.op_type == "MatMulNBits"]:
+        assert len(node.input) == 4 and node.input[3], f"{node.name} has no zero points"
+        assert attributes(node)["accuracy_level"] == 4
+        assert attributes(node)["block_size"] == 32
     head = producers["logits"]
     if head.op_type == "Cast":  # fp16 activations: the logits are cast back to float32
         head = producers[head.input[0]]
     assert head.op_type == "MatMulNBits" and attributes(head)["bits"] == 8
 
     (gather,) = [n for n in graph.node if n.op_type == "GatherBlockQuantized"]
-    assert attributes(gather)["bits"] == 8
+    assert attributes(gather)["bits"] == 8 and attributes(gather)["block_size"] == 32
     weights = producers[gather.input[0]]
     assert weights.op_type == "Reshape" and weights.input[0] == head.input[1]
     assert list(gather.input[2:]) == list(head.input[2:])
@@ -350,9 +425,9 @@ def assert_one_int8_table(path: pathlib.Path) -> onnx.GraphProto:
 
 
 def assert_q4_recipe(path: pathlib.Path, fp32_path: pathlib.Path, gate_up: bool = False):
-    """k_quant MatMuls with zero points, in blocks of 32: LFM3's recipe (the LM head and the mixed
-    nodes of the fp32 graph int8, the rest int4) or with gate_up d1's (only the MLP gate_proj and
-    up_proj int4, one of each per layer)."""
+    """k_quant MatMuls (assert_one_int8_table): LFM3's recipe (the LM head and the mixed nodes of
+    the fp32 graph int8, the rest int4) or with gate_up d1's (only the MLP gate_proj and up_proj
+    int4, one of each per layer)."""
     graph = assert_one_int8_table(path)
     fp32 = onnx.load(str(fp32_path), load_external_data=False)
     names = [
@@ -372,10 +447,6 @@ def assert_q4_recipe(path: pathlib.Path, fp32_path: pathlib.Path, gate_up: bool 
         f"{name}_Q{b}": b for name, b in bits.items()
     }
     assert list(bits.values()).count(8) == len(int8)
-    for node in matmuls:
-        assert len(node.input) == 4 and node.input[3], f"{node.name} has no zero points"
-        assert attributes(node)["accuracy_level"] == 4
-        assert attributes(node)["block_size"] == 32
 
 
 @pytest.mark.parametrize("decoder_file", ["decoder_q8.onnx", "decoder_q8f16.onnx"])
@@ -629,6 +700,23 @@ def test_text_answer_cut_at_max_tokens_warns(tiny_export, monkeypatch, caplog):
     answer = model.generate([], max_new_tokens=6, stream=False)
     assert answer == tokens[: tokens.index(tokens[3]) + 1]
     assert warnings() == []
+
+
+def test_vision_encoder_q8_follows_its_recipe(tiny_export):
+    """Every MatMul is quantized at VISION_QUANT's bits, block size and accuracy_level, with zero
+    points only if it is asymmetric."""
+    path = tiny_export / "onnx" / "vision_encoder_q8.onnx"
+    graph = onnx.load(str(path), load_external_data=False).graph
+    assert [n.name for n in graph.node if n.op_type == "MatMul"] == []
+    matmuls = [n for n in graph.node if n.op_type == "MatMulNBits"]
+    keys = ("bits", "block_size", "accuracy_level")
+    assert matmuls
+    for node in matmuls:
+        # onnxruntime leaves out an accuracy_level of 0, the attribute's default
+        found = {"accuracy_level": 0} | attributes(node)
+        assert {k: found[k] for k in keys} == {k: VISION_QUANT[k] for k in keys}
+        zero_points = len(node.input) == 4 and node.input[3] != ""
+        assert zero_points != VISION_QUANT["symmetric"], node.name
 
 
 @pytest.mark.parametrize("vision_file", ["vision_encoder_fp16.onnx", "vision_encoder_q8.onnx"])

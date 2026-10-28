@@ -3,13 +3,11 @@ The LFM3-Audio decoder graph of the tiny checkpoint against the vendored referen
 speech features and speech frames scattered into the prompt, the final-norm hidden states next to
 the logits, cached frame steps, the fp16 and quantized graphs of the LFM3 derive path, and the q4
 recipe (LFM3's) that lfm3-audio-export and lfm3-omni-export give it and the tiny LFM3-Omni
-checkpoint.
+checkpoint, with the checkpoint's generation_config.json copied.
 
 Run with:
     uv run pytest tests/test_lfm3_audio/test_tiny_decoder.py -v
 """
-
-import sys
 
 import numpy as np
 import onnx
@@ -18,15 +16,13 @@ import torch
 
 from liquidonnx.lfm3.export import convert_to_fp16, derive_quantized
 from liquidonnx.lfm3.session import CachedDecoder
-from liquidonnx.lfm3_audio import export as audio_export
 from liquidonnx.lfm3_audio.config import load_config
 from liquidonnx.lfm3_audio.decoder import KEEP_IO_TYPES, LFM3AudioDecoderBuilder
-from liquidonnx.lfm3_omni import export as omni_export
 from liquidonnx.quantize import save_model
 from liquidonnx.session import initialize_cache, load_onnx_session
 
-from ..test_lfm3_vl.test_tiny_export import assert_q4_recipe
-from .tiny import write_omni_checkpoint
+from ..test_lfm3_vl.test_tiny_export import assert_one_int8_table, assert_q4_recipe, attributes
+from .tiny import ASSETS
 
 BOS, AUDIO, AUDIO_OUT, AUDIO_START, EOS_CODE = 124894, 125031, 125032, 125012, 2016
 HIDDEN, CODEBOOKS = 64, 12
@@ -215,21 +211,36 @@ def test_codebook_table_stays_a_float_gather(onnx_dir, decoder_file):
     assert outputs["hidden_states"] == outputs["logits"] == onnx.TensorProto.FLOAT
 
 
-@pytest.mark.parametrize(
-    ("cli", "omni"),
-    [("lfm3-audio-export", False), ("lfm3-audio-export", True), ("lfm3-omni-export", True)],
-    ids=["audio", "audio-export-of-omni", "omni"],
-)
-def test_q4_recipe(tiny_checkpoint, tmp_path, monkeypatch, cli, omni):
+@pytest.mark.parametrize("decoder_file", ["decoder_q8.onnx", "decoder_q8f16.onnx"])
+def test_q8_decoders_store_one_int8_table(onnx_dir, decoder_file):
+    graph = assert_one_int8_table(onnx_dir / decoder_file)
+    assert {attributes(n)["bits"] for n in graph.node if n.op_type == "MatMulNBits"} == {8}
+
+
+# (exporter, release): the tiny checkpoint in the release's layout and with its files
+# (conftest.tiny_exports)
+EXPORTS = [
+    ("lfm3-audio-export", "LFM3-Audio-2B"),
+    ("lfm3-audio-export", "LFM3-Omni-2B"),
+    ("lfm3-omni-export", "LFM3-Omni-2B"),
+]
+EXPORT_IDS = ["audio", "audio-export-of-omni", "omni"]
+
+
+@pytest.mark.parametrize(("cli", "release"), EXPORTS, ids=EXPORT_IDS)
+def test_q4_recipe(tiny_exports, cli, release):
     """main() end to end: the q4 and q4f16 decoders of the tiny LFM3-Audio and LFM3-Omni checkpoints
     keep LFM3's recipe from either CLI; only d1-export gives the gate/up one
     (tests/test_d1/test_tiny_export.py)."""
-    checkpoint = tiny_checkpoint
-    if omni:
-        checkpoint = write_omni_checkpoint(tiny_checkpoint, tmp_path / "omni")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(sys, "argv", [cli, str(checkpoint), "--precision", "q4", "q4f16"])
-    (omni_export if cli == "lfm3-omni-export" else audio_export).main()
-    onnx_dir = tmp_path / "exports" / f"{checkpoint.name}-ONNX" / "onnx"
+    onnx_dir = tiny_exports(cli, release) / "onnx"
     for decoder in ("decoder_q4.onnx", "decoder_q4f16.onnx"):
         assert_q4_recipe(onnx_dir / decoder, onnx_dir / "decoder.onnx")
+
+
+@pytest.mark.parametrize(("cli", "release"), EXPORTS, ids=EXPORT_IDS)
+def test_generation_config_is_copied(tiny_exports, cli, release):
+    """The checkpoint's generation_config.json, whose speech sampling lfm3-audio-infer and
+    lfm3-omni-infer take (infer.speech_sampling), byte for byte."""
+    name = "generation_config.json"
+    copied = (tiny_exports(cli, release) / name).read_bytes()
+    assert copied == (ASSETS / release / name).read_bytes()

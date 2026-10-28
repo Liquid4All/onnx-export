@@ -41,13 +41,13 @@ uv run pytest tests/test_genai_export.py tests/test_genai_export_multimodal.py t
 uv run pytest tests/test_lfm2_audio/test_modes_synthetic.py tests/test_lfm2_audio/test_reference_parity.py \
     tests/test_lfm2_audio/test_graph_structure.py -v
 uv run pytest tests/test_compare.py tests/test_compare_wikitext.py -v
-uv run pytest tests/test_lfm3/test_config.py tests/test_lfm3/test_rope.py \
+uv run pytest tests/test_lfm3/test_config.py tests/test_lfm3/test_rope.py tests/test_lfm3/test_tiny_export.py \
     tests/test_lfm3_vl/test_tiny_export.py tests/test_lfm3_vl/test_config.py tests/test_lfm3_vl/test_rope.py \
     tests/test_lfm3_audio/test_config.py tests/test_lfm3_audio/test_weights.py \
     tests/test_lfm3_audio/test_tiny_reference.py tests/test_lfm3_audio/test_tiny_decoder.py \
     tests/test_lfm3_audio/test_tiny_codec.py tests/test_lfm3_audio/test_gqa_window.py \
     tests/test_lfm3_audio/test_infer.py tests/test_lfm3_omni/test_config.py \
-    tests/test_d1/test_config.py tests/test_d1/test_tiny_export.py \
+    tests/test_d1/test_config.py tests/test_d1/test_tiny_export.py tests/test_d1/test_tiny_session.py \
     tests/test_check_checkpoint.py -v  # in CI (check_python.yml)
 uv run pytest tests/test_lfm3_audio/test_runtime.py tests/test_lfm3_audio/test_audio_encoder.py \
     tests/test_lfm3_audio/test_depth.py -v -k "(tiny or sample or sampling or orders) and not onnx"  # in CI

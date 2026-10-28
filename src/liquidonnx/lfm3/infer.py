@@ -15,7 +15,7 @@ import logging
 from liquidonnx.lfm3.session import ONNXTextModel, run_chat_loop
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="ONNX inference for LFM3 text models")
     parser.add_argument("--model", required=True, help="Path to ONNX model directory or file")
     parser.add_argument("--prompt", default=None, help="Initial prompt (optional)")
@@ -30,7 +30,11 @@ def main():
         choices=["fp32", "fp16", "q4", "q4f16", "q4f32", "q8", "q8f16"],
         help="Precision in an export folder (default: q4f16, fp16 or q8f16 on CUDA, q4 or q8 on CPU)",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
 
     logging.basicConfig(level=logging.INFO)
 
