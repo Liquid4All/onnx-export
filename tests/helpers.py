@@ -81,6 +81,32 @@ def matmul_bits(graph) -> collections.Counter:
     )
 
 
+# onnxruntime reads the external data of a graph given as bytes from this folder
+EXTERNAL_DATA_FOLDER = "session.model_external_initializers_file_folder_path"
+
+
+def with_accuracy_level(path: pathlib.Path, level: int) -> bytes | None:
+    """The graph at path, serialized in memory with its MatMulNBits nodes at accuracy_level level,
+    or None if it has none. Its weights stay in the export: load it with EXTERNAL_DATA_FOLDER set
+    to path.parent.
+
+    accuracy_level 4 (the q8 recipe's) makes the CPU EP quantize the activations to int8, 0 keeps
+    them float: the diagnostic of README 5, which leaves the export as it is."""
+    import onnx
+    from onnx import helper
+
+    model = onnx.load(str(path), load_external_data=False)
+    nodes = [node for node in model.graph.node if node.op_type == "MatMulNBits"]
+    if not nodes:
+        return None
+    for node in nodes:
+        kept = [a for a in node.attribute if a.name != "accuracy_level"]
+        del node.attribute[:]
+        node.attribute.extend([*kept, helper.make_attribute("accuracy_level", level)])
+    logger.info(f"{path.name}: {len(nodes)} MatMulNBits at accuracy_level {level}")
+    return model.SerializeToString()
+
+
 def get_model_name(model_id: str) -> str:
     """Extract model name from HF slug (e.g., 'LiquidAI/LFM2-350M' -> 'LFM2-350M')."""
     return model_id.split("/")[-1]
@@ -152,6 +178,50 @@ def generate_pytorch_cached(model, input_ids: list[int], max_new_tokens: int, eo
                 break
             ids = torch.tensor([[tokens[-1]]])
     return tokens, np.stack(logits)
+
+
+def processed_probs(
+    logits: np.ndarray,
+    temperature: float | None = None,
+    top_k: int | None = None,
+    top_p: float | None = None,
+    repetition_penalty: float | None = None,
+    histories: list[list[int]] | None = None,
+) -> np.ndarray:
+    """Next-token probabilities [N, V] (float64) of logits [N, V] after transformers' sampling
+    processors, in generate(do_sample=True)'s order: the repetition penalty over each row's
+    history (the ids before it), then temperature, top-k and top-p."""
+    import torch
+    from transformers import (
+        RepetitionPenaltyLogitsProcessor,
+        TemperatureLogitsWarper,
+        TopKLogitsWarper,
+        TopPLogitsWarper,
+    )
+
+    scores = torch.from_numpy(np.asarray(logits, dtype=np.float32))
+    if repetition_penalty:
+        penalty = RepetitionPenaltyLogitsProcessor(repetition_penalty)
+        scores = torch.cat(
+            [
+                penalty(torch.tensor([h]), row[None])
+                for h, row in zip(histories, scores, strict=True)
+            ]
+        )
+    warpers = [
+        *([TemperatureLogitsWarper(temperature)] if temperature else []),
+        *([TopKLogitsWarper(top_k)] if top_k else []),
+        *([TopPLogitsWarper(top_p)] if top_p is not None else []),
+    ]
+    no_ids = torch.zeros((len(scores), 0), dtype=torch.long)
+    for warper in warpers:
+        scores = warper(no_ids, scores)
+    return torch.softmax(scores.double(), -1).numpy()
+
+
+def total_variation(p: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """Total variation distance per row of probabilities [N, V]."""
+    return 0.5 * np.abs(p - q).sum(-1)
 
 
 def text_coherence(model, tokenizer, genai_model, prompts: list[str], max_new_tokens: int) -> float:

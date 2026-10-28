@@ -179,7 +179,7 @@ def main(
         available = [p for p in ALL_PRECISIONS if (onnx_dir / model_file(p)).exists()]
     set_default_decoder(export_dir, available)
 
-    finish(args, export_dir)
+    finish(args, export_dir, precisions)
 
 
 if __name__ == "__main__":

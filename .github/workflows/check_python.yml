@@ -21,3 +21,22 @@ jobs:
       - run: uv sync
       - run: uv run ruff format --check src tests
       - run: uv run ruff check src tests
+      # The LFM3 families' tests that need no download. Offline, so one that reaches the Hugging
+      # Face Hub fails instead of downloading.
+      - name: LFM3, LFM3-VL, LFM3-Audio, LFM3-Omni and d1 tests (no download)
+        env:
+          HF_HUB_OFFLINE: "1"
+        run: >-
+          uv run pytest tests/test_lfm3/test_config.py tests/test_lfm3/test_rope.py
+          tests/test_lfm3_vl/test_tiny_export.py tests/test_lfm3_vl/test_config.py tests/test_lfm3_vl/test_rope.py
+          tests/test_lfm3_audio/test_config.py tests/test_lfm3_audio/test_weights.py
+          tests/test_lfm3_audio/test_tiny_reference.py tests/test_lfm3_audio/test_tiny_decoder.py
+          tests/test_lfm3_audio/test_tiny_codec.py tests/test_lfm3_audio/test_gqa_window.py
+          tests/test_lfm3_omni/test_config.py
+          tests/test_d1/test_config.py tests/test_d1/test_tiny_export.py -v
+      - name: LFM3-Audio runtime, encoder and depth tests on the tiny checkpoint (no download)
+        env:
+          HF_HUB_OFFLINE: "1"
+        run: >-
+          uv run pytest tests/test_lfm3_audio/test_runtime.py tests/test_lfm3_audio/test_audio_encoder.py
+          tests/test_lfm3_audio/test_depth.py -v -k "(tiny or sample or sampling or orders) and not onnx"

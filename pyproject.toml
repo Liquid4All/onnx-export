@@ -40,6 +40,27 @@ lfm2-audio-infer = "liquidonnx.lfm2_audio.infer:main"
 # Exports against their reference models
 lfm2-compare = "liquidonnx.compare:main"
 
+# LFM3 dense text model tools
+lfm3-export = "liquidonnx.lfm3.export:main"
+lfm3-infer = "liquidonnx.lfm3.infer:main"
+lfm3-bench = "liquidonnx.lfm3.benchmark:main"
+
+# LFM3-VL vision-language model tools
+lfm3-vl-export = "liquidonnx.lfm3_vl.export:main"
+lfm3-vl-infer = "liquidonnx.lfm3_vl.infer:main"
+
+# LFM3-Audio speech model tools
+lfm3-audio-export = "liquidonnx.lfm3_audio.export:main"
+lfm3-audio-infer = "liquidonnx.lfm3_audio.infer:main"
+
+# LFM3-Omni image, speech and text model tools
+lfm3-omni-export = "liquidonnx.lfm3_omni.export:main"
+lfm3-omni-infer = "liquidonnx.lfm3_omni.infer:main"
+
+# d1 one-pass decision model tools
+d1-export = "liquidonnx.d1.export:main"
+d1-infer = "liquidonnx.d1.infer:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -68,6 +89,13 @@ log_cli_level = "INFO"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# The checkpoints' remote code, vendored as the tests' references
+extend-exclude = [
+    # LiquidAI/LFM3-VL-2B's (tests/test_lfm3_vl/reference/loader.py)
+    "tests/test_lfm3_vl/reference/*lfm3*.py",
+    # LiquidAI/LFM3-Audio-2B's (tests/test_lfm3_audio/remote.py)
+    "tests/test_lfm3_audio/reference/*.py",
+]
 
 [tool.ruff.lint]
 select = [

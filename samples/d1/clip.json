@@ -1,0 +1,7 @@
+{
+  "state": null,
+  "questions": {
+    "speech": {"type": "noul", "instructions": "Does someone speak in the recording?"},
+    "question": {"type": "noul", "instructions": "Does the speaker ask a question?"}
+  }
+}

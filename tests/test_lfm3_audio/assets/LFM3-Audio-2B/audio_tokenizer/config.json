@@ -1,0 +1,41 @@
+{
+  "transformers_version": "5.19.0.dev0",
+  "architectures": [
+    "LiquidCodecModel"
+  ],
+  "output_hidden_states": false,
+  "return_dict": true,
+  "dtype": "bfloat16",
+  "chunk_size_feed_forward": 0,
+  "is_encoder_decoder": false,
+  "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+  },
+  "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+  },
+  "problem_type": null,
+  "encoder_dim": 512,
+  "encoder_conv_dim": 256,
+  "stft_n_fft": 1280,
+  "stft_hop_length": 320,
+  "stft_win_length": 1280,
+  "stft_frame_stack": 6,
+  "quantizer_dim": 256,
+  "fsq_levels": [
+    8,
+    7,
+    6,
+    6
+  ],
+  "n_q": 12,
+  "decoder_window": 30,
+  "sampling_rate": 24000,
+  "initializer_range": 0.02,
+  "model_type": "liquid_codec",
+  "sample_rate": 24000,
+  "frame_samples": 1920,
+  "output_attentions": false
+}

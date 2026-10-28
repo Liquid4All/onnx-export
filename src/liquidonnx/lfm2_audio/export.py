@@ -526,7 +526,7 @@ def main():
 
     write_genai_config(export_dir, next((p for p in DEFAULT_ORDER if p in precisions), "fp32"))
 
-    finish(args, export_dir)
+    finish(args, export_dir, precisions)
 
 
 if __name__ == "__main__":

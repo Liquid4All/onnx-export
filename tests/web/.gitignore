@@ -2,3 +2,4 @@ node_modules/
 .synthetic/
 test-results/
 playwright-report/
+.lfm3/

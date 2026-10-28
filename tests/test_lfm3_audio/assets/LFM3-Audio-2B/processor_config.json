@@ -1,0 +1,27 @@
+{
+  "audio_out_token": "<|audio_out|>",
+  "audio_token": "<|audio|>",
+  "feature_extractor": {
+    "encoder_stride": 8,
+    "feature_extractor_type": "Lfm3AudioFeatureExtractor",
+    "feature_size": 128,
+    "hop_length": 160,
+    "log_floor": -12.0,
+    "n_fft": 400,
+    "normalization_divisor": 4.0,
+    "normalization_offset": 4.0,
+    "padding_side": "right",
+    "padding_value": 0.0,
+    "return_attention_mask": true,
+    "sampling_rate": 16000,
+    "win_length": 400,
+    "auto_map": {
+      "AutoFeatureExtractor": "feature_extraction_lfm3_audio.Lfm3AudioFeatureExtractor"
+    }
+  },
+  "processor_class": "Lfm3AudioProcessor",
+  "auto_map": {
+    "AutoProcessor": "processing_lfm3_audio.Lfm3AudioProcessor"
+  },
+  "audio_tokenizer_subfolder": "audio_tokenizer"
+}
