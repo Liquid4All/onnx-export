@@ -4,7 +4,8 @@ a download: the legacy flat config.json (lfm / encoder / depthformer), the train
 (with the duplicate depth to_logits heads), a codec in audio_tokenizer/, and the checkpoint's
 remote code from reference/ (LFM3-Audio-2B's at revision 9d49701). Real token ids,
 codebooks (12 x 2017) and mel / STFT settings; small widths, and windows of 8 so short inputs
-reach past them. write_omni_checkpoint makes it an LFM3-Omni one.
+reach past them. write_omni_checkpoint makes it an LFM3-Omni one, and write_release_files adds a
+release's generation_config.json and a tokenizer, for the CLIs.
 """
 
 import json
@@ -155,6 +156,11 @@ TRAINER_PREFIXES = {
 }
 
 
+# The speech markers of LFM3-Omni-2B's config.json (Lfm3AudioConfig's defaults for LFM3-Audio-2B),
+# special tokens of their tokenizers beside LFM3-1.7B's (test_lfm3.tiny.SPECIAL_TOKENS)
+SPEECH_TOKENS = {"<|audio_start|>": 125012, "<|text_end|>": 125014, "<|mixed_start|>": 125015}
+
+
 def trainer_name(name: str) -> str:
     prefix = next(p for p in TRAINER_PREFIXES if name.startswith(p))
     return TRAINER_PREFIXES[prefix] + name[len(prefix) :]
@@ -261,4 +267,15 @@ def write_omni_checkpoint(audio: pathlib.Path, directory: pathlib.Path) -> pathl
         **{key: port_config[key] for key in OMNI_VISION_KEYS},
     }
     (directory / "config.json").write_text(json.dumps(config, indent=2))
+    return directory
+
+
+def write_release_files(directory: pathlib.Path, release: str) -> pathlib.Path:
+    """The generation_config.json of release (LFM3-Audio-2B or LFM3-Omni-2B, assets/ at its pinned
+    revision) and a tokenizer with its special ids, tokenizer_config.json and chat template
+    (test_lfm3.tiny.write_tokenizer), into a tiny checkpoint."""
+    from ..test_lfm3.tiny import SPECIAL_TOKENS, write_tokenizer
+
+    shutil.copy2(ASSETS / release / "generation_config.json", directory)
+    write_tokenizer(directory, ASSETS / release, SPECIAL_TOKENS | SPEECH_TOKENS)
     return directory

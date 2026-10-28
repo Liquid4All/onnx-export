@@ -1,8 +1,10 @@
-"""d1 fixtures: the checkpoint of --d1-model at its pinned revision with its own remote code as the
-reference (D1Model's SystemOne engine: AutoModel, trust_remote_code, float32, TF32 off), its
-export under --exports-dir run by d1.session, and the README's requests."""
+"""d1 fixtures: the tiny checkpoint and its export, built once a session; the checkpoint of
+--d1-model at its pinned revision with its own remote code as the reference (D1Model's SystemOne
+engine: AutoModel, trust_remote_code, float32, TF32 off), its export under --exports-dir run by
+d1.session, and the README's requests."""
 
 import hashlib
+import json
 import pathlib
 import urllib.request
 
@@ -11,7 +13,10 @@ import pytest
 
 from liquidonnx.compare import atomic_write
 from liquidonnx.d1.config import REVISIONS
-from liquidonnx.d1.export import CHECKPOINT_PATTERNS
+from liquidonnx.d1.export import CHECKPOINT_PATTERNS, copy_checkpoint_files, derive, export_fp32
+
+from ..test_lfm3_vl.tiny import write_tiny_checkpoint
+from .test_config import d1_config
 
 # The d1 model cards' picture (two cats, COCO val2017), downloaded on first use: not in the repo
 CATS_URL = "http://images.cocodataset.org/val2017/000000039769.jpg"
@@ -127,6 +132,25 @@ def requests(model_id: str) -> dict[str, list[tuple]]:
         out["clip"] = [(None, CLIP_QUESTIONS, [clip])]
         out["speech"] = [(None, SPEECH[1], [{"type": "audio", "path": str(SPEECH[0])}])]
     return out
+
+
+@pytest.fixture(scope="session")
+def tiny_checkpoint(tmp_path_factory):
+    directory = write_tiny_checkpoint(tmp_path_factory.mktemp("d1_tiny"))
+    config = json.loads((directory / "config.json").read_text())
+    (directory / "config.json").write_text(json.dumps(d1_config(config), indent=2))
+    return directory
+
+
+@pytest.fixture(scope="session")
+def tiny_export(tiny_checkpoint, tmp_path_factory):
+    output_dir = tmp_path_factory.mktemp("d1_tiny_export")
+    onnx_dir = output_dir / "onnx"
+    onnx_dir.mkdir()
+    export_fp32(tiny_checkpoint, onnx_dir)
+    copy_checkpoint_files(tiny_checkpoint, output_dir)
+    derive(onnx_dir, ["fp16", "q4", "q8", "q4f16", "q8f16"], block_size=32)
+    return output_dir
 
 
 @pytest.fixture(scope="session")

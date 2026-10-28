@@ -34,7 +34,7 @@ from liquidonnx.lfm3_omni.session import BUNDLES, ONNXOmniModel
 logger = logging.getLogger(__name__)
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     """lfm3-audio-infer's arguments, and --images and --max-image-tokens."""
     parser = argparse.ArgumentParser(description="ONNX inference for LFM3-Omni")
     parser.add_argument("--model", required=True, help="Export folder")
@@ -68,6 +68,11 @@ def main():
     parser.add_argument("--no-stream", action="store_true", help="Print the text at the end")
     parser.add_argument("--cpu", action="store_true", help="Force CPU execution (skip CUDA)")
     parser.add_argument("--no-tf32", action="store_true", help="Keep CUDA fp32 math in fp32")
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     if args.mode == "tts" and not args.prompt:

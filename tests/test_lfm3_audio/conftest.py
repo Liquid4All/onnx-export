@@ -1,7 +1,10 @@
 """LFM3-Audio fixtures."""
 
+import functools
 import hashlib
 import pathlib
+import shutil
+import sys
 
 import pytest
 
@@ -9,7 +12,7 @@ from liquidonnx.compare import checkpoint_revision
 from liquidonnx.lfm3_audio.config import REVISIONS
 
 from .remote import load_codec_reference, load_reference
-from .tiny import write_tiny_checkpoint
+from .tiny import write_omni_checkpoint, write_release_files, write_tiny_checkpoint
 
 CHECKPOINT_PATTERNS = [
     "*.json",
@@ -34,6 +37,39 @@ def tiny_reference(tiny_checkpoint):
 @pytest.fixture(scope="session")
 def tiny_codec_reference(tiny_checkpoint):
     return load_codec_reference(tiny_checkpoint)
+
+
+@pytest.fixture(scope="session")
+def tiny_exports(tiny_checkpoint, tmp_path_factory):
+    """export(cli, release) -> the folder of lfm3-audio-export's or lfm3-omni-export's main() with
+    --precision q4 q4f16, built once, on the tiny checkpoint in release's layout (LFM3-Audio-2B,
+    or LFM3-Omni-2B: write_omni_checkpoint) with release's generation_config.json and tokenizer
+    (write_release_files). The tiny checkpoint itself has neither: its reference's generate would
+    read the file."""
+    from liquidonnx.lfm3_audio import export as audio_export
+    from liquidonnx.lfm3_omni import export as omni_export
+
+    root = tmp_path_factory.mktemp("lfm3_audio_tiny_exports")
+
+    @functools.cache
+    def checkpoint(release: str) -> pathlib.Path:
+        directory = root / f"tiny-{release}"
+        if release == "LFM3-Omni-2B":
+            write_omni_checkpoint(tiny_checkpoint, directory)
+        else:
+            shutil.copytree(tiny_checkpoint, directory)
+        return write_release_files(directory, release)
+
+    @functools.cache
+    def export(cli: str, release: str) -> pathlib.Path:
+        output_dir = root / cli
+        argv = [cli, str(checkpoint(release)), "--output-dir", str(output_dir)]
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(sys, "argv", [*argv, "--precision", "q4", "q4f16"])
+            (omni_export if cli == "lfm3-omni-export" else audio_export).main()
+        return output_dir / "exports" / f"tiny-{release}-ONNX"
+
+    return export
 
 
 # === Real checkpoint ===

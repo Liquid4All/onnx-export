@@ -1,0 +1,54 @@
+{
+  "audio_out_token": "<|audio_out|>",
+  "audio_token": "<|audio|>",
+  "backend": "tokenizers",
+  "bos_token": "<|startoftext|>",
+  "eos_token": "<|im_end|>",
+  "extra_special_tokens": [],
+  "image_token": "<|image|>",
+  "model_max_length": 1000000000000000019884624838656,
+  "pad_token": "<|pad|>",
+  "response_template": {
+    "defaults": {
+      "role": "assistant"
+    },
+    "start_anchor_pattern": "<\\|im_start\\|>assistant\\n",
+    "fields": {
+      "reasoning_content": {
+        "open_pattern": "<think>\\n?",
+        "close_pattern": "</think>\\s*",
+        "content": "text"
+      },
+      "tool_calls": {
+        "open_pattern": "<tool_call>\\s*<function=(?P<name>[^\\n>]+)>",
+        "close_pattern": "</tool_call>\\s*",
+        "repeats": true,
+        "content": "xml-inline",
+        "content_args": {
+          "tag_pattern": "<parameter=(?P<key>[^>\\n]+)>\\n?(?P<value>.*?)\\n?</parameter>(?=\\s*(?:<parameter=|</function>\\s*\\Z|\\Z))",
+          "value_parser": {
+            "name": "text",
+            "args": {
+              "strip": false
+            }
+          }
+        },
+        "transform": {
+          "type": "function",
+          "function": {
+            "name": "{name}",
+            "arguments": "{content}"
+          }
+        }
+      },
+      "content": {
+        "close_pattern": "<\\|im_end\\|>\\s*",
+        "content": "text"
+      }
+    }
+  },
+  "tokenizer_class": "TokenizersBackend",
+  "video_token": "<|video|>",
+  "vision_end_token": "<|vision_end|>",
+  "vision_start_token": "<|vision_start|>"
+}

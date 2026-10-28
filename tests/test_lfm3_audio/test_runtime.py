@@ -33,6 +33,7 @@ import pytest
 import torch
 from helpers import processed_probs
 
+from liquidonnx.lfm3_audio import infer as audio_infer
 from liquidonnx.lfm3_audio.session import (
     ONNXAudioModel,
     load_audio,
@@ -40,9 +41,11 @@ from liquidonnx.lfm3_audio.session import (
     sample_token,
     stft_to_wave,
 )
+from liquidonnx.lfm3_omni import infer as omni_infer
 
 from .remote import SPEECH_SAMPLING, cached_slots, inject_orders, maskgit_orders, remote_class
 from .test_decoder import cosine, kl_divergence
+from .tiny import ASSETS
 
 logger = logging.getLogger(__name__)
 
@@ -839,8 +842,8 @@ def transformers_draw(logits, temperature, top_k, repetition_penalty, history, u
 
 
 # The speech sampling of the release checkpoints' generation_config.json (remote.SPEECH_SAMPLING's
-# fields), which lfm3-audio-infer and lfm3-omni-infer take: AudioSampling's temperature, top_k,
-# repetition_penalty and repetition_window
+# fields, assets/), which lfm3-audio-infer and lfm3-omni-infer take: AudioSampling's temperature,
+# top_k, repetition_penalty and repetition_window
 SPEECH_SETTINGS = {
     "LFM3-Audio-2B": (1.0, 128, 1.1, 4096),
     "LFM3-Omni-2B": (0.4, None, 1.2, 64),
@@ -871,35 +874,39 @@ def test_sampler_matches_transformers():
             assert got == expected
 
 
+@pytest.mark.parametrize("cli", [audio_infer, omni_infer], ids=["audio-infer", "omni-infer"])
 @pytest.mark.parametrize("name", SPEECH_SETTINGS)
-def test_speech_sampling(tmp_path, name):
-    """lfm3-audio-infer's and lfm3-omni-infer's speech sampling (infer.speech_sampling) as the
-    reference's generate() resolves it: a flag, else the export's generation_config.json, else
-    the reference's default; --greedy takes temperature 0."""
-    import argparse
+def test_speech_sampling(tmp_path, name, cli):
+    """lfm3-audio-infer's and lfm3-omni-infer's speech sampling (infer.speech_sampling of their
+    build_parser's arguments) as the reference's generate() resolves it: a flag, else the export's
+    generation_config.json (the release's), else the reference's default; --greedy takes
+    temperature 0. No --audio-* flag and no --language has a default of its own."""
     import dataclasses
     import json
+    import shutil
 
-    from liquidonnx.lfm3_audio.infer import speech_sampling
     from liquidonnx.lfm3_audio.session import AudioSampling
 
-    def cli(folder, greedy=False, **flags):
-        flags = dict.fromkeys(SPEECH_SAMPLING) | flags
-        return speech_sampling(argparse.Namespace(model=folder, greedy=greedy, **flags))
+    def sampling(folder, *flags):
+        args = cli.build_parser().parse_args(["--model", str(folder), *flags])
+        return audio_infer.speech_sampling(args)
 
     export, bare = tmp_path / "export", tmp_path / "bare"
     export.mkdir()
     bare.mkdir()
-    fields = dict(zip(SPEECH_SAMPLING, SPEECH_SETTINGS[name], strict=True))
-    (export / "generation_config.json").write_text(json.dumps({"do_sample": False, **fields}))
+    shutil.copy2(ASSETS / name / "generation_config.json", export)
+    args = cli.build_parser().parse_args(["--model", str(export)])
+    assert [getattr(args, key) for key in (*SPEECH_SAMPLING, "language")] == [None] * 5
     expected = AudioSampling(*SPEECH_SETTINGS[name])
-    assert cli(export) == expected
-    assert cli(export, audio_temperature=0.7) == dataclasses.replace(expected, temperature=0.7)
-    assert cli(export, greedy=True) == dataclasses.replace(expected, temperature=0.0)
+    assert audio_infer.speech_sampling(args) == expected
+    flags = ["--audio-temperature", "0.7", "--audio-top-k", "5"]
+    flags += ["--audio-repetition-penalty", "1.3", "--audio-repetition-window", "16"]
+    assert sampling(export, *flags) == AudioSampling(0.7, 5, 1.3, 16)
+    assert sampling(export, "--greedy") == dataclasses.replace(expected, temperature=0.0)
     # no file, then a file without the fields
-    assert cli(bare) == AudioSampling(None, None, None, 64)
+    assert sampling(bare) == AudioSampling(None, None, None, 64)
     (bare / "generation_config.json").write_text(json.dumps({"do_sample": False}))
-    assert cli(bare) == AudioSampling(None, None, None, 64)
+    assert sampling(bare) == AudioSampling(None, None, None, 64)
 
 
 SAMPLING_SEED = 7

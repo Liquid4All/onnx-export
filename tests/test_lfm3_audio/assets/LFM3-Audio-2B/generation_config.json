@@ -1,0 +1,16 @@
+{
+  "bos_token_id": 124894,
+  "eos_token_id": [124900, 125014],
+  "pad_token_id": 124893,
+  "use_cache": true,
+  "output_attentions": false,
+  "output_hidden_states": false,
+  "do_sample": false,
+  "repetition_penalty": 1.0,
+  "temperature": 0.0,
+  "top_k": 1,
+  "audio_temperature": 1.0,
+  "audio_top_k": 128,
+  "audio_repetition_penalty": 1.1,
+  "audio_repetition_window": 4096
+}

@@ -1,18 +1,26 @@
 """LFM3-VL fixtures."""
 
 import pathlib
+import shutil
 
 import pytest
 
 from liquidonnx.lfm3_vl.config import REVISIONS
 
+from ..test_lfm3.tiny import write_tokenizer
 from .reference.loader import load_reference
 from .tiny import write_tiny_checkpoint
 
 
 @pytest.fixture(scope="session")
 def tiny_checkpoint(tmp_path_factory):
-    return write_tiny_checkpoint(tmp_path_factory.mktemp("lfm3_vl_tiny"))
+    """The tiny checkpoint with the files lfm3-vl-infer reads: LFM3-VL-2B's processor_config.json,
+    and a tokenizer with LFM3-1.7B's special ids and chat template (LFM3-VL-2B has the same)."""
+    directory = write_tiny_checkpoint(tmp_path_factory.mktemp("lfm3_vl_tiny"))
+    write_tokenizer(directory)
+    assets = pathlib.Path(__file__).parent / "assets" / "LFM3-VL-2B"
+    shutil.copy2(assets / "processor_config.json", directory)
+    return directory
 
 
 @pytest.fixture(scope="session")

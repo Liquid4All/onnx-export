@@ -1,15 +1,23 @@
 """
-LFM3Config.from_hf_config on both checkpoint formats (no download).
+LFM3Config.from_hf_config on both checkpoint formats, and the files of the released checkpoints at
+their pinned revisions, copied to assets/: LFM3-1.7B's and LFM3-1.7B-Base's config.json, and
+LFM3-1.7B's safetensors header (names, dtypes and shapes; LFM3-1.7B-Base's is the same) (no
+download).
 
 Run with:
     uv run pytest tests/test_lfm3/test_config.py -v
 """
 
 import copy
+import dataclasses
+import json
 
+import numpy as np
 import pytest
 
-from liquidonnx.lfm3.builder import LFM3Config
+from liquidonnx.lfm3.builder import LFM3Builder, LFM3Config
+
+from .tiny import ASSETS, RELEASED, tensor_shapes
 
 LAYER_TYPES = ["conv", "conv", "full_attention", "conv", "sliding_attention", "conv"]
 
@@ -161,3 +169,58 @@ def edited(base: dict, **changes) -> dict:
 def test_unsupported_configs_raise(cfg):
     with pytest.raises((NotImplementedError, ValueError)):
         LFM3Config.from_hf_config(cfg)
+
+
+# === Released checkpoints ===
+
+
+def released_tensors() -> dict[str, list]:
+    """name -> [dtype, shape] of LFM3-1.7B's model.safetensors."""
+    path = ASSETS / "LFM3-1.7B" / "safetensors_headers.json"
+    return json.loads(path.read_text())["model.safetensors"]
+
+
+@pytest.mark.parametrize("name", ["LFM3-1.7B", "LFM3-1.7B-Base"])
+def test_released_configs_parse(name):
+    """The format NEW_FORMAT stands for, with 24 layers and LFM3-1.7B's context."""
+    layer_types = ["conv", "conv", *["full_attention", "conv", "sliding_attention", "conv"] * 5]
+    layer_types += ["full_attention", "conv"]
+    expected = dataclasses.replace(
+        EXPECTED, num_hidden_layers=24, layer_types=layer_types, max_position_embeddings=262144
+    )
+    cfg = json.loads((ASSETS / name / "config.json").read_text())
+    assert LFM3Config.from_hf_config(cfg) == expected
+
+
+def test_tiny_checkpoint_follows_the_released_tensors():
+    """tiny.tensor_shapes, which the tiny checkpoint is written with, gives the names and shapes of
+    LFM3-1.7B's header from its config."""
+    tensors = released_tensors()
+    assert {dtype for dtype, _ in tensors.values()} == {"BF16"}
+    assert tensor_shapes(RELEASED) == {name: tuple(shape) for name, (_, shape) in tensors.items()}
+
+
+def test_released_tensors_all_become_graph_weights():
+    """LFM3Builder reads each tensor of LFM3-1.7B's header once, into a weight a node of the graph
+    takes, and needs no other: a build on zero-stride stand-ins of the header's shapes."""
+    tensors = released_tensors()
+    read, weights = [], {}
+
+    class Tensors(dict):
+        def __getitem__(self, name):
+            read.append(name)
+            return super().__getitem__(name)
+
+    stand_ins = Tensors(
+        {name: np.broadcast_to(np.float32(0), shape) for name, (_, shape) in tensors.items()}
+    )
+    builder = LFM3Builder(LFM3Config.from_hf_config(RELEASED))
+    builder.load_weights = lambda path: setattr(builder, "weights", stand_ins)
+    builder.add_initializer = lambda name, tensor: weights.setdefault(name, tensor.shape)
+    # Computed, not read: tables of 262144 positions
+    builder.build_rope_cache = lambda: None
+    graph = builder.build("LFM3-1.7B").graph
+    assert sorted(read) == sorted(tensors)
+    checkpoint_weights = {name for name in weights if not name.startswith("/model/constants/")}
+    assert len(checkpoint_weights) == len(tensors)
+    assert checkpoint_weights <= {name for node in graph.node for name in node.input}
