@@ -121,10 +121,13 @@ def builder_dir() -> pathlib.Path:
     return models
 
 
-def resolve_checkpoint(model: str, allow_patterns: list[str] | None = None) -> pathlib.Path:
+def resolve_checkpoint(
+    model: str, allow_patterns: list[str] | None = None, revision: str | None = None
+) -> pathlib.Path:
     """Local directory of a checkpoint given as a path or a Hugging Face model ID.
 
-    allow_patterns limits a download to the matching files; a local directory is used as is.
+    allow_patterns limits a download to the matching files and revision pins it (None: main); a
+    local directory is used as is.
     """
     path = pathlib.Path(model)
     if path.is_dir():
@@ -132,7 +135,7 @@ def resolve_checkpoint(model: str, allow_patterns: list[str] | None = None) -> p
 
     from huggingface_hub import snapshot_download
 
-    return pathlib.Path(snapshot_download(model, allow_patterns=allow_patterns))
+    return pathlib.Path(snapshot_download(model, allow_patterns=allow_patterns, revision=revision))
 
 
 def build_decoder(

@@ -1,4 +1,5 @@
-// Minimal static server: /ort/ → onnxruntime-web dist, /harness/ → this dir, /model/ → synthetic onnx dir.
+// Minimal static server: /ort/ → onnxruntime-web dist, /harness/ → this dir, /model/ → modelDir
+// (by default the synthetic onnx dir).
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -26,12 +27,12 @@ export function loadManifest() {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-export function startServer() {
-  const manifest = loadManifest();
+export function startServer(modelDir) {
+  const manifest = modelDir ? null : loadManifest();
   const roots = {
     '/ort/': path.join(here, 'node_modules', 'onnxruntime-web', 'dist'),
     '/harness/': here,
-    '/model/': path.join(syntheticDir(), manifest.model_dir, 'onnx'),
+    '/model/': modelDir ? path.resolve(modelDir) : path.join(syntheticDir(), manifest.model_dir, 'onnx'),
   };
 
   const server = http.createServer((req, res) => {

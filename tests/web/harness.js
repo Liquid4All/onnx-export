@@ -1,7 +1,8 @@
 // Browser side of the WebGPU tests. Playwright calls window.runCase() and reads the result.
 //
-// Feeds are built here from a spec with a seeded PRNG so the wasm reference run and the
-// WebGPU run see identical inputs. ort is the UMD global from ort.webgpu.min.js.
+// Feeds are built here from a spec with a seeded PRNG, or read from export_lfm3.py's blobs, so
+// the reference run and the WebGPU run see identical inputs. ort is the UMD global from
+// ort.webgpu.min.js.
 
 window.EP_SESSION_MARKER = '=== ep session ===';
 
@@ -57,9 +58,42 @@ function buildFeeds(feedSpecs, seed) {
   return feeds;
 }
 
+// float16 data is the bit patterns (ORT takes a Uint16Array, and returns one without Float16Array)
+const TYPED_ARRAYS = {
+  float32: Float32Array, float16: Uint16Array, int64: BigInt64Array, int32: Int32Array, bool: Uint8Array,
+};
+
+// Tensors of export_lfm3.py: one little-endian blob and its {name, type, dims, offset, bytes}
+async function loadTensors({ url, tensors }) {
+  const buffer = await (await fetch(url)).arrayBuffer();
+  const out = {};
+  for (const t of tensors) {
+    const data = new TYPED_ARRAYS[t.type](buffer.slice(t.offset, t.offset + t.bytes));
+    out[t.name] = new ort.Tensor(t.type, data, t.dims);
+  }
+  return out;
+}
+
+function halfToFloat(h) {
+  const sign = h & 0x8000 ? -1 : 1;
+  const exponent = (h >> 10) & 0x1f;
+  const fraction = h & 0x3ff;
+  if (exponent === 0) return sign * fraction * 2 ** -24;
+  if (exponent === 31) return fraction ? NaN : sign * Infinity;
+  return sign * (1 + fraction / 1024) * 2 ** (exponent - 15);
+}
+
+function values(tensor) {
+  return tensor.type === 'float16' && tensor.data instanceof Uint16Array
+    ? Array.from(tensor.data, halfToFloat)
+    : tensor.data;
+}
+
 async function createSession(modelUrl, externalData, ep, extra) {
   const options = {
-    executionProviders: [ep],
+    // float32 partial sums for MatMulNBits with fp16 activations (onnxruntime-web 1.31+; earlier
+    // releases ignore the option)
+    executionProviders: [ep === 'webgpu' ? { name: ep, enableMatmulFp32Accumulation: true } : ep],
     graphOptimizationLevel: 'all',
     logSeverityLevel: 0,
     logVerbosityLevel: 0,
@@ -75,8 +109,8 @@ function compare(name, ref, out) {
   let maxAbsDiff = 0;
   let maxAbsRef = 0;
   let nonFinite = 0;
-  const a = ref.data;
-  const b = out.data;
+  const a = values(ref);
+  const b = values(out);
   for (let i = 0; i < a.length; i++) {
     const x = Number(a[i]);
     const y = Number(b[i]);
@@ -87,30 +121,43 @@ function compare(name, ref, out) {
   return { name, type: ref.type, dims: ref.dims, size: a.length, maxAbsDiff, maxAbsRef, nonFinite };
 }
 
-// Runs the graph on wasm (reference) and on `ep`, returns per-output comparison stats.
-window.runCase = async ({ modelUrl, externalData = [], ep = 'webgpu', feedSpecs, seed = 0, extra = {} }) => {
+// Runs the graph on `ep` and returns per-output comparison stats against the reference: the
+// `expected` tensors when given, else the wasm EP on the same feeds. Feeds come from a blob
+// (`feeds`) or are built from `feedSpecs` with a seeded PRNG.
+window.runCase = async ({ modelUrl, externalData = [], ep = 'webgpu', feedSpecs, feeds, expected, seed = 0, extra = {} }) => {
   ort.env.wasm.wasmPaths = '/ort/';
   ort.env.wasm.numThreads = 1;
   ort.env.logLevel = 'verbose';
 
   const status = document.getElementById('status');
   status.textContent = `loading ${modelUrl} on ${ep}`;
+  const makeFeeds = () => (feeds ? loadTensors(feeds) : buildFeeds(feedSpecs, seed));
 
-  const reference = await createSession(modelUrl, externalData, 'wasm', {});
-  const refOut = await reference.run(buildFeeds(feedSpecs, seed));
+  let refOut = expected && (await loadTensors(expected));
+  if (!refOut) {
+    const reference = await createSession(modelUrl, externalData, 'wasm', {});
+    refOut = await reference.run(await makeFeeds());
+    await reference.release();
+  }
 
   // Everything logged after this marker belongs to the EP-under-test session.
   console.log(window.EP_SESSION_MARKER);
+  let t0 = performance.now();
   const session = await createSession(modelUrl, externalData, ep, extra);
-  const t0 = performance.now();
-  const out = await session.run(buildFeeds(feedSpecs, seed));
+  const createMs = performance.now() - t0;
+  const input = await makeFeeds();
+  t0 = performance.now();
+  const out = await session.run(input);
   const runMs = performance.now() - t0;
+  // The first run also compiles the shaders
+  t0 = performance.now();
+  await session.run(input);
+  const warmMs = performance.now() - t0;
 
   const outputs = Object.keys(refOut).map((name) => compare(name, refOut[name], out[name]));
   await session.release();
-  await reference.release();
   status.textContent = 'done';
-  return { outputs, runMs, inputNames: session.inputNames, outputNames: session.outputNames };
+  return { outputs, createMs, runMs, warmMs, inputNames: session.inputNames, outputNames: session.outputNames };
 };
 
 window.webgpuAdapterInfo = async () => {
@@ -118,5 +165,13 @@ window.webgpuAdapterInfo = async () => {
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) return null;
   const info = adapter.info ?? {};
-  return { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description };
+  return {
+    vendor: info.vendor,
+    architecture: info.architecture,
+    device: info.device,
+    description: info.description,
+    // the WebGPU EP's fp16 kernels need it
+    shaderF16: adapter.features.has('shader-f16'),
+    subgroupMaxSize: info.subgroupMaxSize,
+  };
 };

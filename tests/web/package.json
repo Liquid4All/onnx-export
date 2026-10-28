@@ -2,7 +2,7 @@
   "name": "liquidonnx-web-tests",
   "private": true,
   "type": "module",
-  "description": "Runs the synthetic LFM2.5-Audio ONNX graphs on the WebGPU EP in headless Chromium",
+  "description": "Runs the synthetic LFM2.5-Audio and LFM3 ONNX graphs on the WebGPU EP in headless Chromium",
   "scripts": {
     "test": "playwright test",
     "test:headed": "playwright test --headed"

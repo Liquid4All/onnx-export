@@ -838,8 +838,10 @@ def test_audio_exports_a_checkpoint_folder_without_liquid_audio(tmp_path, monkey
     hub_id, snapshot = "LiquidAI/LFM2.5-Audio-synthetic", tmp_path / "snapshot"
     downloaded = []
 
-    def snapshot_download(repo_id: str, allow_patterns: list[str] | None = None) -> str:
-        assert repo_id == hub_id
+    def snapshot_download(
+        repo_id: str, allow_patterns: list[str] | None = None, revision: str | None = None
+    ) -> str:
+        assert repo_id == hub_id and revision is None
         files = [p.relative_to(checkpoint).as_posix() for p in checkpoint.rglob("*") if p.is_file()]
         for name in filter_repo_objects(files, allow_patterns=allow_patterns):
             (snapshot / name).parent.mkdir(parents=True, exist_ok=True)

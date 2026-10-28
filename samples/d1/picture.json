@@ -1,0 +1,8 @@
+{
+  "state": null,
+  "questions": {
+    "cats": {"type": "number", "instructions": "How many cats are there?", "range": [0, 10], "step": 1},
+    "remote": {"type": "box", "instructions": "Where is the remote control on the left?"},
+    "every_cat": {"type": "boxes", "instructions": "Every cat.", "max": 4}
+  }
+}

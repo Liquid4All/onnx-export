@@ -4,7 +4,7 @@
 //   uv run python tests/web/export_synthetic.py   # once, writes tests/web/.synthetic
 //   cd tests/web && npm test
 
-import { test, expect } from '@playwright/test';
+import { checkWebGpuCase, test } from './checks.js';
 import { startServer } from './server.js';
 
 const SEQ = 8; // decoder prefill length
@@ -19,15 +19,6 @@ const TOLERANCE = {
   // ~1e-2 relative where Metal stays at 1e-8. A wrong kernel gives O(1) diffs, not this.
   q4: { atol: 1e-3, rtol: 5e-2 },
 };
-
-const EP_SESSION_MARKER = '=== ep session ===';
-
-// int64 shape/index plumbing has no WebGPU kernel unless enableInt64 is set, and ORT keeps
-// it on the CPU anyway. Anything outside this list is compute silently leaving the GPU.
-const CPU_FALLBACK_ALLOWED = new Set([
-  'Add', 'Sub', 'Mul', 'Cast', 'Clip', 'Concat', 'Equal', 'Gather', 'Greater', 'LessOrEqual',
-  'Range', 'ReduceSum', 'Reshape', 'Shape', 'Slice', 'Transpose', 'Unsqueeze',
-]);
 
 function depthformerFeeds(m, past) {
   const layers = 6;
@@ -89,7 +80,7 @@ test.afterAll(async () => {
   ctx?.server.close();
 });
 
-test('report the WebGPU adapter', async ({ page }) => {
+test('report the WebGPU adapter', async ({ harnessPage: page }) => {
   // Diagnostic only. A bare requestAdapter() can return null on a cold GPU process even
   // though ORT goes on to acquire a device, so this reports and never fails the suite —
   // each case asserts the EP was actually used from ORT's own node-placement log.
@@ -105,55 +96,14 @@ test('report the WebGPU adapter', async ({ page }) => {
 for (const [graph, variants] of Object.entries(CASES)) {
   for (const precision of ['fp32', 'q4']) {
     for (const [variant, feeds] of Object.entries(variants)) {
-      test(`${graph} ${precision} ${variant} matches wasm on webgpu`, async ({ page }) => {
+      test(`${graph} ${precision} ${variant} matches wasm on webgpu`, async ({ harnessPage: page }) => {
         const { manifest, baseUrl } = ctx;
         const entry = manifest.graphs[graph][precision];
-        const logs = [];
-        page.on('console', (msg) => logs.push(msg.text()));
-
-        await page.goto(`${baseUrl}/harness/harness.html`);
-        const result = await page.evaluate(
-          (args) => window.runCase(args),
-          {
-            modelUrl: `${baseUrl}/model/${entry.file}`,
-            externalData: entry.external_data,
-            ep: 'webgpu',
-            feedSpecs: feeds(manifest),
-          },
-        );
-
-        // Only the EP-under-test session's logs; the wasm reference runs first.
-        const epLogs = logs.slice(logs.findIndex((l) => l.includes(EP_SESSION_MARKER)) + 1);
-        const placement = epLogs.filter((l) => l.includes('VerifyEachNodeIsAssignedToAnEp'));
-        test.info().annotations.push(
-          ...placement.map((l) => ({ type: 'placement', description: l.split('] ').pop() })),
-        );
-        expect(
-          placement.some((l) => /All nodes placed on \[CPUExecutionProvider\]/.test(l)),
-          'WebGPU EP took no nodes — the run silently fell back to CPU',
-        ).toBe(false);
-
-        const fallbackOps = [...new Set(
-          epLogs.filter((l) => /kernel not found/i.test(l)).map((l) => l.match(/Op type: (\S+)/)?.[1]),
-        )];
-        test.info().annotations.push(
-          { type: 'run_ms', description: result.runMs.toFixed(1) },
-          { type: 'cpu_fallback', description: fallbackOps.join(' ') || 'none' },
-        );
-        const unexpected = fallbackOps.filter((op) => !CPU_FALLBACK_ALLOWED.has(op));
-        expect(unexpected, 'compute ops without a WebGPU kernel').toEqual([]);
-
-        const tol = TOLERANCE[precision];
-        for (const out of result.outputs) {
-          expect(out.error, out.name).toBeUndefined();
-          expect(out.nonFinite, `${out.name} non-finite`).toBe(0);
-          const bound = tol.atol + tol.rtol * out.maxAbsRef;
-          test.info().annotations.push({
-            type: 'output',
-            description: `${out.name} ${out.type}[${out.dims}] max|diff|=${out.maxAbsDiff.toExponential(2)} bound=${bound.toExponential(2)}`,
-          });
-          expect(out.maxAbsDiff, `${out.name} max|diff|=${out.maxAbsDiff} (bound ${bound}, ref scale ${out.maxAbsRef})`).toBeLessThanOrEqual(bound);
-        }
+        await checkWebGpuCase(page, baseUrl, {
+          modelUrl: `${baseUrl}/model/${entry.file}`,
+          externalData: entry.external_data,
+          feedSpecs: feeds(manifest),
+        }, TOLERANCE[precision]);
       });
     }
   }

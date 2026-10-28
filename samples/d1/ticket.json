@@ -1,0 +1,30 @@
+{
+  "state": "I was charged twice and my parcel never arrived. Please refund one charge.",
+  "questions": {
+    "refund": {"type": "noul", "instructions": "Is the customer asking for a refund?"},
+    "team": {
+      "type": "choice",
+      "instructions": "Which team should handle this?",
+      "criteria": {
+        "billing": "Charges, refunds, invoices",
+        "shipping": "Delivery and parcels",
+        "technical": "App or site faults"
+      }
+    },
+    "topics": {
+      "type": "choice",
+      "multiple": true,
+      "instructions": "Which topics does the message raise?",
+      "criteria": {
+        "billing": "Payments and charges",
+        "delivery": "Shipping and parcels",
+        "login": "Signing in to the account"
+      }
+    },
+    "urgency": {
+      "type": "score",
+      "instructions": "How urgent is this ticket?",
+      "criteria": ["low", "medium", "high"]
+    }
+  }
+}

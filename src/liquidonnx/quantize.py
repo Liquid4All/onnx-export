@@ -4,7 +4,8 @@ Quantization and precision conversion for ONNX models.
 Weight-only MatMulNBits quantization (quantize_model / quantize_matmuls) for the vision encoder and
 the audio graphs, GatherBlockQuantized tables (quantize_gathers) for the audio embedding, and
 convert_to_fp16 for their fp16 versions and the fp16 and q4f16 decoders. The genai builder
-quantizes the decoders (liquidonnx.genai_builder.DECODER_PRESETS).
+quantizes the LFM2 decoders (liquidonnx.genai_builder.DECODER_PRESETS); liquidonnx.lfm3.quantize
+quantizes the LFM3 ones with quantize_matmuls.
 """
 
 import logging
@@ -15,6 +16,7 @@ import onnx
 from onnx import helper, numpy_helper
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     DefaultWeightOnlyQuantConfig,
+    KQuantWeightOnlyQuantConfig,
     MatMulNBitsQuantizer,
 )
 
@@ -245,13 +247,32 @@ def quantize_matmuls(
     symmetric: bool = False,
     accuracy_level: int = 4,
     exclude: list[str] | None = None,
+    algorithm: str = "rtn",
+    node_bits: dict[str, int] | None = None,
 ) -> onnx.ModelProto:
     """MatMul -> MatMulNBits (int4 or int8) for every MatMul not named in exclude.
 
     accuracy_level is MatMulNBits' compute type: 4 quantizes the activations to int8, 0 keeps them
     in the input type.
+
+    algorithm "rtn" is onnxruntime's default, round to nearest over each block's range. "k_quant"
+    is its port of llama.cpp's Q4_K search for the scale and offset with the least weighted error
+    in each block, the algorithm of the genai builder's q4 decoders. k_quant always writes zero
+    points (so symmetric is not for it) and its tensors keep onnxruntime's names (weight_Q4G32,
+    weight_scale, weight_zp), as those decoders do. node_bits, for k_quant only, maps the names of
+    the MatMuls that get another width than bits to theirs. onnxruntime's k_quant raises on an int4
+    MatMul whose input size is an odd number of blocks: it packs the zero points in pairs across
+    the rows.
     """
-    quant_type = "symmetric" if symmetric else "asymmetric"
+    if algorithm not in ("rtn", "k_quant"):
+        raise ValueError(f"Unknown algorithm {algorithm!r}: rtn or k_quant")
+    k_quant = algorithm == "k_quant"
+    if k_quant and symmetric:
+        raise ValueError("k_quant always writes zero points: it has no symmetric form")
+    if node_bits and not k_quant:
+        raise ValueError("node_bits needs algorithm='k_quant'")
+
+    quant_type = "k_quant" if k_quant else "symmetric" if symmetric else "asymmetric"
     logger.info(
         f"Quantizing to INT{bits} (block_size={block_size}, {quant_type}, "
         f"accuracy_level={accuracy_level})..."
@@ -260,7 +281,19 @@ def quantize_matmuls(
     logging.getLogger("onnxruntime.quantization.matmul_nbits_quantizer").setLevel(logging.WARNING)
 
     kwargs = {}
-    if bits != 4:
+    if k_quant:
+        node_bits = node_bits or {}
+        matmuls = [node.name for node in model.graph.node if node.op_type == "MatMul"]
+        unknown = sorted(set(node_bits) - set(matmuls))
+        if unknown:
+            raise ValueError(f"node_bits names no MatMul: {', '.join(unknown)}")
+        # onnxruntime gives k_quant's MatMuls 4 bits unless the config names them
+        kwargs["algo_config"] = KQuantWeightOnlyQuantConfig(
+            customized_weight_config={name: {"bits": node_bits.get(name, bits)} for name in matmuls}
+        )
+        # Without cupy, k_quant logs a line for every MatMul
+        logging.getLogger("neural_compressor").setLevel(logging.WARNING)
+    elif bits != 4:
         kwargs["algo_config"] = DefaultWeightOnlyQuantConfig(
             block_size=block_size,
             is_symmetric=symmetric,
@@ -278,7 +311,12 @@ def quantize_matmuls(
     quantizer.process()
 
     quantized = quantizer.model.model
-    rename_quantized_weights(quantized)
+    if k_quant:
+        # Unlike the default quantizer, k_quant doesn't declare MatMulNBits' domain
+        if all(opset.domain != "com.microsoft" for opset in quantized.opset_import):
+            quantized.opset_import.append(helper.make_opsetid("com.microsoft", 1))
+    else:
+        rename_quantized_weights(quantized)
     return quantized
 
 

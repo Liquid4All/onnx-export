@@ -41,6 +41,15 @@ uv run pytest tests/test_genai_export.py tests/test_genai_export_multimodal.py t
 uv run pytest tests/test_lfm2_audio/test_modes_synthetic.py tests/test_lfm2_audio/test_reference_parity.py \
     tests/test_lfm2_audio/test_graph_structure.py -v
 uv run pytest tests/test_compare.py tests/test_compare_wikitext.py -v
+uv run pytest tests/test_lfm3/test_config.py tests/test_lfm3/test_rope.py \
+    tests/test_lfm3_vl/test_tiny_export.py tests/test_lfm3_vl/test_config.py tests/test_lfm3_vl/test_rope.py \
+    tests/test_lfm3_audio/test_config.py tests/test_lfm3_audio/test_weights.py \
+    tests/test_lfm3_audio/test_tiny_reference.py tests/test_lfm3_audio/test_tiny_decoder.py \
+    tests/test_lfm3_audio/test_tiny_codec.py tests/test_lfm3_audio/test_gqa_window.py \
+    tests/test_lfm3_omni/test_config.py \
+    tests/test_d1/test_config.py tests/test_d1/test_tiny_export.py -v  # in CI (check_python.yml)
+uv run pytest tests/test_lfm3_audio/test_runtime.py tests/test_lfm3_audio/test_audio_encoder.py \
+    tests/test_lfm3_audio/test_depth.py -v -k "(tiny or sample or sampling or orders) and not onnx"  # in CI
 ```
 
 The other tests load large models and need the export in ./exports (README 5) - run specific tests
@@ -49,4 +58,9 @@ rather than the full suite:
 ```bash
 uv run pytest tests/test_lfm2/test_decoder.py -v -k "350M and q4"
 uv run pytest tests/test_lfm2_vl/test_decoder.py -v -k "450M and q4"
+uv run pytest tests/test_lfm3/test_decoder.py -v -k "q4 and not q4f"  # LFM3-1.7B, README 3.1b
+uv run pytest tests/test_lfm3_vl/test_decoder.py -v -k "q4 and not q4f16 and not text"  # LFM3-VL-2B, README 3.1c
+uv run pytest tests/test_lfm3_audio/test_decoder.py -v -k "q4 and not multiturn"  # LFM3-Audio-2B, README 3.1d
+uv run pytest tests/test_d1/test_answers.py -v --d1-model LiquidAI/d1-2B -k q4  # d1, README 3.1f
+uv run pytest tests/test_lfm3_omni/test_decoder.py -v -k q4  # LFM3-Omni-2B, README 3.1e
 ```

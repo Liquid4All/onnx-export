@@ -1,0 +1,98 @@
+{
+  "audio_markers": true,
+  "audio_out_token": "<|audio_out|>",
+  "audio_token": "<|audio|>",
+  "audio_tokenizer_subfolder": "audio_tokenizer",
+  "feature_extractor": {
+    "encoder_stride": 8,
+    "feature_extractor_type": "Lfm3OmniFeatureExtractor",
+    "feature_size": 128,
+    "hop_length": 160,
+    "log_floor": -12.0,
+    "n_fft": 400,
+    "normalization_divisor": 4.0,
+    "normalization_offset": 4.0,
+    "padding_side": "right",
+    "padding_value": 0.0,
+    "return_attention_mask": true,
+    "sampling_rate": 16000,
+    "win_length": 400,
+    "auto_map": {
+      "AutoFeatureExtractor": "feature_extraction_lfm3_omni.Lfm3OmniFeatureExtractor"
+    }
+  },
+  "image_processor": {
+    "do_convert_rgb": true,
+    "do_normalize": true,
+    "do_rescale": true,
+    "do_resize": true,
+    "image_mean": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "image_processor_type": "Lfm3VlImageProcessor",
+    "image_std": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "merge_size": 2,
+    "patch_size": 16,
+    "resample": 3,
+    "rescale_factor": 0.00392156862745098,
+    "size": {
+      "longest_edge": 2097152,
+      "shortest_edge": 65536
+    },
+    "temporal_patch_size": 2,
+    "auto_map": {
+      "AutoImageProcessor": "image_processing_lfm3_vl.Lfm3VlImageProcessor"
+    }
+  },
+  "image_token": "<|image|>",
+  "processor_class": "Lfm3OmniProcessor",
+  "video_processor": {
+    "cap_pixels_per_frame": false,
+    "do_convert_rgb": true,
+    "do_normalize": true,
+    "do_rescale": true,
+    "do_resize": true,
+    "do_sample_frames": true,
+    "fps": 2.0,
+    "image_mean": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "image_std": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "max_frames": 384,
+    "max_video_tokens": 768,
+    "merge_size": 2,
+    "min_frames": 4,
+    "patch_size": 16,
+    "resample": 3,
+    "rescale_factor": 0.00392156862745098,
+    "return_metadata": false,
+    "size": {
+      "longest_edge": 25165824,
+      "shortest_edge": 4096
+    },
+    "temporal_patch_size": 2,
+    "video_processor_type": "Lfm3VlVideoProcessor",
+    "auto_map": {
+      "AutoVideoProcessor": "video_processing_lfm3_vl.Lfm3VlVideoProcessor"
+    }
+  },
+  "video_token": "<|video|>",
+  "vision_end_token": "<|vision_end|>",
+  "vision_markers": true,
+  "vision_start_token": "<|vision_start|>",
+  "auto_map": {
+    "AutoProcessor": "processing_lfm3_omni.Lfm3OmniProcessor"
+  }
+}
