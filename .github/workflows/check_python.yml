@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -32,8 +35,9 @@ jobs:
           tests/test_lfm3_audio/test_config.py tests/test_lfm3_audio/test_weights.py
           tests/test_lfm3_audio/test_tiny_reference.py tests/test_lfm3_audio/test_tiny_decoder.py
           tests/test_lfm3_audio/test_tiny_codec.py tests/test_lfm3_audio/test_gqa_window.py
-          tests/test_lfm3_omni/test_config.py
-          tests/test_d1/test_config.py tests/test_d1/test_tiny_export.py -v
+          tests/test_lfm3_audio/test_infer.py tests/test_lfm3_omni/test_config.py
+          tests/test_d1/test_config.py tests/test_d1/test_tiny_export.py
+          tests/test_check_checkpoint.py -v
       - name: LFM3-Audio runtime, encoder and depth tests on the tiny checkpoint (no download)
         env:
           HF_HUB_OFFLINE: "1"

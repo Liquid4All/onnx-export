@@ -19,7 +19,9 @@ def main():
     parser = argparse.ArgumentParser(description="ONNX inference for LFM3 text models")
     parser.add_argument("--model", required=True, help="Path to ONNX model directory or file")
     parser.add_argument("--prompt", default=None, help="Initial prompt (optional)")
-    parser.add_argument("--max-tokens", type=int, default=100, help="Max tokens to generate")
+    parser.add_argument(
+        "--max-tokens", type=int, default=4096, help="Max tokens per answer (default: %(default)s)"
+    )
     parser.add_argument("--no-think", action="store_true", help="enable_thinking=False")
     parser.add_argument("--no-stream", action="store_true", help="Disable streaming output")
     parser.add_argument("--cpu", action="store_true", help="Force CPU execution (skip CUDA)")

@@ -77,7 +77,7 @@ class TextChat:
 
     @functools.cached_property
     def raw_tokenizer(self) -> og.Tokenizer:
-        """self.tokenizer, but decode keeps special tokens; made on first use (0.4 s for LFM2.5)."""
+        """self.tokenizer, but decode keeps special tokens; made on first use (slow to build)."""
         tokenizer = og.Tokenizer(self.model)
         tokenizer.update_options(skip_special_tokens="false")
         return tokenizer

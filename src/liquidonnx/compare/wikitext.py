@@ -70,8 +70,8 @@ BATCH = 4  # chunks per forward pass of the reference model, as make_ref.py
 # count, so MoE scores move with the machine's core count unless the count is fixed
 THREADS = 13
 
-# KLD ± SE per device against H100 fp32 references: on the CPU EP of the locked onnxruntime
-# nightly, and on the H100's CUDA EP with TF32 off (onnxruntime-gpu 1.31.0). A row gates its own
+# KLD ± SE per device against GPU fp32 references: on the CPU EP of the locked onnxruntime
+# nightly, and on the CUDA EP with TF32 off (onnxruntime-gpu 1.31.0). A row gates its own
 # device only: q8 scores 1.5x to 3.7x higher on the CPU, so a CPU ceiling would let a CUDA q8 grow
 # 1.7x to 4x unnoticed. A precision fails above KLD + 2 SE. The text, MoE and VL q4 rows, and the
 # q4f16 rows converted from them, are the genai builder's k_quant build on the locked onnxruntime
@@ -79,8 +79,8 @@ THREADS = 13
 # 350M / 1.2B / 2.6B / 8B. The other rows do not depend on #32814. The 8B-A1B q4 and q8 rows hold
 # at THREADS (13) intra-op threads only (the CUDA EP leaves q8's int8 QMoE nodes to the CPU EP):
 # at 12 threads q4 scores +0.17%, at 4 CUDA q8 -0.3%. LFM2.5-24B-A2B's fp32 model (96 GB) does not
-# fit on the H100: its reference ran on an MI325X (ROCm, TF32 off), whose logits are within 1e-4 of
-# a CPU run's, and its fp32 decoder scores 0 against it.
+# fit on an 80 GB GPU: its reference ran on a larger one (ROCm, TF32 off), whose logits are within
+# 1e-4 of a CPU run's, and its fp32 decoder scores 0 against it.
 BASELINES = {
     "cpu": {
         "LFM2.5-350M": {"q4": (0.4896, 0.0120), "q4f32": (0.7908, 0.0182)},

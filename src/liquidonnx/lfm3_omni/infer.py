@@ -51,7 +51,10 @@ def main():
     parser.add_argument("--audio", nargs="*", default=[], help="WAV clips of the user turn")
     parser.add_argument("--prompt", help="Text of the user turn (the text to speak for tts)")
     parser.add_argument("--output", help="24 kHz WAV of the generated speech")
-    parser.add_argument("--language", default="English", help='"any": "Perform ASR."')
+    parser.add_argument(
+        "--language",
+        help='default: English for asr, American English for tts; "any": "Perform ASR."',
+    )
     parser.add_argument("--voice", choices=("female", "male"), default="female")
     parser.add_argument("--max-tokens", type=int, default=1024, help="Slots: tokens and frames")
     parser.add_argument("--audio-temperature", type=float)

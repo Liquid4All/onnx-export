@@ -154,6 +154,9 @@ def main():
     logging.basicConfig(level=logging.INFO)
 
     precisions = export_cli.parse_precisions(parser, args, PRECISIONS, PRECISIONS)
+    repo, revision = args.model, REVISIONS.get(args.model)
+    # LFM3-Omni checkpoints too: their speech graphs (the second usage example)
+    export_cli.check_checkpoint(parser, repo, revision, "lfm3-audio-export", "lfm3-omni-export")
     output_dir = export_cli.output_dir(args)
     onnx_dir = output_dir / "onnx"
     onnx_dir.mkdir(parents=True, exist_ok=True)
@@ -165,7 +168,6 @@ def main():
     patterns = [
         p for p in CHECKPOINT_PATTERNS if not (args.skip_export and p.endswith(".safetensors"))
     ]
-    repo, revision = args.model, REVISIONS.get(args.model)
     checkpoint = resolve_checkpoint(repo, patterns, revision=revision)
 
     if not args.skip_export:

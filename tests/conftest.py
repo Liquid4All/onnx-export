@@ -89,14 +89,14 @@ def pytest_addoption(parser):
     parser.addoption(
         "--run-long",
         action="store_true",
-        help="Run the tests marked long (long contexts, wikitext-2, bf16 floors: minutes to hours "
-        "per test); they are skipped otherwise",
+        help="Run the tests marked long (long contexts, wikitext-2, bf16 floors); they are skipped "
+        "otherwise",
     )
     parser.addoption(
         "--run-slow",
         action="store_true",
-        help="Run the tests marked slow (end-to-end runs of minutes per cell on a CPU EP, TF32 "
-        "runs); they are skipped otherwise",
+        help="Run the tests marked slow (long end-to-end runs on a CPU EP, TF32 runs); they are "
+        "skipped otherwise",
     )
     parser.addoption(
         "--wikitext",

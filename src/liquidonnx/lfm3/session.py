@@ -212,7 +212,7 @@ class ONNXTextModel:
     def generate(
         self,
         messages: list,
-        max_new_tokens: int = 100,
+        max_new_tokens: int = 4096,
         stream: bool = True,
         enable_thinking: bool = True,
     ) -> str:
@@ -239,6 +239,8 @@ class ONNXTextModel:
 
         if stream:
             print()
+        if self.tokenizer.eos_token_id not in generated_tokens:
+            logger.warning(f"The answer was cut at --max-tokens ({max_new_tokens} tokens)")
 
         return self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 

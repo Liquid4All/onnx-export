@@ -1,4 +1,5 @@
-"""Arguments, output folder, provenance file and summary shared by the export CLIs."""
+"""Arguments, checkpoint check, output folder, provenance file and summary shared by the export
+CLIs."""
 
 import argparse
 import datetime
@@ -102,6 +103,58 @@ def apply_umask(output_dir: pathlib.Path):
         info = path.lstat()
         if stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) != mode:
             path.chmod(mode)
+
+
+# === Checkpoint check ===
+
+# The CLI that exports each config.json architecture; D1Model is the one d1.config takes
+EXPORTERS = {
+    "Lfm2ForCausalLM": "lfm2-export",
+    "Lfm2MoeForCausalLM": "lfm2-moe-export",
+    "Lfm2VlForConditionalGeneration": "lfm2-vl-export",
+    "Lfm2AudioForConditionalGeneration": "lfm2-audio-export",
+    "Lfm3ForCausalLM": "lfm3-export",
+    "Lfm3VlForConditionalGeneration": "lfm3-vl-export",
+    "Lfm3AudioForConditionalGeneration": "lfm3-audio-export",
+    "Lfm3OmniForConditionalGeneration": "lfm3-omni-export",
+    "D1Model": "d1-export",
+}
+
+
+def checkpoint_error(cfg: dict, model: str, *clis: str) -> str | None:
+    """Why the CLIs clis don't export model, whose config.json is cfg: an LFM2-based d1 model,
+    another CLI's architecture (EXPORTERS) or a quantized checkpoint. None otherwise: an
+    architecture EXPORTERS has no CLI for is then left to the CLI's config parser."""
+    architecture = (cfg.get("architectures") or [None])[0]
+    auto_model = str((cfg.get("auto_map") or {}).get("AutoModel"))
+    # d1-3B's config is LFM2-VL's but for auto_map; d1-omni-600M's architecture is D1OmniModel
+    if architecture != "D1Model" and auto_model.endswith((".D1Model", ".D1OmniModel")):
+        return (
+            f"{model} is an LFM2-based d1 model, which these exporters don't support (see README 1)"
+        )
+    exporter = EXPORTERS.get(architecture)
+    if exporter and exporter not in clis:
+        return f"export {model} ({architecture}) with {exporter}"
+    if cfg.get("quantization_config"):
+        return (
+            f"{model} is quantized (config.json has a quantization_config): export the original "
+            "checkpoint it was converted from, not an FP8, NVFP4 or MLX conversion"
+        )
+    return None
+
+
+def check_checkpoint(parser: argparse.ArgumentParser, model: str, revision: str | None, *clis: str):
+    """parser.error when the CLIs clis don't export model (checkpoint_error), read from its
+    config.json alone: a local folder's, or the Hub's at revision (None: main). The LFM3 exporters
+    call it before they create their output folder or download weights."""
+    if pathlib.Path(model).is_dir():
+        path = pathlib.Path(model) / "config.json"
+    else:
+        from huggingface_hub import hf_hub_download
+
+        path = pathlib.Path(hf_hub_download(model, "config.json", revision=revision))
+    if error := checkpoint_error(json.loads(path.read_text()), model, *clis):
+        parser.error(error)
 
 
 # === Provenance ===
