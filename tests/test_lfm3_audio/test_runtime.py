@@ -25,13 +25,12 @@ Run with:
 
 import logging
 import pathlib
-import platform
 import re
 
 import numpy as np
 import pytest
 import torch
-from helpers import processed_probs
+from helpers import expect_known_failure, processed_probs
 
 from liquidonnx.lfm3_audio import infer as audio_infer
 from liquidonnx.lfm3_audio.session import (
@@ -533,9 +532,9 @@ S2S_SCHEDULE = r"(T6 A12 )*T[1-6] A\d+( T1)?"
 # The rank below which assert_reference_path holds a bundle's S2S text (test_lfm3_omni's
 # test_image_answer holds image answers to the reference's top 5 too)
 TOP_K = 5
-# (model, precision, case, host(ep) or "*") -> the evidence of a known failure of
-# test_onnx_generation, xfail(strict=True)
-KNOWN_GENERATION: dict[tuple, str] = {}
+# (model, test, parameters' id, host or "*") -> the evidence of a known failure
+# (helpers.expect_known_failure)
+KNOWN_FAILURES: dict[tuple, str] = {}
 # Upper bounds of the TTS round trips' WER (SENTENCES pooled)
 MAX_ROUND_TRIP_WER = {p: 0.0 for p in PRECISIONS}
 
@@ -659,20 +658,6 @@ def assert_reference_path(reference, processor, waves, ids, generation, top_1: b
     assert not flips, f"confident text slots where the bundle left the reference's top: {flips}"
 
 
-def host(ep: str) -> str:
-    """The key of a known failure's host: "cuda", or the CPU EP and its machine, "cpu-x86_64" or
-    "cpu-arm64"."""
-    return ep if ep == "cuda" else f"cpu-{platform.machine()}"
-
-
-def expect_known_failure(request, known: dict[tuple, str], key: tuple, ep: str):
-    """Marks the running test xfail(strict=True) with known's evidence for key + (host(ep),) or
-    key + ("*",) (every host), so that a fix (XPASS) fails it as a regression would."""
-    reason = known.get((*key, host(ep))) or known.get((*key, "*"))
-    if reason:
-        request.applymarker(pytest.mark.xfail(strict=True, reason=reason))
-
-
 def onnx_generation(model, onnx_cases, case: str):
     """The bundle's greedy generation of an ONNX_CASES case, with the reference's orders."""
     kind, _, seed = ONNX_CASES[case]
@@ -736,8 +721,8 @@ def test_onnx_generation(
     int4). The speech codes fed back diverge from the first frames, and the woodworks S2S answer
     can flip at a near-tie early on (bf16 PyTorch's does too), so its words and whether its speech
     ends within the slot cap follow the precision, as they follow the MaskGIT order seed in
-    float32 and bf16 PyTorch (README 3.1d). KNOWN_GENERATION's cells are xfail(strict=True)."""
-    expect_known_failure(request, KNOWN_GENERATION, (model_id, precision, case), ep)
+    float32 and bf16 PyTorch (README 3.1d)."""
+    expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     model = onnx_models(precision)
     generation = onnx_generation(model, onnx_cases, case)
     assert_generation(
@@ -763,11 +748,11 @@ def test_onnx_generation_tf32(
     """The default runtime on CUDA (ONNXAudioModel(tf32=True)) against the same bundle with TF32
     off: KL(off || on) of the prompt's last logits, the speech encoder's features and the codec's
     waveform of TF32 off's frames, and where the greedy generations part (logged; the KL bounded
-    by TF32_MAX_KL); then TF32 on's generation, held to test_onnx_generation's rules (and its
-    KNOWN_GENERATION cells), ends its turn where TF32 off's does."""
+    by TF32_MAX_KL); then TF32 on's generation, held to test_onnx_generation's rules, ends its
+    turn where TF32 off's does. KNOWN_FAILURES' cells of this test are xfail."""
     if ep != "cuda":
         pytest.skip("TF32 is a CUDA EP option")
-    expect_known_failure(request, KNOWN_GENERATION, (model_id, precision, case), ep)
+    expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     off, on = onnx_models(precision), onnx_models(precision, tf32=True)
     waves, ids, _, _ = onnx_cases(case)
     features = [model.encode_audio(waves) if waves else None for model in (off, on)]

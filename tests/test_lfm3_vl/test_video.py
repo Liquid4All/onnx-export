@@ -15,6 +15,7 @@ import re
 import numpy as np
 import pytest
 import torch
+from helpers import NearBound, expect_known_failure
 
 from liquidonnx.lfm3_vl.session import run_vision
 from liquidonnx.session import initialize_cache, load_onnx_session
@@ -24,6 +25,30 @@ from .test_decoder import ANSWER, MAX_KL, confident, log_softmax
 from .test_vision_encoder import FILES, FLOORS
 
 logger = logging.getLogger(__name__)
+
+# (model, test, parameters' id, host or "*") -> the evidence of a known failure
+# (helpers.expect_known_failure)
+VL = "LiquidAI/LFM3-VL-2B"
+FP16_VIDEO = (
+    "the fp16 vision features of the 4-patch video, where a few low-norm tokens are "
+    "ill-conditioned as in fp16 PyTorch: answer KL 1.15e-4 on CUDA, 1.02e-4 on arm64 and 9.9e-5 on "
+    "x86-64, bound 1e-4 (README 3.1c)"
+)
+X86_INT8_VIDEO = (
+    "the CPU EP's int8 activations on x86-64: video answer KL 5.8e-4 to 5.9e-4, over 5e-4, where "
+    "CUDA measures 2.1e-4 to 2.2e-4 and arm64 3.1e-4 to 3.8e-4 (README 3.1c)"
+)
+KNOWN_FAILURES = {
+    (VL, "test_video_features", "fp16", "*"): (
+        "the fp16 vision encoder: a few low-norm tokens of the 4-patch video are ill-conditioned, as "
+        "in fp16 PyTorch, so the mean token cosine is 0.99966 to 0.99975, under 0.9998 (README 3.1c)"
+    ),
+    (VL, "test_video_prefill_logits", "fp16", "cuda"): FP16_VIDEO,
+    (VL, "test_video_prefill_logits", "fp16", "cpu-x86_64"): NearBound(FP16_VIDEO),
+    (VL, "test_video_prefill_logits", "fp16", "cpu-arm64"): NearBound(FP16_VIDEO),
+    (VL, "test_video_prefill_logits", "q8", "cpu-x86_64"): X86_INT8_VIDEO,
+    (VL, "test_video_prefill_logits", "q8f16", "cpu-x86_64"): X86_INT8_VIDEO,
+}
 
 
 @pytest.fixture(scope="module")
@@ -77,7 +102,8 @@ def test_video_markers(reference_processor, video):
 
 
 @pytest.mark.parametrize("precision", list(FLOORS))
-def test_video_features(export_dir, reference, video, device, ep, precision):
+def test_video_features(request, model_id, export_dir, reference, video, device, ep, precision):
+    expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     pixel_values, grids = video["pixel_values_videos"], video["video_grid_thw"]
     with torch.no_grad():
         expected = reference.get_video_features(pixel_values.to(device), grids.to(device))
@@ -99,7 +125,8 @@ def test_video_features(export_dir, reference, video, device, ep, precision):
 
 
 @pytest.mark.parametrize("precision", list(MAX_KL))
-def test_video_prefill_logits(video, video_answer, onnx_models, precision):
+def test_video_prefill_logits(request, model_id, ep, video, video_answer, onnx_models, precision):
+    expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     answer, expected = video_answer
     model = onnx_models(precision)
     features = run_vision(

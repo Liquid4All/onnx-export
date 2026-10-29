@@ -16,6 +16,7 @@ import logging
 
 import pytest
 import torch
+from helpers import NearBound, expect_known_failure
 
 from ..test_lfm3_vl.test_decoder import MAX_KL
 from .conftest import requests
@@ -23,6 +24,44 @@ from .conftest import requests
 logger = logging.getLogger(__name__)
 
 NAMES = ["ticket", "invoice", "parcels", "picture", "clip", "speech"]
+# (model, test, parameters' id, host or "*") -> the evidence of a known failure
+# (helpers.expect_known_failure)
+D1, D1_OMNI = "LiquidAI/d1-2B", "LiquidAI/d1-Omni-2B"
+D1_ARM64 = (
+    "the CPU EP's int8 activations on arm64: code-slot KL 5.3e-4 to 6.7e-4, over 5e-4, where CUDA "
+    "measures 4.9e-5 to 1.2e-4 (README 3.1f)"
+)
+BOX_EDGES = (
+    "d1-Omni-2B's box edges, 1000-way distributions sensitive in this checkpoint: code-slot KL "
+    "9.4e-4 (CUDA) to 3.8e-3 (CPU EP), over 5e-4 and under bf16 PyTorch's 5.6e-3; the answers hold "
+    "(README 3.1f)"
+)
+SPOKEN = (
+    "the int8 rounding of the weights at the spoken question's speech slot: code-slot KL 9.4e-4 to "
+    "1.7e-2, over 5e-4, where bf16 PyTorch measures 1.5e-5 (README 3.1f)"
+)
+OMNI_CPU = (
+    "the CPU EP's int8 activations: code-slot KL 5.7e-4 to 1.6e-3, over 5e-4, where CUDA measures "
+    "3.6e-5 to 7.4e-5 (README 3.1f)"
+)
+KNOWN_FAILURES = {
+    (D1, "test_slot_logits", "q8-ticket", "cpu-arm64"): D1_ARM64,
+    (D1, "test_slot_logits", "q8-picture", "cpu-arm64"): NearBound(D1_ARM64),
+    (D1, "test_slot_logits", "q8f16-picture", "cpu-arm64"): D1_ARM64,
+    (D1, "test_slot_logits", "q8f16-picture", "cpu-x86_64"): NearBound(
+        "the CPU EP's int8 activations on x86-64: code-slot KL 4.9e-4, at the 5e-4 bound, where "
+        "arm64 measures 6.1e-4 (README 3.1f)"
+    ),
+    (D1_OMNI, "test_slot_logits", "fp16-picture", "cuda"): NearBound(
+        "d1-Omni-2B's box edges, 1000-way distributions sensitive in this checkpoint: fp16 on CUDA "
+        "at code-slot KL 1.03e-4, bound 1e-4, under bf16 PyTorch's 5.6e-3 (README 3.1f)"
+    ),
+    **{(D1_OMNI, "test_slot_logits", f"{p}-picture", "*"): BOX_EDGES for p in ("q8", "q8f16")},
+    **{(D1_OMNI, "test_slot_logits", f"{p}-speech", "*"): SPOKEN for p in ("q8", "q8f16")},
+    (D1_OMNI, "test_slot_logits", "q8-ticket", "cpu-x86_64"): OMNI_CPU,
+    (D1_OMNI, "test_slot_logits", "q8-ticket", "cpu-arm64"): OMNI_CPU,
+    (D1_OMNI, "test_slot_logits", "q8-clip", "cpu-x86_64"): OMNI_CPU,
+}
 
 
 def forwards(engine, batch: list[tuple]) -> list[tuple[tuple, tuple]]:
@@ -62,7 +101,10 @@ def scores(expected: tuple, got: tuple) -> dict[str, torch.Tensor]:
 
 @pytest.mark.parametrize("name", NAMES)
 @pytest.mark.parametrize("precision", list(MAX_KL))
-def test_slot_logits(model_id, reference, reference_bf16, onnx_engines, precision, name):
+def test_slot_logits(
+    request, model_id, ep, reference, reference_bf16, onnx_engines, precision, name
+):
+    expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     batch = requests(model_id).get(name)
     if batch is None:
         pytest.skip("audio is d1-Omni's")

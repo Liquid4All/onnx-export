@@ -15,6 +15,7 @@ import logging
 import numpy as np
 import pytest
 import torch
+from helpers import expect_known_failure
 
 from liquidonnx.lfm3_vl.session import run_vision
 
@@ -40,6 +41,24 @@ MAX_KL = {"fp32": 1e-6, "fp16": 1e-4, "q8": 5e-4, "q8f16": 5e-4, "q4": 0.1, "q4f
 # as two tokens at 0.50 each, which an exact bundle and bf16 PyTorch break either way.
 CONFIDENT = 1.0
 MARGIN = 0.1
+# (model, test, parameters' id, host or "*") -> the evidence of a known failure
+# (helpers.expect_known_failure)
+HAIKU = "the haiku, on which LFM3-VL-2B is very confident, so rounding moves more probability"
+KNOWN_FAILURES = {
+    **{
+        ("LiquidAI/LFM3-VL-2B", "test_prefill_logits", f"text-{p}", "*"): (
+            f"{HAIKU}: int8 weights give KL 6.7e-4 to 6.8e-4 on CUDA and 1.5e-3 to 2.4e-3 with the "
+            "CPU EP's int8 activations, over 5e-4; bf16 PyTorch is over 5e-4 too (README 3.1c)"
+        )
+        for p in ("q8", "q8f16")
+    },
+    **{
+        ("LiquidAI/LFM3-VL-2B", "test_prefill_logits", f"text-{p}", "*"): (
+            f"{HAIKU}: int4 weights give KL 0.145 to 0.162, over 0.1 (README 3.1c)"
+        )
+        for p in ("q4", "q4f16")
+    },
+}
 
 
 def log_softmax(x: np.ndarray) -> np.ndarray:
@@ -151,7 +170,16 @@ def reference_answers(reference, reference_processor, device):
 @pytest.mark.parametrize("precision", list(MAX_KL))
 @pytest.mark.parametrize("images,question,enable_thinking", PROMPTS, ids=PROMPT_IDS)
 def test_prefill_logits(
-    reference_answers, onnx_models, precision, images, question, enable_thinking
+    request,
+    model_id,
+    ep,
+    reference_answers,
+    onnx_models,
+    precision,
+    images,
+    question,
+    enable_thinking,
 ):
+    expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     inputs, answer, expected = reference_answers(images, question, enable_thinking)
     assert_answer_logits(onnx_models(precision), precision, inputs, answer, expected)

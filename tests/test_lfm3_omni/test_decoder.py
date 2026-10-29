@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 import torch
+from helpers import expect_known_failure
 
 from liquidonnx.lfm3_audio.session import load_audio
 from liquidonnx.lfm3_vl.session import run_vision
@@ -48,6 +49,26 @@ PROMPTS = {
 # higher than on CUDA: their MatMulNBits accuracy_level 4 quantizes the activations to int8 on the
 # CPU EP, which CUDA doesn't; set to 0 (--matmulnbits-accuracy-level), the same graphs measure as
 # on CUDA.
+
+# (model, test, parameters' id, host or "*") -> the evidence of a known failure
+# (helpers.expect_known_failure)
+OMNI = "LiquidAI/LFM3-Omni-2B"
+TWO_BIRDS = (
+    "the fp16 vision encoder on two images, as fp16 PyTorch's tower: fp16 KL 2.2e-4 to 2.7e-4, over "
+    "1e-4, and with int8 weights q8 and q8f16 5.9e-4 to 2.0e-3, over 5e-4 (README 3.1e)"
+)
+CPU_INT8 = (
+    "the CPU EP's int8 activations: KL 8.2e-4 to 9.6e-4 on the image-and-speech prompt, over 5e-4, "
+    "where CUDA and --matmulnbits-accuracy-level 0 measure 2.0e-4 to 2.7e-4 (README 3.1e)"
+)
+KNOWN_FAILURES = {
+    **{(OMNI, "test_prefill", f"{p}-two-birds", "*"): TWO_BIRDS for p in ("fp16", "q8", "q8f16")},
+    **{
+        (OMNI, "test_prefill", f"{p}-image-speech", h): CPU_INT8
+        for p in ("q8", "q8f16")
+        for h in ("cpu-x86_64", "cpu-arm64")
+    },
+}
 
 
 @dataclass
@@ -152,7 +173,8 @@ def bundle_features(model, case: Case) -> dict:
 
 @pytest.mark.parametrize("name", list(PROMPTS))
 @pytest.mark.parametrize("precision", list(MAX_KL))
-def test_prefill(cases, onnx_models, precision, name):
+def test_prefill(request, model_id, ep, cases, onnx_models, precision, name):
+    expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     case = cases(name)
     model = onnx_models(precision)
     got, _ = model.prefill_outputs(

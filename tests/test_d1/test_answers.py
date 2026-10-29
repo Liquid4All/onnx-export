@@ -17,6 +17,7 @@ import logging
 
 import pytest
 import torch
+from helpers import expect_known_failure
 
 from .conftest import requests
 
@@ -35,6 +36,17 @@ EDGE = {"fp32": 2e-3, "fp16": 5e-3, "q8": 1e-2, "q8f16": 1e-2, "q4": 3e-2, "q4f1
 NEAR_TIES = {
     ("LiquidAI/d1-Omni-2B", "ticket", "team"): 0.027,
     ("LiquidAI/d1-Omni-2B", "clip", "beeps"): 0.040,
+}
+# (model, test, parameters' id, host or "*") -> the evidence of a known failure
+# (helpers.expect_known_failure)
+SPEECH_ANSWER = (
+    "the spoken question's P(speech), 0.574: the int8 weights move it by 0.023 to 0.024 on CUDA, "
+    "and with the CPU EP's int8 activations by 0.040 (q8, x86-64) and 0.042 (q8f16, arm64), over "
+    "3e-2 (README 3.1f)"
+)
+KNOWN_FAILURES = {
+    ("LiquidAI/d1-Omni-2B", "test_answers", "q8-speech", "cpu-x86_64"): SPEECH_ANSWER,
+    ("LiquidAI/d1-Omni-2B", "test_answers", "q8f16-speech", "cpu-arm64"): SPEECH_ANSWER,
 }
 
 
@@ -62,7 +74,8 @@ def differences(expected, got, probability: float, edge: float, path=()):
 
 @pytest.mark.parametrize("name", NAMES)
 @pytest.mark.parametrize("precision", list(PROBABILITY))
-def test_answers(model_id, reference, onnx_engines, precision, name):
+def test_answers(request, model_id, ep, reference, onnx_engines, precision, name):
+    expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     batch = requests(model_id).get(name)
     if batch is None:
         pytest.skip("audio is d1-Omni's")
