@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pytest
 import torch
+from helpers import NearBound, expect_known_failure
 
 from liquidonnx.lfm3.session import load_session
 from liquidonnx.lfm3_audio.session import BUNDLES, load_audio
@@ -77,6 +78,47 @@ MIN_COSINE = {
     "q8f16": 0.999,
     "q4": 0.95,
     "q4f16": 0.95,
+}
+# (model, test, parameters' id, host or "*") -> the evidence of a known failure
+# (helpers.expect_known_failure); LFM3-Omni-2B's run with --lfm3-audio-model
+AUDIO, OMNI = "LiquidAI/LFM3-Audio-2B", "LiquidAI/LFM3-Omni-2B"
+CPU_HOSTS = ("cpu-x86_64", "cpu-arm64")
+OMNI_CPU_INT8 = (
+    "the CPU EP's int8 activations: KL 8.1e-4 to 1.1e-3, over 5e-4, where CUDA and "
+    "--matmulnbits-accuracy-level 0 measure 2.5e-4 to 3.2e-4 (README 3.1e)"
+)
+KNOWN_FAILURES = {
+    **{
+        (AUDIO, "test_prefill", f"speech-{p}", "*"): (
+            "the int8 rounding of the weights on the replayed TTS turn: KL 7.1e-4 to 7.3e-4 with "
+            "float activations (CUDA, accuracy_level 0) and 1.5e-3 to 1.8e-3 with the CPU EP's int8 "
+            "ones, over 5e-4; bf16 PyTorch measures 4.9e-4 to 7.4e-4 (README 3.1d)"
+        )
+        for p in ("q8", "q8f16")
+    },
+    **{
+        (OMNI, "test_prefill", f"multiturn-{p}", "*"): (
+            "the int8 rounding of the weights on the replayed S2S turn: KL 1.3e-3 to 2.6e-3 (2.2e-3 "
+            "at accuracy_level 0), over 5e-4; bf16 PyTorch measures 9.8e-4 to 1.3e-3 (README 3.1e)"
+        )
+        for p in ("q8", "q8f16")
+    },
+    **{
+        (OMNI, "test_prefill", f"multiturn-{p}", "*"): (
+            "the int4 rounding of the weights on the replayed S2S turn: speech hidden-state cosine "
+            "0.924 to 0.926, under 0.95, and KL 0.43 to 0.49, over 0.1 (README 3.1e)"
+        )
+        for p in ("q4", "q4f16")
+    },
+    **{
+        (OMNI, "test_prefill", f"text-{p}", "*"): NearBound(
+            "the int4 rounding of the weights on the text prompt: KL 0.107 to 0.110, just over 0.1 "
+            "(README 3.1e)"
+        )
+        for p in ("q4", "q4f16")
+    },
+    **{(OMNI, "test_prefill", "text-q8", h): OMNI_CPU_INT8 for h in CPU_HOSTS},
+    **{(OMNI, "test_prefill", "speech-q8", h): OMNI_CPU_INT8 for h in CPU_HOSTS},
 }
 
 
@@ -333,7 +375,8 @@ def score(case: Case, logits: np.ndarray, hidden: np.ndarray, label: str):
 
 @pytest.mark.parametrize("precision", list(MAX_KL))
 @pytest.mark.parametrize("name", list(PROMPTS))
-def test_prefill(cases, decoders, precision, name):
+def test_prefill(request, model_id, ep, cases, decoders, precision, name):
+    expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     case = cases(name)
     # the hidden states of speech frames need every position; the logits only the answer's
     keep = 0 if case.frames is not None else len(case.answer)

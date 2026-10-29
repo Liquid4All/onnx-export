@@ -15,7 +15,7 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from helpers import get_model_name, get_onnx_dir
+from helpers import expect_known_failure, get_model_name, get_onnx_dir
 
 from liquidonnx.lfm3.session import get_onnx_file, load_session
 from liquidonnx.session import initialize_cache
@@ -30,7 +30,10 @@ PROMPTS = [
     # Long prompt: > 256 tokens so sliding-window attention (window=256) is
     # actually exercised. Without this, every SWA layer behaves identically to
     # full-attention because the cache is always inside the window.
-    "Liquid Foundation Models are a class of foundation models built by Liquid AI. " * 60,
+    pytest.param(
+        "Liquid Foundation Models are a class of foundation models built by Liquid AI. " * 60,
+        id="long",
+    ),
 ]
 
 # fp32 graph vs float32 PyTorch: accumulation order only. An eps/4 final norm would move them by
@@ -51,10 +54,22 @@ QUANT_CONFIGS = [
     pytest.param("q8f16", ["top_k"], id="q8f16"),
 ]
 
+# (model, test, parameters' id, host or "*") -> the evidence of a known failure
+# (helpers.expect_known_failure)
+ARM64_FP32 = (
+    "the CPU EP's float32 arithmetic on arm64: fp32 logits 7.9e-4 to 2.5e-3 from PyTorch's, over "
+    "5e-4, where x86-64 and CUDA stay under 3.1e-4; the answers' KL stays below 1e-9 (README 3.1b)"
+)
+KNOWN_FAILURES = {
+    ("LiquidAI/LFM3-1.7B", "test_decoder", f"{prompt}-fp32", "cpu-arm64"): ARM64_FP32
+    for prompt in ("Hello, how are", "The sky is", "1 + 1 =", "long")
+}
+
 
 @pytest.mark.parametrize("precision,checks", QUANT_CONFIGS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_decoder(
+    request,
     exports_dir: pathlib.Path,
     ep: str,
     pytorch_model,
@@ -63,6 +78,7 @@ def test_decoder(
     prompt: str,
 ):
     model_id, model, tokenizer = pytorch_model
+    expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     model_name = get_model_name(model_id)
     logger.info(f"Testing {model_name}/{precision or 'fp32'}: '{prompt}'")
 

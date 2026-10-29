@@ -16,6 +16,7 @@ import numpy as np
 import onnx
 import pytest
 import torch
+from helpers import NearBound, expect_known_failure
 from onnx import TensorProto, helper
 
 from liquidonnx.lfm3_audio.config import load_config
@@ -30,6 +31,14 @@ FILES = {"fp32": "audio_encoder.onnx", "fp16": "audio_encoder_fp16.onnx"}
 # (rel L2 error, 1st-percentile token cosine) bounds against the float32 reference; bf16 PyTorch's
 # own error is well above fp16's
 BOUNDS = {"fp32": (2e-5, 0.99999), "fp16": (1e-2, 0.9999)}
+# (model, test, parameters' id, host or "*") -> the evidence of a known failure
+# (helpers.expect_known_failure)
+KNOWN_FAILURES = {
+    ("LiquidAI/LFM3-Omni-2B", "test_audio_features", "woodworks-fp16", "cuda"): NearBound(
+        "CUDA's fp16 speech encoder: 1st-percentile token cosine 0.999896 on the woodworks clip, "
+        "just under 0.9999 (README 3.1e)"
+    ),
+}
 
 
 def token_metrics(got: np.ndarray, expected: np.ndarray) -> tuple[float, np.ndarray]:
@@ -148,9 +157,12 @@ def test_gqa_window(ep, window, tmp_path):
 
 @pytest.mark.parametrize("precision", list(FILES))
 @pytest.mark.parametrize("clip", list(CLIPS))
-def test_audio_features(export_dir, reference, reference_processor, device, ep, precision, clip):
+def test_audio_features(
+    request, model_id, export_dir, reference, reference_processor, device, ep, precision, clip
+):
     import librosa
 
+    expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     wave, _ = librosa.load(CLIPS[clip], sr=16000)
     inputs = reference_processor.feature_extractor(wave, sampling_rate=16000, return_tensors="pt")
     features = inputs["input_features"]

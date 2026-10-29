@@ -60,8 +60,8 @@ rather than the full suite:
 uv run pytest tests/test_lfm2/test_decoder.py -v -k "350M and q4"
 uv run pytest tests/test_lfm2_vl/test_decoder.py -v -k "450M and q4"
 uv run pytest tests/test_lfm3/test_decoder.py -v -k "q4 and not q4f"  # LFM3-1.7B, README 3.1b
-uv run pytest tests/test_lfm3_vl/test_decoder.py -v -k "q4 and not q4f16 and not text"  # LFM3-VL-2B, README 3.1c
-uv run pytest tests/test_lfm3_audio/test_decoder.py -v -k "q4 and not multiturn"  # LFM3-Audio-2B, README 3.1d
+uv run pytest tests/test_lfm3_vl/test_decoder.py -v -k "q4 and not q4f16"  # LFM3-VL-2B, README 3.1c
+uv run pytest tests/test_lfm3_audio/test_decoder.py -v -k "q4 and not q4f16"  # LFM3-Audio-2B, README 3.1d
 uv run pytest tests/test_d1/test_answers.py -v --d1-model LiquidAI/d1-2B -k q4  # d1, README 3.1f
 uv run pytest tests/test_lfm3_omni/test_decoder.py -v -k q4  # LFM3-Omni-2B, README 3.1e
 ```

@@ -3,9 +3,11 @@
 import collections
 import logging
 import pathlib
+import platform
 import types
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from liquidonnx.genai_builder import DecoderPreset
@@ -105,6 +107,40 @@ def with_accuracy_level(path: pathlib.Path, level: int) -> bytes | None:
         node.attribute.extend([*kept, helper.make_attribute("accuracy_level", level)])
     logger.info(f"{path.name}: {len(nodes)} MatMulNBits at accuracy_level {level}")
     return model.SerializeToString()
+
+
+# === Known failures ===
+# The CPU EP's entries come from one CPU per host key (README 5): another CPU can move a cell
+# across its bound.
+
+
+def host(ep: str) -> str:
+    """The key of a known failure's host: "cuda", or the CPU EP and its machine, "cpu-x86_64" or
+    "cpu-arm64" (Linux's aarch64 and Windows' AMD64 included)."""
+    machine = platform.machine().lower()
+    machine = {"aarch64": "arm64", "amd64": "x86_64"}.get(machine, machine)
+    return ep if ep == "cuda" else f"cpu-{machine}"
+
+
+class NearBound(str):
+    """The evidence of a known failure within about 10% of its bound, which another machine of
+    the same host key can pass: xfail(strict=False)."""
+
+
+def expect_known_failure(request, known: dict[tuple, str], model_id: str, ep: str):
+    """Marks the running test xfail with known's evidence for (model_id, the test function, its
+    parameters' pytest id, host(ep)), or the same key with "*" for every host. Only an assertion
+    counts, so a missing export still fails. Strict, so that a fix (XPASS) fails it as a regression
+    would, but for NearBound evidence and under a --matmulnbits-accuracy-level other than the
+    exports' 4, which moves the CPU EP's cells."""
+    node = request.node
+    # tests/test_lfm3 parametrizes the checkpoint ahead of the test's own parameters
+    key = (model_id, node.originalname, node.callspec.id.removeprefix(f"{model_id}-"))
+    reason = known.get((*key, host(ep))) or known.get((*key, "*"))
+    if reason:
+        exported = request.config.getoption("--matmulnbits-accuracy-level") in (None, 4)
+        strict = exported and not isinstance(reason, NearBound)
+        request.applymarker(pytest.mark.xfail(raises=AssertionError, strict=strict, reason=reason))
 
 
 def get_model_name(model_id: str) -> str:

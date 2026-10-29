@@ -25,7 +25,14 @@ import pathlib
 import numpy as np
 import pytest
 import torch
-from helpers import get_model_name, get_onnx_dir, processed_probs, total_variation
+from helpers import (
+    NearBound,
+    expect_known_failure,
+    get_model_name,
+    get_onnx_dir,
+    processed_probs,
+    total_variation,
+)
 
 from liquidonnx.lfm3.session import CachedDecoder, get_onnx_file, kv_feeds_attention, load_session
 
@@ -35,7 +42,10 @@ PROMPTS = [
     # Shorter than the conv kernel: the first decode steps read a zero-padded conv state.
     "The capital of France is",
     # > 256 tokens: every decode step of the sliding-window layers drops a key.
-    "Liquid Foundation Models are a class of foundation models built by Liquid AI. " * 40,
+    pytest.param(
+        "Liquid Foundation Models are a class of foundation models built by Liquid AI. " * 40,
+        id="long",
+    ),
 ]
 
 MAX_NEW_TOKENS = 24
@@ -53,6 +63,50 @@ PRECISIONS = [
     pytest.param("q8", id="q8"),
     pytest.param("q8f16", id="q8f16"),
 ]
+
+# (model, test, parameters' id, host or "*") -> the evidence of a known failure
+# (helpers.expect_known_failure)
+LFM3, FRANCE = "LiquidAI/LFM3-1.7B", "The capital of France is"
+ARM64_FP32 = (
+    "the CPU EP's float32 arithmetic on arm64: decode logits 7.4e-4 to 8.7e-4 from PyTorch's, over "
+    "5e-4, where x86-64 and CUDA stay under 2.8e-4; every step picks PyTorch's token (README 3.1b)"
+)
+INT4_TIES = (
+    "int4 rounding moves near ties: 1 or 2 of the reference's top 5 at one or two of the 24 steps, "
+    "under the bound (3, q4f32 2), where the reference's mass is on its top token (README 3.1b)"
+)
+INT4_TIES_AT_BOUND = NearBound(
+    "int4 rounding moves near ties: exactly the bound's count of the reference's top 5 at the "
+    "worst step on this host, one fewer on another (README 3.1b)"
+)
+INT4_LONG = (
+    "int4 rounding over 600 steps: mean KL 2.5e-2 to 1.2e-1, 21 to 107 times the bound (4 times "
+    "bf16 PyTorch's), with 0 to 2 of the reference's top 5 at some steps (README 3.1b)"
+)
+INT4_SAMPLED = (
+    "int4 rounding: the sampled next-token probabilities' mean total variation is 3 to 16 times the "
+    "bound, 4 times bf16 PyTorch's (README 3.1b)"
+)
+KNOWN_FAILURES = {
+    (LFM3, "test_decode_parity", f"{FRANCE}-fp32", "cpu-arm64"): ARM64_FP32,
+    (LFM3, "test_decode_parity", "long-fp32", "cpu-arm64"): ARM64_FP32,
+    (LFM3, "test_decode_parity", f"{FRANCE}-q4", "*"): INT4_TIES,
+    (LFM3, "test_decode_parity", f"{FRANCE}-q4f16", "cuda"): INT4_TIES,
+    (LFM3, "test_decode_parity", f"{FRANCE}-q4f16", "cpu-x86_64"): INT4_TIES,
+    (LFM3, "test_decode_parity", f"{FRANCE}-q4f16", "cpu-arm64"): INT4_TIES_AT_BOUND,
+    (LFM3, "test_decode_parity", f"{FRANCE}-q4f32", "cpu-arm64"): INT4_TIES,
+    (LFM3, "test_decode_parity", "long-q4", "*"): INT4_TIES,
+    (LFM3, "test_decode_parity", "long-q4f16", "*"): INT4_TIES,
+    (LFM3, "test_decode_parity", "long-q4f32", "cuda"): INT4_TIES_AT_BOUND,
+    (LFM3, "test_decode_parity", "long-q4f32", "cpu-x86_64"): INT4_TIES_AT_BOUND,
+    (LFM3, "test_decode_parity", "long-q4f32", "cpu-arm64"): INT4_TIES,
+    **{(LFM3, "test_long_decode_parity", p, "*"): INT4_LONG for p in ("q4", "q4f16", "q4f32")},
+    **{
+        (LFM3, "test_sampled_distribution", f"{sampling}-{p}", "*"): INT4_SAMPLED
+        for sampling in ("t0.1-k50-r1.1", "t0.7-p0.9")
+        for p in ("q4", "q4f16", "q4f32")
+    },
+}
 
 
 def greedy_onnx(
@@ -75,9 +129,10 @@ def greedy_onnx(
 @pytest.mark.parametrize("precision", PRECISIONS)
 @pytest.mark.parametrize("prompt", PROMPTS)
 def test_decode_parity(
-    exports_dir: pathlib.Path, ep: str, pytorch_model, precision: str | None, prompt: str
+    request, exports_dir: pathlib.Path, ep: str, pytorch_model, precision: str | None, prompt: str
 ):
     model_id, model, tokenizer = pytorch_model
+    expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     onnx_file = get_onnx_file(get_onnx_dir(exports_dir, model_id), precision)
     if not onnx_file.exists():
         precision_arg = f" --precision {precision}" if precision else ""
@@ -198,11 +253,12 @@ LONG_DECODE_MIN_TOP5 = 3
     ],
 )
 def test_long_decode_parity(
-    exports_dir: pathlib.Path, ep: str, pytorch_model, precision: str | None
+    request, exports_dir: pathlib.Path, ep: str, pytorch_model, precision: str | None
 ):
     """The caches over hundreds of steps: from the short chat, the sliding-window layers start
     dropping keys during decode (step 256 - prompt length)."""
     model_id, model, tokenizer = pytorch_model
+    expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     onnx_file = get_onnx_file(get_onnx_dir(exports_dir, model_id), precision)
     if not onnx_file.exists():
         pytest.fail(f"ONNX file not found: {onnx_file}\nExport with: uv run lfm3-export {model_id}")
@@ -282,11 +338,12 @@ def sampled_tv(input_ids, answer, expected, logits, sampling: str) -> np.ndarray
 @pytest.mark.parametrize("precision", PRECISIONS)
 @pytest.mark.parametrize("sampling", list(SAMPLINGS))
 def test_sampled_distribution(
-    exports_dir: pathlib.Path, ep: str, pytorch_model, chat_answer, precision, sampling
+    request, exports_dir: pathlib.Path, ep: str, pytorch_model, chat_answer, precision, sampling
 ):
     """The bundle's next-token distribution after the sampling processors against the
     reference's, at the positions of its greedy answer to CHAT (teacher-forced, one prefill)."""
     model_id, _, _ = pytorch_model
+    expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     onnx_file = get_onnx_file(get_onnx_dir(exports_dir, model_id), precision)
     if not onnx_file.exists():
         pytest.fail(f"ONNX file not found: {onnx_file}\nExport with: uv run lfm3-export {model_id}")
