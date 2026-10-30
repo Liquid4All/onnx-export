@@ -9,11 +9,12 @@ Run with:
 
 import json
 import re
+import shutil
 
 import numpy as np
 import pytest
 
-from liquidonnx.lfm3_audio.config import load_config
+from liquidonnx.lfm3_audio.config import codec_dir, load_config
 from liquidonnx.lfm3_audio.weights import (
     check_shapes,
     codec_name,
@@ -165,3 +166,16 @@ def test_tiny_weights_load(tiny_checkpoint):
     codec = load_codec_weights(tiny_checkpoint, config)
     raw = load_file(str(tiny_checkpoint / "audio_tokenizer" / "model.safetensors"))
     np.testing.assert_array_equal(codec["istft.window"], raw["decoder.istft.window"].numpy())
+
+
+def test_tiny_codec_in_audio_detokenizer(tiny_checkpoint, tmp_path):
+    """The earlier layout's audio_detokenizer/ codec folder loads as audio_tokenizer/ does."""
+    shutil.copytree(tiny_checkpoint, tmp_path, dirs_exist_ok=True)
+    (tmp_path / "audio_tokenizer").rename(tmp_path / "audio_detokenizer")
+    assert codec_dir(tmp_path) == tmp_path / "audio_detokenizer"
+    config = load_config(tmp_path)
+    assert config == load_config(tiny_checkpoint)
+    codec, expected = (load_codec_weights(d, config) for d in (tmp_path, tiny_checkpoint))
+    assert codec.keys() == expected.keys()
+    for name, value in expected.items():
+        np.testing.assert_array_equal(codec[name], value)
