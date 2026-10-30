@@ -1,25 +1,33 @@
 """
 export_cli.check_checkpoint, which every LFM3 exporter runs on config.json before it creates its
 folder or downloads weights: the CLI of each family, the LFM2-based d1 models that no CLI exports,
-and quantized checkpoints (no download).
+and quantized checkpoints; and the pins of the real-model tests' default checkpoints (no download).
 
 Run with:
     uv run pytest tests/test_check_checkpoint.py -v
 """
 
+import argparse
 import json
 import pathlib
 import sys
+import types
 
 import huggingface_hub
 import pytest
 
 from liquidonnx.d1 import export as d1_export
+from liquidonnx.d1.config import REVISIONS as D1_REVISIONS
 from liquidonnx.export_cli import checkpoint_error
 from liquidonnx.lfm3 import export as text_export
+from liquidonnx.lfm3.session import REVISIONS as TEXT_REVISIONS
 from liquidonnx.lfm3_audio import export as audio_export
+from liquidonnx.lfm3_audio.config import REVISIONS as AUDIO_REVISIONS
 from liquidonnx.lfm3_omni import export as omni_export
 from liquidonnx.lfm3_vl import export as vl_export
+from liquidonnx.lfm3_vl.config import REVISIONS as VL_REVISIONS
+
+from .conftest import pytest_addoption
 
 ASSETS = pathlib.Path(__file__).parent / "test_lfm3_audio" / "assets"
 AUDIO = json.loads((ASSETS / "LFM3-Audio-2B" / "config.json").read_text())
@@ -167,3 +175,20 @@ def test_exporters_check_before_downloading(cli, module, tmp_path, monkeypatch, 
     assert capsys.readouterr().err.endswith(f"{cli}: error: {error}\n")
     assert fetched == [(model, "config.json", revision)]
     assert not (tmp_path / "exports").exists()
+
+
+def test_default_checkpoints_are_pinned():
+    """The real-model tests' checkpoint options default to pinned checkpoints: the family
+    conftests download REVISIONS.get(model), the Hub's main for an unpinned one."""
+    parser = argparse.ArgumentParser()
+    pytest_addoption(types.SimpleNamespace(addoption=parser.add_argument))
+    defaults = parser.parse_args([])
+    pins = {**TEXT_REVISIONS, **VL_REVISIONS, **AUDIO_REVISIONS, **D1_REVISIONS}
+    for option in (
+        "lfm3_model",
+        "lfm3_vl_model",
+        "lfm3_audio_model",
+        "lfm3_omni_model",
+        "d1_model",
+    ):
+        assert getattr(defaults, option) in pins, option

@@ -67,6 +67,7 @@ PRECISIONS = [
 # (model, test, parameters' id, host or "*") -> the evidence of a known failure
 # (helpers.expect_known_failure)
 LFM3, FRANCE = "LiquidAI/LFM3-1.7B", "The capital of France is"
+BASE = "LiquidAI/LFM3-1.7B-Base"
 ARM64_FP32 = (
     "the CPU EP's float32 arithmetic on arm64: decode logits 7.4e-4 to 8.7e-4 from PyTorch's, over "
     "5e-4, where x86-64 and CUDA stay under 2.8e-4; every step picks PyTorch's token (README 3.1b)"
@@ -80,12 +81,16 @@ INT4_TIES_AT_BOUND = NearBound(
     "worst step on this host, one fewer on another (README 3.1b)"
 )
 INT4_LONG = (
-    "int4 rounding over 600 steps: mean KL 2.5e-2 to 1.2e-1, 21 to 107 times the bound (4 times "
+    "int4 rounding over 600 steps: mean KL 2.1e-2 to 1.2e-1, 18 to 107 times the bound (4 times "
     "bf16 PyTorch's), with 0 to 2 of the reference's top 5 at some steps (README 3.1b)"
 )
 INT4_SAMPLED = (
     "int4 rounding: the sampled next-token probabilities' mean total variation is 3 to 16 times the "
     "bound, 4 times bf16 PyTorch's (README 3.1b)"
+)
+INT8_SAMPLED_X86 = NearBound(
+    "the CPU EP's int8 activations: LFM3-1.7B-Base's q8f16 mean total variation 8.2e-3 on x86-64, "
+    "8% over the bound, 4.8e-3 on arm64 and 8.4e-4 on CUDA (README 3.1b)"
 )
 KNOWN_FAILURES = {
     (LFM3, "test_decode_parity", f"{FRANCE}-fp32", "cpu-arm64"): ARM64_FP32,
@@ -100,12 +105,21 @@ KNOWN_FAILURES = {
     (LFM3, "test_decode_parity", "long-q4f32", "cuda"): INT4_TIES_AT_BOUND,
     (LFM3, "test_decode_parity", "long-q4f32", "cpu-x86_64"): INT4_TIES_AT_BOUND,
     (LFM3, "test_decode_parity", "long-q4f32", "cpu-arm64"): INT4_TIES,
-    **{(LFM3, "test_long_decode_parity", p, "*"): INT4_LONG for p in ("q4", "q4f16", "q4f32")},
+    (BASE, "test_decode_parity", "long-q4f16", "cuda"): INT4_TIES_AT_BOUND,
+    (BASE, "test_decode_parity", "long-q4f16", "cpu-x86_64"): INT4_TIES_AT_BOUND,
+    (BASE, "test_decode_parity", "long-q4f16", "cpu-arm64"): INT4_TIES,
     **{
-        (LFM3, "test_sampled_distribution", f"{sampling}-{p}", "*"): INT4_SAMPLED
+        (model, "test_long_decode_parity", p, "*"): INT4_LONG
+        for model in (LFM3, BASE)
+        for p in ("q4", "q4f16", "q4f32")
+    },
+    **{
+        (model, "test_sampled_distribution", f"{sampling}-{p}", "*"): INT4_SAMPLED
+        for model in (LFM3, BASE)
         for sampling in ("t0.1-k50-r1.1", "t0.7-p0.9")
         for p in ("q4", "q4f16", "q4f32")
     },
+    (BASE, "test_sampled_distribution", "t0.1-k50-r1.1-q8f16", "cpu-x86_64"): INT8_SAMPLED_X86,
 }
 
 
