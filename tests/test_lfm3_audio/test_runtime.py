@@ -23,6 +23,7 @@ Run with:
         --lfm3-audio-model LiquidAI/LFM3-Omni-2B
 """
 
+import copy
 import logging
 import pathlib
 import re
@@ -32,8 +33,10 @@ import pytest
 import torch
 from helpers import expect_known_failure, processed_probs
 
+from liquidonnx.lfm3.session import CachedDecoder
 from liquidonnx.lfm3_audio import infer as audio_infer
 from liquidonnx.lfm3_audio.session import (
+    Generation,
     ONNXAudioModel,
     load_audio,
     rng_orders,
@@ -43,7 +46,7 @@ from liquidonnx.lfm3_audio.session import (
 from liquidonnx.lfm3_omni import infer as omni_infer
 
 from .remote import SPEECH_SAMPLING, cached_slots, inject_orders, maskgit_orders, remote_class
-from .test_decoder import cosine, kl_divergence
+from .test_decoder import MAX_KL, cosine, kl_divergence
 from .tiny import ASSETS
 
 logger = logging.getLogger(__name__)
@@ -529,12 +532,18 @@ ONNX_CASES = {
 # (<|text_end|>), speech to its end-of-audio frame, then <|im_end|>; greedy speech may run to the
 # slot cap instead (README 3.1d)
 S2S_SCHEDULE = r"(T6 A12 )*T[1-6] A\d+( T1)?"
-# The rank below which assert_reference_path holds a bundle's S2S text (test_lfm3_omni's
-# test_image_answer holds image answers to the reference's top 5 too)
-TOP_K = 5
+# bf16 PyTorch's mean KL(reference || bf16) over the text of the reference's S2S answer, both
+# teacher-forced on it (test_s2s_bf16_floor): the highest of CUDA, x86-64 and arm64, arm64's
+S2S_BF16_FLOOR = {"LiquidAI/LFM3-Audio-2B": 5.6e-4, "LiquidAI/LFM3-Omni-2B": 7.0e-4}
 # (model, test, parameters' id, host or "*") -> the evidence of a known failure
 # (helpers.expect_known_failure)
-KNOWN_FAILURES: dict[tuple, str] = {}
+KNOWN_FAILURES = {
+    ("LiquidAI/LFM3-Omni-2B", test, "q4f16-s2s", "cuda"): (
+        "q4f16's KL over its own S2S answer, TF32 on or off: 0.116 over its 50 text slots, 1.39 at "
+        "one of them, over 0.1; q4 measures 0.055 to 0.063 (README 3.1e)"
+    )
+    for test in ("test_onnx_generation", "test_onnx_generation_tf32")
+}
 # Upper bounds of the TTS round trips' WER (SENTENCES pooled)
 MAX_ROUND_TRIP_WER = {p: 0.0 for p in PRECISIONS}
 
@@ -620,59 +629,95 @@ def onnx_cases(reference, reference_processor, slot_cache):
     return get
 
 
-@torch.no_grad()
-def assert_reference_path(reference, processor, waves, ids, generation, top_1: bool):
-    """The float32 reference, teacher-forced on a bundle's own S2S slots and speech codes, has each
-    of the bundle's text tokens in its top TOP_K, and with top_1 on top where it is confident
-    (entropy below 1 nat).
+def s2s_max_kl(model_id: str, precision: str) -> float:
+    """assert_reference_kl's bound: test_decoder's MAX_KL, but 4 times S2S_BF16_FLOOR for int8, as
+    test_lfm3_vl's bounds sit at about 4 times bf16 PyTorch's KL (MAX_KL's int8 bound is about
+    bf16 PyTorch's own KL over the S2S answer)."""
+    if precision in ("q8", "q8f16"):
+        return 4 * S2S_BF16_FLOOR[model_id]
+    return MAX_KL[precision]
 
-    A bundle's S2S answer can word its text differently from the reference's, as bf16 PyTorch
-    does: the speech codes read back differ from the first frames, and the text follows them, so
-    the reference reads the bundle's own codes. The top-k rule also holds a flip at a near-tie to
-    the reference's path, which the confident rule cannot see."""
-    device = next(reference.parameters()).device
+
+@torch.no_grad()
+def answer_logits(model, processor, waves, ids, generation, slots: list[int]) -> np.ndarray:
+    """model's logits [len(slots), V] at slots of an S2S answer, teacher-forced on the answer's own
+    slots and speech codes."""
+    device, dtype = next(model.parameters()).device, next(model.parameters()).dtype
     messages, continue_final = conversation("s2s")
     inputs = processor_inputs(processor, messages, continue_final, waves)
     tokens = generation.tokens
-    hidden = reference.model(
+    hidden = model.model(
         input_ids=torch.tensor([ids + tokens], device=device),
-        input_features=inputs["input_features"].to(device),
+        input_features=inputs["input_features"].to(device, dtype),
         feature_attention_mask=inputs["feature_attention_mask"].to(device),
         audio_out_codes=torch.as_tensor(
             generation.audio_codes[: tokens.count(AUDIO_OUT)], device=device
         ),
         use_cache=False,
     ).last_hidden_state[0, len(ids) - 1 : -1]
-    lp = torch.log_softmax(reference.lm_head(hidden).double(), -1).cpu().numpy()
-    confident = -(np.exp(lp) * lp).sum(-1) < 1.0
+    return model.lm_head(hidden[slots]).float().cpu().numpy()
+
+
+def assert_reference_kl(reference, processor, waves, ids, generation, logits, max_kl: float):
+    """The float32 reference, teacher-forced on an S2S answer's own slots and speech codes, scores
+    its text slots within max_kl: the mean KL(reference || logits), logits [T, V] being the scored
+    model's at each of the answer's T slots.
+
+    A bundle's S2S answer can word its text differently from the reference's, as bf16 PyTorch
+    does: the speech codes read back differ from the first frames, and the text follows them, so
+    the reference reads the answer's own codes. Ranks are not held: at a near-tie of the
+    reference's top two tokens any precision, bf16 PyTorch's included, takes either."""
+    tokens = generation.tokens
     text = [i for i, t in enumerate(tokens) if t != AUDIO_OUT]
-    rank = {i: int((lp[i] > lp[i, tokens[i]]).sum()) for i in text}
+    expected = answer_logits(reference, processor, waves, ids, generation, text)
+    kl = kl_divergence(expected, logits[text])
+    on_top = np.mean(expected.argmax(-1) == np.array(tokens)[text])
     logger.info(
-        f"  reference path: {sum(r == 0 for r in rank.values())}/{len(text)} text slots on top, "
-        f"worst rank {max(rank.values(), default=0)}, "
-        f"{sum(confident[i] for i in text)} confident"
+        f"  KL(reference || answer) over {len(text)} text slots: mean {kl.mean():.2e} (bound "
+        f"{max_kl:.2e}), max {kl.max():.2e} at slot {text[kl.argmax()]}; {on_top:.0%} on the "
+        f"reference's top token"
     )
-    off_path = [i for i in text if rank[i] >= TOP_K]
-    assert not off_path, f"text slots outside the reference's top {TOP_K}: {off_path}"
-    flips = [i for i in text if top_1 and confident[i] and rank[i] > 0]
-    assert not flips, f"confident text slots where the bundle left the reference's top: {flips}"
+    assert kl.mean() < max_kl
+
+
+def generate_with_logits(model, ids, audio_features, seed: int, max_new_tokens: int):
+    """(model's greedy generation of ids with rng_orders(seed), end-of-audio frames kept, and its
+    decoder's last logits [T, V] at each of its T slots, which a text slot's token is chosen
+    from)."""
+    logits, step = [], CachedDecoder.step
+
+    def record(decoder, *args, **kwargs):
+        out = step(decoder, *args, **kwargs)
+        logits.append(np.asarray(out, dtype=np.float32)[0, -1])
+        return out
+
+    # on the class: a patched instance would hold itself in a reference cycle, keeping a bundle's
+    # sessions after onnx_models drops it
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(CachedDecoder, "step", record)
+        generation = model.generate_ids(
+            ids,
+            audio_features,
+            max_new_tokens=max_new_tokens,
+            orders=rng_orders(seed),
+            return_audio_eos=True,
+        )
+    # the prefill's logits choose the first slot, and every slot but the last steps once
+    assert len(logits) == len(generation.tokens)
+    return generation, np.stack(logits)
 
 
 def onnx_generation(model, onnx_cases, case: str):
-    """The bundle's greedy generation of an ONNX_CASES case, with the reference's orders."""
+    """The bundle's greedy generation of an ONNX_CASES case, with the reference's orders, and its
+    logits at each slot (generate_with_logits)."""
     kind, _, seed = ONNX_CASES[case]
     waves, ids, _, _ = onnx_cases(case)
-    return model.generate_ids(
-        ids,
-        model.encode_audio(waves) if waves else None,
-        max_new_tokens=GENERATION[kind],
-        orders=rng_orders(seed),
-        return_audio_eos=True,
-    )
+    features = model.encode_audio(waves) if waves else None
+    return generate_with_logits(model, ids, features, seed, GENERATION[kind])
 
 
 def assert_generation(
-    generation, model, onnx_cases, reference, reference_processor, model_id, precision, case
+    generation, logits, model, onnx_cases, reference, reference_processor, model_id, precision, case
 ):
     """test_onnx_generation's rules, against the reference's slots of the case."""
     kind, _, _ = ONNX_CASES[case]
@@ -704,8 +749,8 @@ def assert_generation(
     elif kind == "tts":
         assert (generation.audio_codes[-1] == EOS_CODE).all() and generation.tokens[-1] == IM_END
     else:
-        top_1 = not precision.startswith("q4")
-        assert_reference_path(reference, reference_processor, waves, ids, generation, top_1)
+        max_kl = s2s_max_kl(model_id, precision)
+        assert_reference_kl(reference, reference_processor, waves, ids, generation, logits, max_kl)
 
 
 # precision outermost: onnx_models holds one bundle at a time
@@ -717,17 +762,41 @@ def test_onnx_generation(
     """Greedy generation with injected orders through the bundle's four graphs: fp32 gives the
     reference's slots exactly; the others the reference's ASR transcript, TTS speech that ends,
     and S2S answers in S2S_SCHEDULE with speech, whose turn ends only after an end-of-audio frame,
-    with text on the reference's path (assert_reference_path; top-1 at confident slots but for
-    int4). The speech codes fed back diverge from the first frames, and the woodworks S2S answer
-    can flip at a near-tie early on (bf16 PyTorch's does too), so its words and whether its speech
-    ends within the slot cap follow the precision, as they follow the MaskGIT order seed in
-    float32 and bf16 PyTorch (README 3.1d)."""
+    with text the reference scores within s2s_max_kl (assert_reference_kl). The speech codes fed
+    back diverge from the first frames, and the woodworks S2S answer can flip at a near-tie early
+    on (bf16 PyTorch's does too), so its words and whether its speech ends within the slot cap
+    follow the precision, as they follow the MaskGIT order seed in float32 and bf16 PyTorch
+    (README 3.1d)."""
     expect_known_failure(request, KNOWN_FAILURES, model_id, ep)
     model = onnx_models(precision)
-    generation = onnx_generation(model, onnx_cases, case)
+    generation, step_logits = onnx_generation(model, onnx_cases, case)
     assert_generation(
-        generation, model, onnx_cases, reference, reference_processor, model_id, precision, case
+        generation,
+        step_logits,
+        model,
+        onnx_cases,
+        reference,
+        reference_processor,
+        model_id,
+        precision,
+        case,
     )
+
+
+@pytest.mark.long
+def test_s2s_bf16_floor(onnx_cases, reference, reference_processor, model_id):
+    """bf16 PyTorch (a bfloat16 copy of the reference), teacher-forced on the reference's S2S
+    answer, scored as test_onnx_generation scores a bundle's. S2S_BF16_FLOOR, the floor of the int8
+    bounds, is the highest this measures on CUDA, x86-64 and arm64: bf16's arithmetic differs
+    between them, and between CUDA processes, and through a few near-tie slots moves the mean by
+    up to 2.1 times. Not on bf16 PyTorch's own greedy answer, which changes from run to run on CUDA."""
+    waves, ids, tokens, frames = onnx_cases("s2s")
+    answer = Generation(tokens, frames)
+    bf16 = copy.deepcopy(reference).to(torch.bfloat16)
+    logits = answer_logits(bf16, reference_processor, waves, ids, answer, list(range(len(tokens))))
+    del bf16
+    max_kl = s2s_max_kl(model_id, "q8")
+    assert_reference_kl(reference, reference_processor, waves, ids, answer, logits, max_kl)
 
 
 # The bundles of the CUDA EP (fp32 and the fp16-activation ones), run as lfm3-audio-infer and
@@ -761,7 +830,9 @@ def test_onnx_generation_tf32(
         for model, feats in zip((off, on), features, strict=True)
     ]
     kl = float(kl_divergence(*logits))
-    generation_off, generation = (onnx_generation(model, onnx_cases, case) for model in (off, on))
+    (generation_off, _), (generation, step_logits) = (
+        onnx_generation(model, onnx_cases, case) for model in (off, on)
+    )
 
     message = f"  {precision} {case} TF32 on vs off: prompt KL {kl:.2e}"
     if waves:
@@ -785,7 +856,15 @@ def test_onnx_generation_tf32(
     )
     assert kl <= TF32_MAX_KL[precision]
     assert_generation(
-        generation, on, onnx_cases, reference, reference_processor, model_id, precision, case
+        generation,
+        step_logits,
+        on,
+        onnx_cases,
+        reference,
+        reference_processor,
+        model_id,
+        precision,
+        case,
     )
     if tokens_off[-1] == IM_END:
         assert tokens[-1] == IM_END, "TF32 on runs to the slot cap where TF32 off ends the turn"
