@@ -116,6 +116,28 @@ def beeps(rate: int = 16000) -> np.ndarray:
     return clip
 
 
+VIDEO_QUESTIONS = {
+    "cat": {"type": "noul", "instructions": "Is there a cat in the video?"},
+    "dog": {"type": "noul", "instructions": "Is there a dog in the video?"},
+    "cats": {
+        "type": "number",
+        "instructions": "How many cats are there?",
+        "range": [0, 10],
+        "step": 1,
+    },
+}
+
+
+def pan(fps: float = 2.0) -> dict:
+    """8 frames of a pan across the cats picture (4 temporal patches), decoded, with their fps:
+    a video file would need torchcodec."""
+    from PIL import Image
+
+    image = np.asarray(Image.open(cats()).convert("RGB"))  # [480, 640, 3]
+    frames = np.stack([image[:, x : x + 480] for x in range(0, 160, 20)])  # [8, 480, 480, 3]
+    return {"type": "video", "video": frames, "fps": fps}
+
+
 def requests(model_id: str) -> dict[str, list[tuple]]:
     """name -> (state, questions, media) requests of one system_one_batch call; the clips for
     d1-Omni only."""
@@ -126,6 +148,7 @@ def requests(model_id: str) -> dict[str, list[tuple]]:
         "invoice": [(*INVOICE, None)],
         "parcels": [(text, {"team": TEAM}, None) for text in PARCELS],
         "picture": [(None, PICTURE_QUESTIONS, [Image.open(cats())])],
+        "video": [(None, VIDEO_QUESTIONS, [pan()])],
     }
     if "omni" in model_id.lower():
         clip = {"type": "audio", "audio": beeps(), "sampling_rate": 16000}

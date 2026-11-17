@@ -63,5 +63,6 @@ uv run pytest tests/test_lfm3/test_decoder.py -v -k "q4 and not q4f"  # LFM3-1.7
 uv run pytest tests/test_lfm3_vl/test_decoder.py -v -k "q4 and not q4f16"  # LFM3-VL-2B, README 3.1c
 uv run pytest tests/test_lfm3_audio/test_decoder.py -v -k "q4 and not q4f16"  # LFM3-Audio-2B, README 3.1d
 uv run pytest tests/test_d1/test_answers.py -v --d1-model LiquidAI/d1-2B -k q4  # d1, README 3.1f
+uv run pytest tests/test_d1/test_batching.py -v --d1-model LiquidAI/d1-2B -k q4  # d1 batched rows
 uv run pytest tests/test_lfm3_omni/test_decoder.py -v -k q4  # LFM3-Omni-2B, README 3.1e
 ```

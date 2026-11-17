@@ -23,7 +23,7 @@ from .conftest import requests
 
 logger = logging.getLogger(__name__)
 
-NAMES = ["ticket", "invoice", "parcels", "picture", "clip", "speech"]
+NAMES = ["ticket", "invoice", "parcels", "picture", "video", "clip", "speech"]
 # Keys whose values are the answer itself, compared exactly
 EXACT = {"choice", "choices", "score", "number", "interval", "text", "span", "path", "date"}
 EDGES = {"top", "bottom", "left", "right"}

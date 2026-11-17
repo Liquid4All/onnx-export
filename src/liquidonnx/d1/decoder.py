@@ -7,7 +7,7 @@ decoder.onnx
 
     inputs
       input_ids       [B, S]   int64     the state, then up to d1_set_size questions (pack_set)
-      attention_mask  [B, S]   int64     all ones (the session runs one row at a time)
+      attention_mask  [B, S]   int64     1 on a row's tokens, 0 on its right padding
       position_ids    [B, S]   int64     0..S-1
       image_features  [Ni, H]  float32   vision_encoder.onnx rows, prompt order
       video_features  [Nv, H]  float32

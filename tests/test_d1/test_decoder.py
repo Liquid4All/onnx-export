@@ -23,7 +23,7 @@ from .conftest import requests
 
 logger = logging.getLogger(__name__)
 
-NAMES = ["ticket", "invoice", "parcels", "picture", "clip", "speech"]
+NAMES = ["ticket", "invoice", "parcels", "picture", "video", "clip", "speech"]
 # (model, test, parameters' id, host or "*") -> the evidence of a known failure
 # (helpers.expect_known_failure)
 D1, D1_OMNI = "LiquidAI/d1-2B", "LiquidAI/d1-Omni-2B"

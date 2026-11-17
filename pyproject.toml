@@ -60,6 +60,7 @@ lfm3-omni-infer = "liquidonnx.lfm3_omni.infer:main"
 # d1 one-pass decision model tools
 d1-export = "liquidonnx.d1.export:main"
 d1-infer = "liquidonnx.d1.infer:main"
+d1-bench = "liquidonnx.d1.benchmark:main"
 
 [build-system]
 requires = ["hatchling"]

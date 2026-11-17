@@ -52,6 +52,12 @@ def main():
         help="default: q4f16, fp16 or q8f16 on CUDA, q4 or q8 on CPU (the first one exported)",
     )
     parser.add_argument("--set-size", type=int, help="Questions read together (d1_set_size)")
+    parser.add_argument(
+        "--token-budget",
+        type=int,
+        help="Batch the request's rows into forwards of at most this many padded tokens "
+        "(rows x longest row); default: one row a forward",
+    )
     parser.add_argument("--repeat", type=int, default=0, help="Timed calls after the first")
     parser.add_argument("--cpu", action="store_true", help="Force CPU execution (skip CUDA)")
     parser.add_argument("--no-tf32", action="store_true", help="Keep CUDA fp32 math in fp32")
@@ -62,7 +68,14 @@ def main():
     state = request.get("state") if args.state is None else args.state
     media = request.get("media", []) + [media_item(path) for path in args.media]
     ep = default_ep(args.cpu)
-    model = load(args.model, args.precision, ep, tf32=not args.no_tf32, set_size=args.set_size)
+    model = load(
+        args.model,
+        args.precision,
+        ep,
+        tf32=not args.no_tf32,
+        set_size=args.set_size,
+        token_budget=args.token_budget,
+    )
     logger.info(f"{args.model}: {model.precision} on {ep}")
 
     start = time.perf_counter()

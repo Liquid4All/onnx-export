@@ -7,11 +7,18 @@ forward: question validation, prompts, set packing (attention.pack_set), answer 
 reads, readouts, calibration and typed answers (runner.SlotReader, api.SystemOneApi). Its
 SlotReader runs under any engine that gives `_batches` and `_slot_logits`; OrtSystemOne's:
 
-    _batches      one sequence a forward (no right padding)
-    _slot_logits  the vision and audio encoders over the row's processor outputs, then the decoder
-                  with question_ids from the packed row: log-softmax of the slot logits, and
-                  pointer.read_logits over hidden_states for the read slots, as slots.slot_logits
-                  does over the PyTorch model's last hidden state
+    _batches      one sequence a forward, or with token_budget the checkpoint's own batches
+                  (SystemOne._batches): right-padded rows of at most token_budget padded tokens,
+                  split where their set mask would pass MASK_ELEMENTS
+    _slot_logits  the vision and audio encoders over each row's processor outputs, then the
+                  decoder over the batch's right-padded rows with question_ids from the packed
+                  rows: log-softmax of the slot logits, and pointer.read_logits over
+                  hidden_states for the read slots, as slots.slot_logits does over the PyTorch
+                  model's last hidden state
+
+A padded position is no key of a real one: the causal layers (convolutions, sliding attention)
+read leftward and the padding is on the right, and the set mask drops keys off attention_mask
+(d1.decoder.build_set_bias). The padded positions' own outputs are never read.
 
 Everything else (run, the batched readouts) is the checkpoint's SystemOne's. Pictures and audio go
 through the checkpoint's processor (trust_remote_code on the export folder).
@@ -45,6 +52,9 @@ BUNDLES = {
     }
     for precision, (decoder, vision) in VL_BUNDLES.items()
 }
+# The set mask's elements in one forward (rows x longest row²), 1 GiB in float32: a batch
+# over it is split
+MASK_ELEMENTS = 2**28
 HOST_MODULES = ("api", "calibration", "lfm3", "pointer", "prompt", "runner")
 
 
@@ -99,12 +109,19 @@ def load(
     ep: str | None = None,
     tf32: bool = True,
     set_size: int | None = None,
+    token_budget: int | None = None,
 ):
     """The folder's OrtSystemOne: system_one(state, questions, media) and system_one_batch as the
     checkpoint's model has them. precision: a BUNDLES key, by default the first exported one of
     PREFERRED for ep (CUDA when available). set_size: questions packed after one state (the
-    checkpoint's d1_set_size by default)."""
-    return engine_class(host_code(model_dir))(model_dir, precision, ep, tf32, set_size)
+    checkpoint's d1_set_size by default). token_budget: the padded tokens (rows x longest row) of
+    one forward, as the checkpoint's SystemOne batches a call's rows; None runs one row a forward.
+    The set mask takes rows x longest row² floats (d1.decoder): a batch over MASK_ELEMENTS of them
+    is split."""
+    if token_budget is not None and token_budget < 1:
+        raise ValueError(f"token_budget must be positive, got {token_budget}")
+    engine = engine_class(host_code(model_dir))
+    return engine(model_dir, precision, ep, tf32, set_size, token_budget)
 
 
 def engine_class(host: types.SimpleNamespace) -> type:
@@ -117,7 +134,7 @@ def engine_class(host: types.SimpleNamespace) -> type:
         run = runner.SystemOne.run
         _readouts = runner.SystemOne._readouts
 
-        def __init__(self, model_dir, precision, ep, tf32, set_size):
+        def __init__(self, model_dir, precision, ep, tf32, set_size, token_budget=None):
             """What SystemOne.__init__ sets, from the export folder: tokenizer, answer lead,
             calibration, prompt styles and the config's d1_* settings (_serve)."""
             self.model_dir = pathlib.Path(model_dir)
@@ -135,6 +152,7 @@ def engine_class(host: types.SimpleNamespace) -> type:
             self.system, self.option_style = host.prompt.DEFAULT_SYSTEM, "desc"
             self._serve(types.SimpleNamespace(**raw), set_size=set_size)
             self.processor, self.revision = None, None
+            self.token_budget = token_budget
             self.load_sessions(precision, ep or default_ep(), tf32)
 
         def load_sessions(self, precision: str | None, ep: str, tf32: bool):
@@ -157,9 +175,16 @@ def engine_class(host: types.SimpleNamespace) -> type:
             return runner.auto_processor(str(self.model_dir))
 
         def _batches(self, seqs: list[tuple]) -> list[list[int]]:
-            # shortcut: one row a forward; the graph's GroupQueryAttention mask assumes no
-            # padding (LFM3Builder), so batching right-padded rows needs that validated first
-            return [[j] for j in range(len(seqs))]
+            if self.token_budget is None:
+                return [[j] for j in range(len(seqs))]
+            batches = []
+            for batch in runner.SystemOne._batches(self, seqs):  # each shortest row first
+                batches.append([])
+                for j in batch:
+                    if (len(batches[-1]) + 1) * len(seqs[j][2]) ** 2 > MASK_ELEMENTS:
+                        batches.append([])
+                    batches[-1].append(j)
+            return list(filter(None, batches))
 
         def features(self, ids: list[int], inputs: dict) -> dict[str, np.ndarray]:
             """The decoder's feature inputs of one row's processor outputs, each checked against
@@ -203,19 +228,28 @@ def engine_class(host: types.SimpleNamespace) -> type:
             return out
 
         def _slot_logits(self, seqs: list[tuple], batch: list[int], slots: list[tuple], pointer):
-            """The row's code slots' log-probabilities over the vocabulary, and its read slots'
+            """The batch's code slots' log-probabilities over the vocabulary, and its read slots'
             position logits (pointer.read_logits), as SystemOne._slot_logits gives them."""
-            [b] = batch
-            _, _, ids, _, question, _, inputs = seqs[b]
-            n = len(ids)
-            positions = [s[3] for s in slots]
+            rows = [seqs[b] for b in batch]
+            B, S, H = len(rows), max(len(row[2]) for row in rows), self.config.language.hidden_size
+            ids = np.full((B, S), self.tokenizer.pad_token_id or 0, dtype=np.int64)
+            mask = np.zeros((B, S), dtype=np.int64)
+            question = np.full((B, S), -1, dtype=np.int64)  # padding as SystemOne marks it
+            features = []
+            for r, (_, _, row_ids, _, row_question, _, inputs) in enumerate(rows):
+                n = len(row_ids)
+                ids[r, :n], mask[r, :n], question[r, :n] = row_ids, 1, row_question
+                features.append(self.features(row_ids, inputs))
+            # flat positions b * S + s of the slots (row in the batch, ..., position)
+            positions = [s[0] * S + s[3] for s in slots]
             feed = {
-                "input_ids": np.array([ids], dtype=np.int64),
-                "attention_mask": np.ones((1, n), dtype=np.int64),
-                "position_ids": np.arange(n, dtype=np.int64)[None],
-                "question_ids": np.array([question], dtype=np.int64),
+                "input_ids": ids,
+                "attention_mask": mask,
+                "position_ids": np.tile(np.arange(S, dtype=np.int64), (B, 1)),
+                "question_ids": question,
                 "slot_positions": np.array(positions, dtype=np.int64),
-                **self.features(ids, inputs),
+                # the decoder fills the placeholders of the flattened rows in order
+                **{name: np.concatenate([f[name] for f in features]) for name in features[0]},
             }
             logits, hidden = self.sessions["decoder"].run(["logits", "hidden_states"], feed)
             codes = torch.from_numpy(logits)
@@ -224,7 +258,8 @@ def engine_class(host: types.SimpleNamespace) -> type:
                 codes = codes[pointer["code_slots"]]
                 hidden = torch.from_numpy(hidden)
                 states = hidden[pointer["rows"], : pointer["width"]]
-                reads = host.pointer.read_logits(hidden[0, positions], states, pointer)
+                # [B, S, H] → [B*S, H] → [N, H]
+                reads = host.pointer.read_logits(hidden.reshape(-1, H)[positions], states, pointer)
             return codes - torch.logsumexp(codes, dim=-1, keepdim=True), reads
 
     return OrtSystemOne
