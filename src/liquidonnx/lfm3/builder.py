@@ -502,8 +502,9 @@ class LFM3Builder(ONNXBuilderBase):
         - Decode 1:  cur_len=11, seqlens_k=10 (processing 1 token, 10 cached)
         - Decode 2:  cur_len=12, seqlens_k=11 (processing 1 token, 11 cached)
 
-        Note: This assumes attention_mask is always all-ones (no padding).
-        If padding were introduced, this calculation would be incorrect.
+        Note: This assumes a row's attention_mask is all-ones up to its length. Right-padded rows
+        without a past (d1.session's batches) keep it correct, each row's seqlens_k its own
+        length - 1; left padding, or padded rows over a KV cache, would not.
         """
         # Community path prefix for attn_mask preprocessing
         mask_prefix = "/model/attn_mask_reformat/attn_mask_subgraph"
